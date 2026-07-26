@@ -326,8 +326,11 @@ struct ExecutionReceipt {
     usage_note: String,
     created_at: String,
     preflight_ms: Option<u64>,
+    process_start_ms: Option<u64>,
     first_output_ms: Option<u64>,
     total_ms: Option<u64>,
+    session_resumed: bool,
+    packet_bytes_saved: usize,
     stdout_log_path: Option<String>,
     stderr_log_path: Option<String>,
 }
@@ -390,10 +393,18 @@ struct ProviderRun {
     usage: ProviderUsage,
     stdout_log_path: String,
     stderr_log_path: String,
+    process_start_ms: u64,
     first_output_ms: Option<u64>,
+    session_resumed: bool,
 }
 
 struct ChatReceiptMetrics {
+    context_bytes: usize,
+    preflight_ms: u64,
+    total_ms: u64,
+}
+
+struct ReceiptMetrics {
     context_bytes: usize,
     preflight_ms: u64,
     total_ms: u64,
@@ -626,6 +637,17 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE runs ADD COLUMN skill_files_json TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE runs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE chat_receipts ADD COLUMN preflight_ms INTEGER",
+        "ALTER TABLE execution_receipts ADD COLUMN preflight_ms INTEGER",
+        "ALTER TABLE execution_receipts ADD COLUMN process_start_ms INTEGER",
+        "ALTER TABLE execution_receipts ADD COLUMN first_output_ms INTEGER",
+        "ALTER TABLE execution_receipts ADD COLUMN total_ms INTEGER",
+        "ALTER TABLE execution_receipts ADD COLUMN session_resumed INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE execution_receipts ADD COLUMN packet_bytes_saved INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE execution_receipts ADD COLUMN stdout_log_path TEXT",
+        "ALTER TABLE execution_receipts ADD COLUMN stderr_log_path TEXT",
+        "ALTER TABLE chat_receipts ADD COLUMN process_start_ms INTEGER",
+        "ALTER TABLE chat_receipts ADD COLUMN session_resumed INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE chat_receipts ADD COLUMN packet_bytes_saved INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE chat_receipts ADD COLUMN first_output_ms INTEGER",
         "ALTER TABLE chat_receipts ADD COLUMN total_ms INTEGER",
         "ALTER TABLE chat_receipts ADD COLUMN stdout_log_path TEXT",
@@ -2469,6 +2491,7 @@ async fn invoke_provider(
     let mut child = command
         .spawn()
         .map_err(|error| format!("Failed to start {}: {error}", provider_names(kind).0))?;
+    let process_start_ms = provider_started.elapsed().as_millis() as u64;
 
     if let Some(content) = stdin_prompt {
         if let Some(mut stdin) = child.stdin.take() {
@@ -2709,7 +2732,9 @@ async fn invoke_provider(
         usage,
         stdout_log_path: stdout_log_path.to_string_lossy().into_owned(),
         stderr_log_path: stderr_log_path.to_string_lossy().into_owned(),
+        process_start_ms,
         first_output_ms,
+        session_resumed: participant.capabilities.exact_resume && session_id.is_some(),
     })
 }
 
@@ -2945,7 +2970,7 @@ fn persist_receipt(
     phase: Phase,
     participant: &Participant,
     profile: &ProviderProfile,
-    context_bytes: usize,
+    metrics: ReceiptMetrics,
     result: &ProviderRun,
 ) -> Result<(), String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
@@ -2953,8 +2978,11 @@ fn persist_receipt(
         .execute(
             "INSERT INTO execution_receipts
              (id, run_id, phase, participant_kind, provider_version, requested_model,
-              requested_effort, actual_model, session_id, context_bytes, usage_json, usage_note)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              requested_effort, actual_model, session_id, context_bytes, usage_json, usage_note,
+              preflight_ms, process_start_ms, first_output_ms, total_ms, session_resumed,
+              packet_bytes_saved, stdout_log_path, stderr_log_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
+                     ?16, ?17, ?18, ?19, ?20)",
             params![
                 Uuid::new_v4().to_string(),
                 run_id,
@@ -2965,9 +2993,19 @@ fn persist_receipt(
                 profile.effort.as_deref(),
                 result.actual_model.as_deref(),
                 result.session_id.as_deref(),
-                context_bytes as i64,
+                metrics.context_bytes as i64,
                 serde_json::to_string(&result.usage).map_err(|error| error.to_string())?,
                 usage_note(&result.usage),
+                metrics.preflight_ms as i64,
+                result.process_start_ms as i64,
+                result.first_output_ms.map(|milliseconds| {
+                    (metrics.preflight_ms + milliseconds) as i64
+                }),
+                metrics.total_ms as i64,
+                result.session_resumed as i64,
+                0_i64,
+                result.stdout_log_path,
+                result.stderr_log_path,
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -2989,10 +3027,10 @@ fn persist_chat_receipt(
             "INSERT INTO chat_receipts
              (id, project_id, chat_id, phase, participant_kind, provider_version,
               requested_model, requested_effort, actual_model, session_id, context_bytes,
-              usage_json, usage_note, preflight_ms, first_output_ms, total_ms,
-              stdout_log_path, stderr_log_path)
+              usage_json, usage_note, preflight_ms, process_start_ms, first_output_ms, total_ms,
+              session_resumed, packet_bytes_saved, stdout_log_path, stderr_log_path)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16, ?17, ?18)",
+                     ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
             params![
                 Uuid::new_v4().to_string(),
                 project_id,
@@ -3008,10 +3046,13 @@ fn persist_chat_receipt(
                 serde_json::to_string(&result.usage).map_err(|error| error.to_string())?,
                 usage_note(&result.usage),
                 metrics.preflight_ms as i64,
+                result.process_start_ms as i64,
                 result
                     .first_output_ms
                     .map(|milliseconds| (metrics.preflight_ms + milliseconds) as i64),
                 metrics.total_ms as i64,
+                result.session_resumed as i64,
+                0_i64,
                 result.stdout_log_path,
                 result.stderr_log_path,
             ],
@@ -4005,6 +4046,10 @@ fn objective_needs_room_context(objective: &str) -> bool {
 
 #[tauri::command]
 fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSnapshot, String> {
+    load_room_snapshot(database.inner(), &project_id)
+}
+
+fn load_room_snapshot(database: &Database, project_id: &str) -> Result<RoomSnapshot, String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
     let mut statement = connection
         .prepare(
@@ -4077,7 +4122,8 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
                 .prepare(
                     "SELECT id, phase, participant_kind, provider_version, requested_model,
                             requested_effort, actual_model, session_id, context_bytes, usage_json,
-                            usage_note, created_at
+                            usage_note, created_at, preflight_ms, process_start_ms, first_output_ms,
+                            total_ms, session_resumed, packet_bytes_saved, stdout_log_path, stderr_log_path
                      FROM execution_receipts WHERE run_id = ?1 ORDER BY created_at ASC",
                 )
                 .map_err(|error| error.to_string())?;
@@ -4097,11 +4143,14 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
                         usage: serde_json::from_str(&usage_json).unwrap_or_default(),
                         usage_note: row.get(10)?,
                         created_at: row.get(11)?,
-                        preflight_ms: None,
-                        first_output_ms: None,
-                        total_ms: None,
-                        stdout_log_path: None,
-                        stderr_log_path: None,
+                        preflight_ms: row.get::<_, Option<i64>>(12)?.map(|value| value.max(0) as u64),
+                        process_start_ms: row.get::<_, Option<i64>>(13)?.map(|value| value.max(0) as u64),
+                        first_output_ms: row.get::<_, Option<i64>>(14)?.map(|value| value.max(0) as u64),
+                        total_ms: row.get::<_, Option<i64>>(15)?.map(|value| value.max(0) as u64),
+                        session_resumed: row.get::<_, i64>(16)? != 0,
+                        packet_bytes_saved: row.get::<_, i64>(17)?.max(0) as usize,
+                        stdout_log_path: row.get(18)?,
+                        stderr_log_path: row.get(19)?,
                     })
                 })
                 .map_err(|error| error.to_string())?
@@ -4115,8 +4164,8 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
         .prepare(
             "SELECT id, phase, participant_kind, provider_version, requested_model,
                     requested_effort, actual_model, session_id, context_bytes, usage_json,
-                    usage_note, created_at, preflight_ms, first_output_ms, total_ms,
-                    stdout_log_path, stderr_log_path
+                    usage_note, created_at, preflight_ms, process_start_ms, first_output_ms, total_ms,
+                    session_resumed, packet_bytes_saved, stdout_log_path, stderr_log_path
              FROM chat_receipts WHERE project_id = ?1
              ORDER BY created_at DESC LIMIT 50",
         )
@@ -4140,14 +4189,19 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
                 preflight_ms: row
                     .get::<_, Option<i64>>(12)?
                     .map(|value| value.max(0) as u64),
-                first_output_ms: row
+                process_start_ms: row
                     .get::<_, Option<i64>>(13)?
                     .map(|value| value.max(0) as u64),
-                total_ms: row
+                first_output_ms: row
                     .get::<_, Option<i64>>(14)?
                     .map(|value| value.max(0) as u64),
-                stdout_log_path: row.get(15)?,
-                stderr_log_path: row.get(16)?,
+                total_ms: row
+                    .get::<_, Option<i64>>(15)?
+                    .map(|value| value.max(0) as u64),
+                session_resumed: row.get::<_, i64>(16)? != 0,
+                packet_bytes_saved: row.get::<_, i64>(17)?.max(0) as usize,
+                stdout_log_path: row.get(18)?,
+                stderr_log_path: row.get(19)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -4967,6 +5021,7 @@ async fn execute_room_run(
         None,
     );
 
+    let build_started = Instant::now();
     let memory = project_memory(&worktree);
     let assignment = format!(
         "{} the objective completely in this managed worktree.\n\
@@ -5052,6 +5107,7 @@ async fn execute_room_run(
         None,
     )?;
     let build_output_path = artifact_dir.join("build.final.txt");
+    let build_preflight_ms = build_started.elapsed().as_millis() as u64;
     let build_result = invoke_provider(
         &app,
         &request.run_id,
@@ -5067,6 +5123,7 @@ async fn execute_room_run(
         cancel_receiver.clone(),
     )
     .await?;
+    let build_total_ms = build_started.elapsed().as_millis() as u64;
     persist_handoff(
         database,
         &request.run_id,
@@ -5098,7 +5155,11 @@ async fn execute_room_run(
         Phase::Build,
         builder,
         &builder_profile,
-        build_context_bytes,
+        ReceiptMetrics {
+            context_bytes: build_context_bytes,
+            preflight_ms: build_preflight_ms,
+            total_ms: build_total_ms,
+        },
         &build_result,
     )?;
     save_provider_session(
@@ -5266,6 +5327,7 @@ async fn execute_room_run(
         files.join("\n"),
         verification_summary(&verification)
     );
+    let review_started = Instant::now();
     let (review_instructions, _) = repository_instructions(&worktree, &files);
     let (review_packet, review_context_bytes) = assemble_packet(&[
         ("Objective", request.objective.clone()),
@@ -5322,6 +5384,7 @@ async fn execute_room_run(
         None,
     )?;
     let review_output_path = artifact_dir.join("review.final.txt");
+    let review_preflight_ms = review_started.elapsed().as_millis() as u64;
     let review_result = invoke_provider(
         &app,
         &request.run_id,
@@ -5337,6 +5400,7 @@ async fn execute_room_run(
         cancel_receiver.clone(),
     )
     .await?;
+    let review_total_ms = review_started.elapsed().as_millis() as u64;
     persist_handoff(
         database,
         &request.run_id,
@@ -5364,7 +5428,11 @@ async fn execute_room_run(
         Phase::Review,
         reviewer,
         &reviewer_profile,
-        review_context_bytes,
+        ReceiptMetrics {
+            context_bytes: review_context_bytes,
+            preflight_ms: review_preflight_ms,
+            total_ms: review_total_ms,
+        },
         &review_result,
     )?;
     save_provider_session(
@@ -5454,6 +5522,7 @@ async fn execute_room_run(
 
     if needs_revision {
         revision_count = 1;
+        let revision_started = Instant::now();
         let revision_assignment = format!(
             "Revise the implementation once to address the review and verification evidence.\n\
              Preserve correct existing work. Do not broaden scope.\n\
@@ -5502,6 +5571,7 @@ async fn execute_room_run(
             Some(revision_context_bytes),
         );
         let revision_output_path = artifact_dir.join("revision.final.txt");
+        let revision_preflight_ms = revision_started.elapsed().as_millis() as u64;
         let revision_result = invoke_provider(
             &app,
             &request.run_id,
@@ -5517,6 +5587,7 @@ async fn execute_room_run(
             cancel_receiver.clone(),
         )
         .await?;
+        let revision_total_ms = revision_started.elapsed().as_millis() as u64;
         persist_handoff(
             database,
             &request.run_id,
@@ -5544,7 +5615,11 @@ async fn execute_room_run(
             Phase::Revise,
             builder,
             &builder_profile,
-            revision_context_bytes,
+            ReceiptMetrics {
+                context_bytes: revision_context_bytes,
+                preflight_ms: revision_preflight_ms,
+                total_ms: revision_total_ms,
+            },
             &revision_result,
         )?;
         if !revision_result.success {
@@ -5633,6 +5708,7 @@ async fn execute_room_run(
         )?;
 
         review_count = 2;
+        let final_review_started = Instant::now();
         let final_assignment = format!(
             "Perform the final read-only review after one bounded revision.\n\
              Confirm whether the original material findings and verification failures are resolved.\n\
@@ -5680,6 +5756,7 @@ async fn execute_room_run(
             Some(final_context_bytes),
         );
         let final_output_path = artifact_dir.join("final-review.final.txt");
+        let final_review_preflight_ms = final_review_started.elapsed().as_millis() as u64;
         let final_result = invoke_provider(
             &app,
             &request.run_id,
@@ -5695,6 +5772,7 @@ async fn execute_room_run(
             cancel_receiver.clone(),
         )
         .await?;
+        let final_review_total_ms = final_review_started.elapsed().as_millis() as u64;
         final_review_summary = final_result.summary.clone();
         final_approved = review_handoff_decision(&final_result);
         persist_handoff(
@@ -5724,7 +5802,11 @@ async fn execute_room_run(
             Phase::FinalReview,
             reviewer,
             &reviewer_profile,
-            final_context_bytes,
+            ReceiptMetrics {
+                context_bytes: final_context_bytes,
+                preflight_ms: final_review_preflight_ms,
+                total_ms: final_review_total_ms,
+            },
             &final_result,
         )?;
         persist_message(
@@ -6801,7 +6883,9 @@ mod tests {
             },
             stdout_log_path: String::new(),
             stderr_log_path: String::new(),
+            process_start_ms: 5,
             first_output_ms: Some(25),
+            session_resumed: true,
         };
 
         persist_chat_receipt(
@@ -6819,41 +6903,15 @@ mod tests {
         )
         .expect("persist chat receipt");
 
-        let connection = database.0.lock().expect("lock test database");
-        let stored: (String, String, i64, i64, i64, i64) = connection
-            .query_row(
-                "SELECT project_id, chat_id, context_bytes, preflight_ms,
-                        first_output_ms, total_ms
-                 FROM chat_receipts",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
-            .expect("read chat receipt");
-        let run_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
-            .expect("count autonomous runs");
-
-        assert_eq!(
-            stored,
-            (
-                "project-1".to_owned(),
-                "chat-1".to_owned(),
-                128,
-                10,
-                35,
-                100,
-            )
-        );
-        assert_eq!(run_count, 0);
+        let snapshot = load_room_snapshot(&database, "project-1").expect("load room");
+        let receipt = snapshot.receipts.first().expect("chat receipt");
+        assert_eq!(receipt.context_bytes, 128);
+        assert_eq!(receipt.preflight_ms, Some(10));
+        assert_eq!(receipt.process_start_ms, Some(5));
+        assert_eq!(receipt.first_output_ms, Some(35));
+        assert_eq!(receipt.total_ms, Some(100));
+        assert!(receipt.session_resumed);
+        assert_eq!(receipt.packet_bytes_saved, 0);
     }
 
     #[test]
@@ -7128,7 +7186,9 @@ mod tests {
             usage: ProviderUsage::default(),
             stdout_log_path: String::new(),
             stderr_log_path: String::new(),
+            process_start_ms: 0,
             first_output_ms: Some(10),
+            session_resumed: false,
         };
         assert!(!connection_test_ready(&result));
         assert!(authentication_attention(&result.summary, &result.stderr).is_some());

@@ -209,8 +209,11 @@ export interface ExecutionReceipt {
   usageNote: string;
   createdAt: string;
   preflightMs?: number;
+  processStartMs?: number;
   firstOutputMs?: number;
   totalMs?: number;
+  sessionResumed: boolean;
+  packetBytesSaved: number;
   stdoutLogPath?: string;
   stderrLogPath?: string;
 }

@@ -141,6 +141,10 @@ function latencyLabel(receipt: ExecutionReceipt): string | undefined {
   return [`${total}s total`, first, preflight].filter(Boolean).join(" Â· ");
 }
 
+function millisecondsLabel(value: number | undefined): string {
+  return value === undefined ? "—" : `${value.toLocaleString()} ms`;
+}
+
 function autonomyLabel(mode: Participant["capabilities"]["autonomyMode"]): string {
   return {
     "isolated-auto": "Isolated auto",
@@ -958,24 +962,37 @@ function Inspector({
           </div>
           <section className="receipt-list" aria-labelledby="receipt-title">
             <h2 id="receipt-title">Execution receipts</h2>
-            {receipts.length ? receipts.map((receipt) => (
-              <article className="receipt-card" key={receipt.id}>
-                <div>
-                  <strong>{receipt.phase} · {agentNames[receipt.participant]}</strong>
-                  <small>{receipt.actualModel ?? receipt.requestedModel ?? "Provider default"}{receipt.requestedEffort ? ` · ${receipt.requestedEffort} effort` : ""}</small>
-                </div>
-                <p>{usageLabel(receipt)}</p>
-                {latencyLabel(receipt) && <small>{latencyLabel(receipt)}</small>}
-                <small>{contextLabel(receipt.contextBytes)} sent. {receipt.usageNote}</small>
-                {(receipt.stdoutLogPath || receipt.stderrLogPath) && (
-                  <details className="receipt-diagnostics">
-                    <summary>Diagnostics</summary>
-                    {receipt.stdoutLogPath && <code>{receipt.stdoutLogPath}</code>}
-                    {receipt.stderrLogPath && <code>{receipt.stderrLogPath}</code>}
-                  </details>
-                )}
-              </article>
-            )) : (
+            {receipts.length ? (
+              <div className="evidence-table-wrap">
+                <table className="evidence-table">
+                  <thead>
+                    <tr>
+                      <th>Phase</th><th>Provider</th><th>Model</th><th>Context bytes</th><th>Saved bytes</th>
+                      <th>Preflight</th><th>Process start</th><th>First output</th><th>Total</th><th>Tokens</th><th>Cost</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {receipts.map((receipt) => (
+                      <tr key={receipt.id}>
+                        <td>{receipt.phase}</td>
+                        <td>{agentNames[receipt.participant]}</td>
+                        <td>{receipt.actualModel ?? receipt.requestedModel ?? "Provider default"}</td>
+                        <td>{receipt.contextBytes.toLocaleString()}</td>
+                        <td>{receipt.packetBytesSaved.toLocaleString()}</td>
+                        <td>{millisecondsLabel(receipt.preflightMs)}</td>
+                        <td>{millisecondsLabel(receipt.processStartMs)}</td>
+                        <td>{millisecondsLabel(receipt.firstOutputMs)}</td>
+                        <td>{millisecondsLabel(receipt.totalMs)}</td>
+                        <td>{[receipt.usage.inputTokens, receipt.usage.outputTokens].every((value) => value === undefined)
+                          ? "—"
+                          : `${receipt.usage.inputTokens?.toLocaleString() ?? "—"} in / ${receipt.usage.outputTokens?.toLocaleString() ?? "—"} out`}</td>
+                        <td>{receipt.usage.totalCostUsd === undefined ? "—" : `$${receipt.usage.totalCostUsd.toFixed(4)}`}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
               <p className="empty-state">Receipts appear after the first provider phase. They report run telemetry, not provider account quotas.</p>
             )}
           </section>
