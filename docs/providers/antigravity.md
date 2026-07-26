@@ -3,10 +3,11 @@
 ## Local proof
 
 - Antigravity Desktop: installed at `<user-home>\AppData\Local\Programs\antigravity\Antigravity.exe`
-- `agy` automation executable: not installed
-- Runtime state: unavailable
+- `agy` automation executable: version `1.1.7`, installed at `<user-home>\AppData\Local\agy\bin\agy.exe`
+- Live read-only smoke: `agy --print ... --sandbox --mode plan` returned the expected response
+- Runtime state: ready with declared capability downgrades
 
-The desktop application is not an automation CLI and is never invoked as a fallback.
+The desktop application is not substituted for the automation CLI. Agent Room probes `agy` on `PATH` and the installer location above, so a terminal restart is not required for discovery.
 
 ## Implemented command contract
 
@@ -17,8 +18,8 @@ The desktop application is not an automation CLI and is never invoked as a fallb
 - Review mode remains sandboxed and does not request permission bypass
 - Cancellation: terminate only the child process owned by the run
 
-The current documented CLI print surface is text-first. Agent Room does not claim streaming, structured output, or usage reporting until an installed version proves them. Provider-specific session history recovery remains out of scope.
+The installed CLI print surface is text-first. Agent Room does not claim streaming, structured output, or usage reporting because version `1.1.7` does not expose those capabilities in live help. Provider-specific session history recovery remains out of scope.
 
 ## Capability result
 
-When proven, `unattended-bypass`: permission bypass is a visible downgrade and is paired with Antigravity sandbox mode plus Agent Room's managed worktree boundary.
+`unattended-bypass`: live help proves print mode, sandboxing, permission bypass, and exact conversation resume. Permission bypass remains a visible downgrade and is paired with Antigravity sandbox mode plus Agent Room's managed worktree boundary.

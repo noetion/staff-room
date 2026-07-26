@@ -421,6 +421,7 @@ fn provider_fallback_paths(kind: &str) -> Vec<PathBuf> {
                 paths.push(root.join(".antigravity").join("bin").join("agy.exe"));
             }
             if let Some(root) = local_app_data.as_ref() {
+                paths.push(root.join("agy").join("bin").join("agy.exe"));
                 paths.push(root.join("antigravity").join("agy.exe"));
                 paths.push(
                     root.join("Programs")
@@ -3431,6 +3432,13 @@ mod tests {
         let participant = capabilities_for("cursor", false, None, "", "");
         assert!(!participant.non_interactive_turn);
         assert_eq!(participant.autonomy_mode, "unavailable");
+    }
+
+    #[test]
+    fn antigravity_probe_includes_the_cli_installer_location() {
+        assert!(provider_fallback_paths("antigravity")
+            .iter()
+            .any(|path| path.ends_with(Path::new("agy").join("bin").join("agy.exe"))));
     }
 
     #[test]

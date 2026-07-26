@@ -69,7 +69,7 @@ Provider policy:
 - Codex: `--ask-for-approval never` with `workspace-write` for build/revision and `read-only` for review.
 - Claude Code: `--permission-mode auto` when its live help proves that choice. Unsupported historical flags are not passed.
 - Cursor Agent: print mode with project permission rules; `--force` is used only inside the managed worktree boundary.
-- Antigravity: sandboxed print mode where supported. Exact resume and structured output remain downgraded until the installed version proves them.
+- Antigravity: installed `agy 1.1.7` proves sandboxed print mode, permission bypass, and exact conversation resume. Text-only output and unavailable usage reporting remain explicit downgrades.
 
 The probe executes `--version` and `--help`, plus provider subcommand help where needed. An executable being present is not sufficient for a ready state. Every flag required for the claimed autonomy mode must be present in current help output. Known Windows installer locations are checked after `PATH`, without substituting a desktop editor executable for its automation CLI.
 
