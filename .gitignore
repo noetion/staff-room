@@ -3,6 +3,7 @@ dist/
 target/
 src-tauri/target/
 .vite/
+.pnpm-store/
 *.log
 .agent-room/
 artifacts/
