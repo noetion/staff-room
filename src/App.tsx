@@ -46,6 +46,7 @@ import type {
   RunState,
   StoredRun,
   VerificationResult,
+  VerificationConfig,
 } from "./model";
 import { agentNames } from "./model";
 import {
@@ -54,6 +55,7 @@ import {
   isNativeApp,
   loadProviderProfiles,
   loadProjectSettings,
+  loadVerificationConfig,
   loadRoom,
   onRunEvent,
   projectActive,
@@ -67,6 +69,7 @@ import {
   quickEditStart,
   saveProviderProfile,
   saveProjectSettings,
+  saveVerificationConfig,
   startRoomChat,
   startRoomRun,
   stopRun,
@@ -838,6 +841,7 @@ function SettingsView({
   environment,
   profiles,
   projectSettings,
+  verificationConfig,
   savingProjectSettings,
   savingKind,
   refreshing,
@@ -852,10 +856,13 @@ function SettingsView({
   modelDiscoveryDetails,
   onRefreshModels,
   onAutonomousShipChange,
+  onVerificationConfigChange,
+  onSaveVerificationConfig,
 }: {
   environment: NativeEnvironment;
   profiles: ProviderProfile[];
   projectSettings: ProjectSettings;
+  verificationConfig: VerificationConfig;
   savingProjectSettings: boolean;
   savingKind?: AgentKind;
   refreshing: boolean;
@@ -870,6 +877,8 @@ function SettingsView({
   modelDiscoveryDetails: Partial<Record<AgentKind, string>>;
   onRefreshModels: (kind: AgentKind) => void;
   onAutonomousShipChange: (enabled: boolean) => void;
+  onVerificationConfigChange: (config: VerificationConfig) => void;
+  onSaveVerificationConfig: () => void;
 }) {
   return (
     <section className="utility-screen" aria-labelledby="settings-title">
@@ -901,6 +910,90 @@ function SettingsView({
           <span>{projectSettings.autonomousShipEnabled ? "Armed" : "Off"}</span>
         </label>
       </div>
+      <section className="verification-setting" aria-labelledby="verification-settings-title">
+        <div>
+          <strong id="verification-settings-title">Verification</strong>
+          <p>Commands are detected once when a repository is attached. Edit them here; they will not be replaced automatically.</p>
+        </div>
+        <label className="switch-control">
+          <input
+            type="checkbox"
+            checked={verificationConfig.enabled}
+            disabled={!native || savingProjectSettings}
+            onChange={(event) => onVerificationConfigChange({ ...verificationConfig, enabled: event.target.checked })}
+          />
+          <span>{verificationConfig.enabled ? "Enabled" : "Disabled"}</span>
+        </label>
+        <label className="verification-field">
+          <span>Prepare command</span>
+          <input
+            value={verificationConfig.prepare ?? ""}
+            disabled={!native || savingProjectSettings}
+            placeholder="Optional command before checks"
+            onChange={(event) => onVerificationConfigChange({ ...verificationConfig, prepare: event.target.value || undefined })}
+          />
+        </label>
+        <div className="verification-commands">
+          {verificationConfig.commands.map((command, index) => (
+            <div className="verification-command" key={`${command.label}-${index}`}>
+              <input
+                value={command.label}
+                aria-label={`Verification label ${index + 1}`}
+                disabled={!native || savingProjectSettings}
+                onChange={(event) => onVerificationConfigChange({
+                  ...verificationConfig,
+                  commands: verificationConfig.commands.map((value, valueIndex) => valueIndex === index ? { ...value, label: event.target.value } : value),
+                })}
+              />
+              <input
+                value={command.command}
+                aria-label={`Verification command ${index + 1}`}
+                disabled={!native || savingProjectSettings}
+                onChange={(event) => onVerificationConfigChange({
+                  ...verificationConfig,
+                  commands: verificationConfig.commands.map((value, valueIndex) => valueIndex === index ? { ...value, command: event.target.value } : value),
+                })}
+              />
+              <label className="switch-control">
+                <input
+                  type="checkbox"
+                  checked={command.enabled}
+                  disabled={!native || savingProjectSettings}
+                  onChange={(event) => onVerificationConfigChange({
+                    ...verificationConfig,
+                    commands: verificationConfig.commands.map((value, valueIndex) => valueIndex === index ? { ...value, enabled: event.target.checked } : value),
+                  })}
+                />
+                <span>Run</span>
+              </label>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={!native || savingProjectSettings}
+                onClick={() => onVerificationConfigChange({ ...verificationConfig, commands: verificationConfig.commands.filter((_, valueIndex) => valueIndex !== index) })}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+        <div className="verification-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={!native || savingProjectSettings || verificationConfig.commands.length >= 4}
+            onClick={() => onVerificationConfigChange({
+              ...verificationConfig,
+              commands: [...verificationConfig.commands, { label: "Project check", command: "", enabled: true }],
+            })}
+          >
+            Add check
+          </button>
+          <button type="button" className="primary-button" disabled={!native || savingProjectSettings} onClick={onSaveVerificationConfig}>
+            {savingProjectSettings ? "Saving…" : "Save verification"}
+          </button>
+        </div>
+      </section>
       <div className="settings-grid">
         {environment.participants.map((participant) => (
           <ProviderProfileCard
@@ -1186,6 +1279,10 @@ export function App() {
   const [projectSettings, setProjectSettings] = useState<ProjectSettings>({
     autonomousShipEnabled: false,
   });
+  const [verificationConfig, setVerificationConfig] = useState<VerificationConfig>({
+    enabled: true,
+    commands: [],
+  });
   const [savingProjectSettings, setSavingProjectSettings] = useState(false);
   const [modelCatalog, setModelCatalog] = useState<Partial<Record<AgentKind, string[]>>>({});
   const [modelDiscoveryDetails, setModelDiscoveryDetails] = useState<Partial<Record<AgentKind, string>>>({});
@@ -1229,10 +1326,11 @@ export function App() {
 
   async function activateProject(nextProject: Project, knownEnvironment?: NativeEnvironment) {
     const nextEnvironment = knownEnvironment ?? await getEnvironment();
-    const [snapshot, nextProfiles, nextSettings, nextProjects] = await Promise.all([
+    const [snapshot, nextProfiles, nextSettings, nextVerificationConfig, nextProjects] = await Promise.all([
       loadRoom(nextProject.id),
       loadProviderProfiles(nextProject.id),
       loadProjectSettings(nextProject.id),
+      loadVerificationConfig(nextProject.id),
       projectList(),
     ]);
     setProject(nextProject);
@@ -1243,6 +1341,7 @@ export function App() {
     setReceipts(snapshot.receipts);
     setProfiles(nextProfiles);
     setProjectSettings(nextSettings);
+    setVerificationConfig(nextVerificationConfig);
     setActiveView("rooms");
     setUiError("");
   }
@@ -1557,6 +1656,18 @@ export function App() {
     try {
       if (native) await saveProjectSettings(project.id, nextSettings);
       setProjectSettings(nextSettings);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingProjectSettings(false);
+    }
+  }
+
+  async function handleSaveVerificationConfig() {
+    setSavingProjectSettings(true);
+    setUiError("");
+    try {
+      if (native) await saveVerificationConfig(project.id, verificationConfig);
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2064,6 +2175,7 @@ export function App() {
             environment={environment}
             profiles={profiles}
             projectSettings={projectSettings}
+            verificationConfig={verificationConfig}
             savingProjectSettings={savingProjectSettings}
             savingKind={savingProfileKind}
             refreshing={refreshingProviders}
@@ -2078,6 +2190,8 @@ export function App() {
             modelDiscoveryDetails={modelDiscoveryDetails}
             onRefreshModels={handleRefreshModels}
             onAutonomousShipChange={handleAutonomousShipChange}
+            onVerificationConfigChange={setVerificationConfig}
+            onSaveVerificationConfig={handleSaveVerificationConfig}
           />
         ) : (
           <>

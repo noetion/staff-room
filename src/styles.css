@@ -169,6 +169,15 @@ kbd { border: 1px solid rgba(255,255,255,.1); border-bottom-color: rgba(255,255,
 .autonomy-setting { display: flex; align-items: center; justify-content: space-between; gap: 22px; max-width: 880px; margin-top: 14px; padding: 12px 14px; border: 1px solid rgba(155,216,185,.18); border-radius: 14px; background: rgba(155,216,185,.045); }
 .autonomy-setting strong { color: var(--text); font-size: 12px; }
 .autonomy-setting p { max-width: 650px; margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.verification-setting { display: grid; grid-template-columns: 1fr auto; gap: 10px 18px; max-width: 880px; margin-top: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 14px; background: rgba(255,255,255,.025); }
+.verification-setting strong { color: var(--text); font-size: 12px; }
+.verification-setting p { max-width: 650px; margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.verification-field, .verification-commands, .verification-actions { grid-column: 1 / -1; }
+.verification-field { display: grid; gap: 5px; color: var(--muted); font-size: 10px; }
+.verification-field input, .verification-command input { min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 7px 8px; color: var(--text); background: rgba(0,0,0,.16); font: inherit; }
+.verification-commands { display: grid; gap: 6px; }
+.verification-command { display: grid; grid-template-columns: minmax(110px, .45fr) minmax(180px, 1fr) auto auto; gap: 6px; align-items: center; }
+.verification-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .switch-control { display: flex; align-items: center; gap: 8px; color: var(--text); font-size: 11px; white-space: nowrap; cursor: pointer; }
 .switch-control input { width: 34px; height: 18px; accent-color: var(--mint); cursor: pointer; }
 .provider-profile-card { min-width: 0; padding-bottom: 10px; }
@@ -486,6 +495,7 @@ kbd { border: 1px solid rgba(255,255,255,.1); border-bottom-color: rgba(255,255,
 @media (max-width: 900px) {
   .utility-screen { padding-inline: 16px; }
   .settings-grid { grid-template-columns: 1fr; }
+  .verification-command { grid-template-columns: 1fr 1fr; }
 }
 
 @media (max-width: 620px) {

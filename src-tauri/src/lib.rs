@@ -158,6 +158,41 @@ struct VerificationResult {
     detail: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct VerificationCommand {
+    label: String,
+    command: String,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct VerificationConfig {
+    enabled: bool,
+    commands: Vec<VerificationCommand>,
+    prepare: Option<String>,
+}
+
+impl Default for VerificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            commands: Vec::new(),
+            prepare: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationConfigInput {
+    project_id: String,
+    enabled: bool,
+    commands: Vec<VerificationCommand>,
+    prepare: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StartRunResult {
@@ -640,6 +675,15 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(project_id) REFERENCES projects(id)
         );
 
+        CREATE TABLE IF NOT EXISTS verification_config (
+            project_id TEXT PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            commands_json TEXT NOT NULL,
+            prepare_command TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(project_id) REFERENCES projects(id)
+        );
+
         CREATE TABLE IF NOT EXISTS provider_connections (
             project_id TEXT NOT NULL,
             participant_kind TEXT NOT NULL,
@@ -769,6 +813,7 @@ const PROJECT_SCOPED_TABLES: &[&str] = &[
     "provider_profiles",
     "provider_route_profiles",
     "project_settings",
+    "verification_config",
     "provider_connections",
     "chat_receipts",
 ];
@@ -837,6 +882,7 @@ fn attach_project(database: &Database, path: &str) -> Result<Project, String> {
             params![project.id, project.name, project.goal, project.repository_path],
         )
         .map_err(|error| error.to_string())?;
+    ensure_verification_config(&connection, &id, &root)?;
     connection
         .execute(
             "INSERT INTO app_state (key, value) VALUES ('active_project_id', ?1)
@@ -845,6 +891,72 @@ fn attach_project(database: &Database, path: &str) -> Result<Project, String> {
         )
         .map_err(|error| error.to_string())?;
     active_project(&connection)?.ok_or_else(|| "Attached project could not be loaded.".to_owned())
+}
+
+fn detected_verification_config(repository: &Path) -> VerificationConfig {
+    let mut commands = Vec::new();
+    let mut prepare_steps = Vec::new();
+    let package = repository.join("package.json");
+    if package.is_file() {
+        if let Ok(contents) = std::fs::read_to_string(&package) {
+            if let Ok(value) = serde_json::from_str::<Value>(&contents) {
+                if let Some(scripts) = value.get("scripts").and_then(Value::as_object) {
+                    for script in ["test", "build", "lint"] {
+                        if scripts.contains_key(script) {
+                            commands.push(VerificationCommand {
+                                label: format!("npm {script}"),
+                                command: format!("npm run {script}"),
+                                enabled: true,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        prepare_steps.push(if repository.join("package-lock.json").is_file() {
+            "npm ci --prefer-offline".to_owned()
+        } else {
+            "npm install".to_owned()
+        });
+    }
+    if repository.join("src-tauri").join("Cargo.toml").is_file() {
+        commands.push(VerificationCommand {
+            label: "cargo check".to_owned(),
+            command: "cargo check --manifest-path src-tauri/Cargo.toml".to_owned(),
+            enabled: true,
+        });
+        prepare_steps.push("cargo fetch --locked --manifest-path src-tauri/Cargo.toml".to_owned());
+    } else if repository.join("Cargo.toml").is_file() {
+        commands.push(VerificationCommand {
+            label: "cargo check".to_owned(),
+            command: "cargo check".to_owned(),
+            enabled: true,
+        });
+        prepare_steps.push("cargo fetch --locked".to_owned());
+    }
+    commands.truncate(4);
+    VerificationConfig {
+        enabled: true,
+        commands,
+        prepare: (!prepare_steps.is_empty()).then(|| prepare_steps.join(" && ")),
+    }
+}
+
+fn ensure_verification_config(
+    connection: &Connection,
+    project_id: &str,
+    repository: &Path,
+) -> Result<(), String> {
+    let config = detected_verification_config(repository);
+    let commands = serde_json::to_string(&config.commands).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO verification_config (project_id, enabled, commands_json, prepare_command)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![project_id, i64::from(config.enabled), commands, config.prepare],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn project_row_counts(connection: &Connection) -> Result<Vec<(&'static str, i64)>, rusqlite::Error> {
@@ -3789,66 +3901,72 @@ fn commit_managed_changes(worktree: &Path, objective: &str) -> Result<bool, Stri
     Ok(true)
 }
 
-fn detect_verification(repository: &Path) -> Vec<(String, PathBuf, Vec<String>)> {
-    let mut commands = Vec::new();
-    let package = repository.join("package.json");
-    if package.is_file() {
-        if let Ok(contents) = std::fs::read_to_string(&package) {
-            if let Ok(value) = serde_json::from_str::<Value>(&contents) {
-                let scripts = value.get("scripts").and_then(Value::as_object);
-                let npm = find_executable(&["npm", "npm.cmd"]);
-                if let (Some(scripts), Some(npm)) = (scripts, npm) {
-                    for script in ["test", "build", "lint"] {
-                        if scripts.contains_key(script) {
-                            commands.push((
-                                format!("npm {script}"),
-                                npm.clone(),
-                                vec!["run".to_owned(), script.to_owned()],
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if repository.join("src-tauri").join("Cargo.toml").is_file() {
-        if let Some(cargo) = find_executable(&["cargo"]) {
-            commands.push((
-                "cargo check".to_owned(),
-                cargo,
-                vec![
-                    "check".to_owned(),
-                    "--manifest-path".to_owned(),
-                    "src-tauri/Cargo.toml".to_owned(),
-                ],
-            ));
-        }
-    } else if repository.join("Cargo.toml").is_file() {
-        if let Some(cargo) = find_executable(&["cargo"]) {
-            commands.push(("cargo check".to_owned(), cargo, vec!["check".to_owned()]));
-        }
-    }
-    commands.truncate(4);
-    commands
-}
-
 async fn run_verification(
     app: &AppHandle,
+    database: &Database,
+    project_id: &str,
     run_id: &str,
     repository: &Path,
     mut cancellation: watch::Receiver<bool>,
 ) -> Vec<VerificationResult> {
-    let commands = detect_verification(repository);
+    let config = match verification_config(database, project_id) {
+        Ok(config) => config,
+        Err(error) => {
+            return vec![VerificationResult {
+                label: "Project checks".to_owned(),
+                status: "unavailable".to_owned(),
+                detail: format!("Verification configuration could not be loaded: {error}"),
+            }]
+        }
+    };
+    if !config.enabled {
+        return vec![VerificationResult {
+            label: "Project checks".to_owned(),
+            status: "not-run".to_owned(),
+            detail: "Verification is disabled for this project.".to_owned(),
+        }];
+    }
+    let commands = config
+        .commands
+        .into_iter()
+        .filter(|command| command.enabled)
+        .collect::<Vec<_>>();
     if commands.is_empty() {
         return vec![VerificationResult {
             label: "Project checks".to_owned(),
             status: "not-run".to_owned(),
-            detail: "No supported verification commands were detected.".to_owned(),
+            detail: "No verification is configured for this project.".to_owned(),
         }];
     }
 
     let mut results = Vec::new();
-    for (label, executable, args) in commands {
+    if let Some(prepare) = config.prepare {
+        emit_event(
+            app,
+            run_id,
+            "phase",
+            "verify",
+            "preparing",
+            None,
+            "Preparing verification dependencies",
+            "Verification preparation is executed in the managed worktree.",
+            None,
+        );
+        let prepare_result = run_verification_command(
+            "Prepare dependencies",
+            &prepare,
+            repository,
+            &mut cancellation,
+            "unavailable",
+        )
+        .await;
+        let prepare_succeeded = prepare_result.status == "passed";
+        results.push(prepare_result);
+        if !prepare_succeeded || *cancellation.borrow() {
+            return results;
+        }
+    }
+    for command in commands {
         emit_event(
             app,
             run_id,
@@ -3856,66 +3974,20 @@ async fn run_verification(
             "verify",
             "verifying",
             None,
-            &format!("Running {label}"),
+            &format!("Running {}", command.label),
             "Verification is executed directly in the managed worktree.",
             None,
         );
-        let mut command = Command::new(executable);
-        apply_provider_environment(&mut command, repository);
-        command
-            .args(&args)
-            .current_dir(repository)
-            .kill_on_drop(true)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        match command.spawn() {
-            Ok(child) => {
-                let outcome = tokio::select! {
-                    output = child.wait_with_output() => output.ok(),
-                    _ = cancellation.changed() => None,
-                    _ = sleep(Duration::from_secs(10 * 60)) => None,
-                };
-                match outcome {
-                    Some(output) => {
-                        let combined = format!(
-                            "{}\n{}",
-                            String::from_utf8_lossy(&output.stdout),
-                            String::from_utf8_lossy(&output.stderr)
-                        );
-                        results.push(VerificationResult {
-                            label,
-                            status: if output.status.success() {
-                                "passed"
-                            } else {
-                                "failed"
-                            }
-                            .to_owned(),
-                            detail: truncate_utf8(combined.trim(), 3 * 1024),
-                        });
-                    }
-                    None => results.push(VerificationResult {
-                        label,
-                        status: if *cancellation.borrow() {
-                            "not-run"
-                        } else {
-                            "failed"
-                        }
-                        .to_owned(),
-                        detail: if *cancellation.borrow() {
-                            "Verification stopped with the run."
-                        } else {
-                            "Verification exceeded the 10 minute limit."
-                        }
-                        .to_owned(),
-                    }),
-                }
-            }
-            Err(error) => results.push(VerificationResult {
-                label,
-                status: "failed".to_owned(),
-                detail: format!("Failed to start verification: {error}"),
-            }),
-        }
+        results.push(
+            run_verification_command(
+                &command.label,
+                &command.command,
+                repository,
+                &mut cancellation,
+                "failed",
+            )
+            .await,
+        );
         if *cancellation.borrow() {
             break;
         }
@@ -3923,8 +3995,106 @@ async fn run_verification(
     results
 }
 
+async fn run_verification_command(
+    label: &str,
+    command_text: &str,
+    repository: &Path,
+    cancellation: &mut watch::Receiver<bool>,
+    failure_status: &str,
+) -> VerificationResult {
+    if let Some(tool) = command_text.split_whitespace().next() {
+        let candidates = match tool {
+            "npm" => vec!["npm", "npm.cmd"],
+            "cargo" => vec!["cargo"],
+            _ => Vec::new(),
+        };
+        if !candidates.is_empty() && find_executable(&candidates).is_none() {
+            return VerificationResult {
+                label: label.to_owned(),
+                status: "unavailable".to_owned(),
+                detail: format!("Required verification tool `{tool}` is not available."),
+            };
+        }
+    }
+    #[cfg(windows)]
+    let mut process = {
+        let mut process = Command::new("cmd");
+        process.args(["/C", command_text]);
+        process
+    };
+    #[cfg(not(windows))]
+    let mut process = {
+        let mut process = Command::new("sh");
+        process.args(["-lc", command_text]);
+        process
+    };
+    apply_provider_environment(&mut process, repository);
+    process
+        .current_dir(repository)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    match process.spawn() {
+        Ok(child) => {
+            let outcome = tokio::select! {
+                output = child.wait_with_output() => output.ok(),
+                _ = cancellation.changed() => None,
+                _ = sleep(Duration::from_secs(10 * 60)) => None,
+            };
+            match outcome {
+                Some(output) => {
+                    let combined = format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    VerificationResult {
+                        label: label.to_owned(),
+                        status: if output.status.success() {
+                            "passed"
+                        } else {
+                            failure_status
+                        }
+                        .to_owned(),
+                        detail: truncate_utf8(combined.trim(), 3 * 1024),
+                    }
+                }
+                None => VerificationResult {
+                    label: label.to_owned(),
+                    status: if *cancellation.borrow() {
+                        "not-run"
+                    } else {
+                        failure_status
+                    }
+                    .to_owned(),
+                    detail: if *cancellation.borrow() {
+                        "Verification stopped with the run."
+                    } else {
+                        "Verification exceeded the 10 minute limit."
+                    }
+                    .to_owned(),
+                },
+            }
+        }
+        Err(error) => VerificationResult {
+            label: label.to_owned(),
+            status: "unavailable".to_owned(),
+            detail: format!("Failed to start verification: {error}"),
+        },
+    }
+}
+
 fn verification_passed(results: &[VerificationResult]) -> bool {
-    !results.iter().any(|result| result.status == "failed")
+    results.iter().any(|result| result.status == "passed")
+        && !results
+            .iter()
+            .any(|result| matches!(result.status.as_str(), "failed" | "unavailable"))
+}
+
+fn verification_is_unconfigured(results: &[VerificationResult]) -> bool {
+    results.len() == 1
+        && results[0].label == "Project checks"
+        && results[0].status == "not-run"
 }
 
 fn verification_summary(results: &[VerificationResult]) -> String {
@@ -4301,6 +4471,81 @@ fn save_project_settings(
                 settings.project_id,
                 i64::from(settings.autonomous_ship_enabled)
             ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_verification_config(
+    database: State<'_, Database>,
+    project_id: String,
+) -> Result<VerificationConfig, String> {
+    verification_config(database.inner(), &project_id)
+}
+
+fn verification_config(database: &Database, project_id: &str) -> Result<VerificationConfig, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .query_row(
+            "SELECT enabled, commands_json, prepare_command FROM verification_config WHERE project_id = ?1",
+            [project_id],
+            |row| {
+                let commands_json: String = row.get(1)?;
+                let commands = serde_json::from_str(&commands_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        commands_json.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(VerificationConfig {
+                    enabled: row.get::<_, i64>(0)? != 0,
+                    commands,
+                    prepare: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+        .map(|config| config.unwrap_or_default())
+}
+
+#[tauri::command]
+fn save_verification_config(
+    database: State<'_, Database>,
+    config: VerificationConfigInput,
+) -> Result<(), String> {
+    let commands = config
+        .commands
+        .into_iter()
+        .filter_map(|command| {
+            let label = command.label.trim().to_owned();
+            let command_text = command.command.trim().to_owned();
+            (!label.is_empty() && !command_text.is_empty()).then_some(VerificationCommand {
+                label,
+                command: command_text,
+                enabled: command.enabled,
+            })
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+    let prepare = config.prepare.and_then(|command| {
+        let command = command.trim().to_owned();
+        (!command.is_empty()).then_some(command)
+    });
+    let commands = serde_json::to_string(&commands).map_err(|error| error.to_string())?;
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO verification_config (project_id, enabled, commands_json, prepare_command)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id) DO UPDATE SET
+               enabled = excluded.enabled,
+               commands_json = excluded.commands_json,
+               prepare_command = excluded.prepare_command,
+               updated_at = CURRENT_TIMESTAMP",
+            params![config.project_id, i64::from(config.enabled), commands, prepare],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -6019,8 +6264,15 @@ async fn execute_room_run(
         None,
         false,
     )?;
-    let mut verification =
-        run_verification(&app, &request.run_id, &worktree, cancel_receiver.clone()).await;
+    let mut verification = run_verification(
+        &app,
+        database,
+        &request.project_id,
+        &request.run_id,
+        &worktree,
+        cancel_receiver.clone(),
+    )
+    .await;
     if *cancel_receiver.borrow() {
         final_failure(
             &app,
@@ -6073,6 +6325,45 @@ async fn execute_room_run(
         &verification,
         Some(&git_status(&worktree)),
     )?;
+
+    if verification_is_unconfigured(&verification) {
+        let reason = verification[0].detail.clone();
+        final_failure(
+            &app,
+            database,
+            &request.project_id,
+            &request.run_id,
+            "waiting",
+            &reason,
+            Some(&worktree),
+            0,
+            0,
+            max_context_bytes,
+        )?;
+        runtime.cancellations.lock().await.remove(&request.run_id);
+        return Ok(StartRunResult {
+            run_id: request.run_id,
+            state: "waiting".to_owned(),
+            summary: build_result.summary,
+            builder: builder.kind.clone(),
+            reviewer: reviewer.kind.clone(),
+            degraded_review,
+            session_id: build_result.session_id,
+            changed_files: files,
+            git_status: git_status(&worktree),
+            verification,
+            stopped: false,
+            promoted: false,
+            worktree_path: Some(worktree.to_string_lossy().into_owned()),
+            branch,
+            context_bytes: max_context_bytes,
+            artifact_path: Some(artifact_dir.to_string_lossy().into_owned()),
+            instruction_files: instruction_files.clone(),
+            skill_files: skill_files.clone(),
+            recovery_count,
+            attention_reason: Some(reason),
+        });
+    }
 
     let review_assignment = format!(
         "Review the implementation against the objective and repository evidence.\n\
@@ -6488,8 +6779,15 @@ async fn execute_room_run(
                 provider_log_note(&revision_result)
             )),
         )?;
-        verification =
-            run_verification(&app, &request.run_id, &worktree, cancel_receiver.clone()).await;
+        verification = run_verification(
+            &app,
+            database,
+            &request.project_id,
+            &request.run_id,
+            &worktree,
+            cancel_receiver.clone(),
+        )
+        .await;
         persist_message(
             database,
             &request.project_id,
@@ -7072,6 +7370,8 @@ pub fn run() {
             project_active,
             load_project_settings,
             save_project_settings,
+            load_verification_config,
+            save_verification_config,
             load_provider_profiles,
             save_provider_profile,
             load_room,
@@ -7120,6 +7420,57 @@ mod tests {
         git_static(&repository, &["add", "plan.md"]).expect("stage tracked file");
         git_static(&repository, &["commit", "-m", "Initial"]).expect("commit tracked file");
         (root, repository)
+    }
+
+    #[tokio::test]
+    async fn lockfile_prepare_runs_before_detected_npm_check() {
+        if find_executable(&["npm", "npm.cmd"]).is_none() {
+            return;
+        }
+        let (root, repository) = test_repository();
+        std::fs::write(
+            repository.join("package.json"),
+            r#"{"name":"verification-fixture","version":"1.0.0","scripts":{"test":"node -e \"process.exit(0)\""}}"#,
+        )
+        .expect("write package manifest");
+        std::fs::write(
+            repository.join("package-lock.json"),
+            r#"{"name":"verification-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"verification-fixture","version":"1.0.0"}}}"#,
+        )
+        .expect("write package lock");
+        let config = detected_verification_config(&repository);
+        assert_eq!(config.prepare.as_deref(), Some("npm ci --prefer-offline"));
+        let (_cancellation_sender, mut cancellation) = watch::channel(false);
+        let prepare = run_verification_command(
+            "Prepare dependencies",
+            config.prepare.as_deref().expect("prepare command"),
+            &repository,
+            &mut cancellation,
+            "unavailable",
+        )
+        .await;
+        assert_eq!(prepare.status, "passed", "{}", prepare.detail);
+        let check = run_verification_command(
+            &config.commands[0].label,
+            &config.commands[0].command,
+            &repository,
+            &mut cancellation,
+            "failed",
+        )
+        .await;
+        assert_eq!(check.status, "passed", "{}", check.detail);
+        std::fs::remove_dir_all(root).expect("remove fixture");
+    }
+
+    #[test]
+    fn empty_verification_config_cannot_pass() {
+        let results = vec![VerificationResult {
+            label: "Project checks".to_owned(),
+            status: "not-run".to_owned(),
+            detail: "No verification is configured for this project.".to_owned(),
+        }];
+        assert!(verification_is_unconfigured(&results));
+        assert!(!verification_passed(&results));
     }
 
     #[test]

@@ -9,6 +9,7 @@ import type {
   ProviderProfile,
   Project,
   ProjectSettings,
+  VerificationConfig,
   QuickEditResult,
   RoomSnapshot,
   StartRunResult,
@@ -69,6 +70,19 @@ export async function saveProjectSettings(
 ): Promise<void> {
   return invoke("save_project_settings", {
     settings: { projectId, ...settings },
+  });
+}
+
+export async function loadVerificationConfig(projectId: string): Promise<VerificationConfig> {
+  return invoke<VerificationConfig>("load_verification_config", { projectId });
+}
+
+export async function saveVerificationConfig(
+  projectId: string,
+  config: VerificationConfig,
+): Promise<void> {
+  return invoke("save_verification_config", {
+    config: { projectId, ...config },
   });
 }
 

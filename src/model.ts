@@ -84,8 +84,20 @@ export interface RoomMessage {
 
 export interface VerificationResult {
   label: string;
-  status: "passed" | "failed" | "not-run";
+  status: "passed" | "failed" | "unavailable" | "not-run";
   detail: string;
+}
+
+export interface VerificationCommand {
+  label: string;
+  command: string;
+  enabled: boolean;
+}
+
+export interface VerificationConfig {
+  enabled: boolean;
+  commands: VerificationCommand[];
+  prepare?: string;
 }
 
 export interface RouteStep {
