@@ -11,7 +11,8 @@ export type RunState =
   | "waiting"
   | "complete"
   | "failed"
-  | "stopped";
+  | "stopped"
+  | "abandoned";
 
 export type MessageKind =
   | "human"
@@ -157,6 +158,11 @@ export interface ChatResult {
   shipIntent?: ShipIntent;
 }
 
+export interface StopRunResult {
+  cancelled: boolean;
+  reason: string;
+}
+
 export interface QuickEditResult {
   editId: string;
   participant: AgentKind;
@@ -195,6 +201,7 @@ export interface StoredRun {
   instructionFiles: string[];
   skillFiles: string[];
   recoveryCount: number;
+  route: RouteStep[];
 }
 
 export interface ProviderUsage {

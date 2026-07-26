@@ -12,6 +12,7 @@ import type {
   QuickEditResult,
   RoomSnapshot,
   StartRunResult,
+  StopRunResult,
 } from "./model";
 
 export interface RunEvent {
@@ -145,8 +146,12 @@ export async function discoverProviderModels(
   });
 }
 
-export async function stopRun(runId: string): Promise<boolean> {
-  return invoke<boolean>("stop_run", { runId });
+export async function stopRun(runId: string): Promise<StopRunResult> {
+  return invoke<StopRunResult>("stop_run", { runId });
+}
+
+export async function abandonRun(runId: string): Promise<void> {
+  return invoke("abandon_run", { runId });
 }
 
 export async function onRunEvent(

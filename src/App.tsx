@@ -32,7 +32,6 @@ import {
   useState,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { createRun, participantCanChat, participantCanQuickEdit, participantIsRunnable, routeForPhase, selectChatParticipant, selectParticipant } from "./coordination";
 import type {
   AgentKind,
   ExecutionReceipt,
@@ -63,6 +62,7 @@ import {
   projectPick,
   projectSelect,
   quickEditApply,
+  abandonRun,
   quickEditDiscard,
   quickEditStart,
   saveProviderProfile,
@@ -126,6 +126,7 @@ const validStates: RunState[] = [
   "complete",
   "failed",
   "stopped",
+  "abandoned",
 ];
 
 function asRunState(value: string): RunState {
@@ -198,28 +199,13 @@ function connectionLabel(status: Participant["connectionStatus"]): string {
   }[status];
 }
 
-function phaseFromStoredRun(run: StoredRun): string {
-  if (run.state === "complete") return "complete";
-  if (run.state === "verifying") return "verify";
-  if (run.state === "revising") return "revise";
-  if (run.state === "promoting") return "promote";
-  if (run.state === "reviewing") return run.reviewCount > 1 ? "final-review" : "review";
-  return "build";
-}
-
 function hydrateRun(stored: StoredRun): Run {
-  const route = routeForPhase(phaseFromStoredRun(stored), stored.writer, stored.reviewer);
-  if (stored.state === "complete") {
-    route.forEach((step) => {
-      step.state = "complete";
-    });
-  }
   return {
     id: stored.id,
     objective: stored.objective,
     state: stored.state,
     currentOwner: stored.currentOwner,
-    route,
+    route: stored.route,
     reviewCount: stored.reviewCount,
     revisionCount: stored.revisionCount,
     startedAt: stored.startedAt,
@@ -238,6 +224,27 @@ function hydrateRun(stored: StoredRun): Run {
   };
 }
 
+function isRunnableParticipant(participant: Participant): boolean {
+  return participant.installed
+    && participant.connectionStatus === "connected"
+    && !["manual", "unavailable"].includes(participant.capabilities.autonomyMode);
+}
+
+function canUseChat(participant: Participant): boolean {
+  return participant.kind !== "antigravity" && participant.installed && participant.capabilities.nonInteractiveTurn;
+}
+
+function chatAgentFor(
+  objective: string,
+  participants: Participant[],
+  replyTarget?: AgentKind,
+): AgentKind | undefined {
+  const mentioned = objective.match(/@(codex|claude|cursor|antigravity)\b/i)?.[1]?.toLowerCase() as AgentKind | undefined;
+  if (mentioned) return participants.find((participant) => participant.kind === mentioned && canUseChat(participant))?.kind;
+  if (replyTarget) return participants.find((participant) => participant.kind === replyTarget && canUseChat(participant))?.kind;
+  return participants.find(canUseChat)?.kind;
+}
+
 function ParticipantMark({ participant }: { participant: Participant }) {
   return (
     <span className={`participant-mark participant-${participant.kind}`} aria-hidden="true">
@@ -253,6 +260,7 @@ function RunLens({
   streamTitle,
   onStop,
   onResume,
+  onAbandon,
 }: {
   run: Run;
   participants: Participant[];
@@ -260,6 +268,7 @@ function RunLens({
   streamTitle: string;
   onStop: () => void;
   onResume: () => void;
+  onAbandon: () => void;
 }) {
   const active = run.currentOwner
     ? participants.find((participant) => participant.kind === run.currentOwner)
@@ -352,9 +361,20 @@ function RunLens({
                 Stop
               </button>
             ) : recoverable ? (
+              <>
               <button type="button" className="send-button recovery-button" onClick={onResume}>
                 <History size={14} />
                 Resume recovery
+              </button>
+              <button type="button" className="danger-button" onClick={onAbandon}>
+                <X size={15} />
+                Abandon
+              </button>
+              </>
+            ) : Boolean(run.worktreePath) && !running ? (
+              <button type="button" className="danger-button" onClick={onAbandon}>
+                <X size={15} />
+                Abandon
               </button>
             ) : (
               <span className="progress-limits">
@@ -1379,20 +1399,18 @@ export function App() {
       }
       setRun((current) => {
         if (current.id !== event.runId) return current;
-        const writer = current.writer ?? (event.phase === "build" ? event.agent : undefined);
-        const reviewer =
-          current.reviewer ?? (["review", "final-review"].includes(event.phase) ? event.agent : undefined);
         return {
           ...current,
           state: asRunState(event.state),
           currentOwner: event.agent,
-          writer,
-          reviewer,
           contextBytes: Math.max(current.contextBytes ?? 0, event.contextBytes ?? 0),
           stopReason: event.eventType === "attention" ? event.detail : current.stopReason,
-          route: routeForPhase(event.phase, writer, reviewer),
+          route: current.route,
         };
       });
+      if (event.runId === runRef.current.id) {
+        void refreshRoom(project.id).catch(() => undefined);
+      }
     }).then((dispose) => {
       if (disposed) dispose();
       else unlisten = dispose;
@@ -1438,7 +1456,7 @@ export function App() {
   }, [inspectorOpen, searchOpen]);
 
   const installedCount = useMemo(
-    () => environment.participants.filter(participantIsRunnable).length,
+    () => environment.participants.filter(isRunnableParticipant).length,
     [environment],
   );
   const activeShipAgent = run.currentOwner
@@ -1596,21 +1614,20 @@ export function App() {
   ) {
     setUiError("");
 
-    const nextRun = createRun(text, environment.participants);
-    const requestedParticipant = environment.participants.find(
-      (participant) =>
-        participant.kind === requestedWriter && participantIsRunnable(participant),
-    );
-    const writer = requestedParticipant?.kind ?? nextRun.currentOwner;
-    const reviewer =
-      environment.participants.find(
-        (participant) => participantIsRunnable(participant) && participant.kind !== writer,
-      )?.kind ?? writer;
-    nextRun.writer = writer;
-    nextRun.currentOwner = writer;
-    nextRun.reviewer = reviewer;
-    nextRun.degradedReview = Boolean(writer && reviewer === writer);
-    nextRun.route = routeForPhase("build", writer, reviewer);
+    const writer = environment.participants.find(
+      (participant) => participant.kind === requestedWriter && isRunnableParticipant(participant),
+    )?.kind;
+    const nextRun: Run = {
+      id: crypto.randomUUID(),
+      objective: text,
+      state: "selecting",
+      currentOwner: writer,
+      writer,
+      route: [],
+      reviewCount: 0,
+      revisionCount: 0,
+      startedAt: new Date().toISOString(),
+    };
     setRun(nextRun);
     setComposerMode("ask");
     setObjective("");
@@ -1627,21 +1644,6 @@ export function App() {
           runId: nextRun.id,
         },
       ]);
-    }
-
-    if (!writer) {
-      setMessages((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          kind: "decision",
-          sender: "system",
-          body: nextRun.stopReason ?? "Choose an available participant.",
-          createdAt: new Date().toISOString(),
-          runId: nextRun.id,
-        },
-      ]);
-      return;
     }
 
     if (!native) {
@@ -1719,7 +1721,7 @@ export function App() {
     )?.sender as AgentKind | undefined;
     const participant = activeShip && activeShipAgent
       ? activeShipAgent
-      : selectChatParticipant(text, environment.participants, priorAgent);
+      : chatAgentFor(text, environment.participants, priorAgent);
     const chatRunId = crypto.randomUUID();
     setUiError("");
     setObjective("");
@@ -1804,7 +1806,7 @@ export function App() {
     const priorAgent = [...messages].reverse().find(
       (message) => message.kind === "agent" && message.sender !== "system" && message.sender !== "human",
     )?.sender as AgentKind | undefined;
-    const participant = selectChatParticipant(text, environment.participants, priorAgent);
+    const participant = chatAgentFor(text, environment.participants, priorAgent);
     if (!participant || !native) {
       setUiError(participant ? "Quick Edit is available in the Tauri desktop app." : "No Full-tier participant can perform a Quick Edit.");
       return;
@@ -1874,17 +1876,36 @@ export function App() {
   async function handleStop() {
     if (native) {
       try {
-        await stopRun(runRef.current.id);
+        const result = await stopRun(runRef.current.id);
+        if (!result.cancelled) {
+          setUiError(result.reason);
+          return;
+        }
+        setRun((current) => ({ ...current, stopReason: result.reason }));
       } catch (error) {
         setUiError(error instanceof Error ? error.message : String(error));
         return;
       }
     }
-    setRun((current) => ({
-      ...current,
-      state: "stopped",
-      stopReason: "Stop requested. Agent Room is preserving recoverable work.",
-    }));
+    if (!native) {
+      setRun((current) => ({
+        ...current,
+        state: "stopped",
+        stopReason: "Stop requested. Agent Room is preserving recoverable work.",
+      }));
+    }
+  }
+
+  async function handleAbandon() {
+    if (!native || activeStates.includes(run.state) || !run.worktreePath) return;
+    if (!window.confirm("Abandon this Ship run and delete its preserved worktree? This cannot be undone.")) return;
+    setUiError("");
+    try {
+      await abandonRun(run.id);
+      await refreshRoom(project.id);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function handleResume() {
@@ -1905,7 +1926,7 @@ export function App() {
       currentOwner: current.writer,
       stopReason: undefined,
       recoveryCount: (current.recoveryCount ?? 0) + 1,
-      route: routeForPhase("build", current.writer, current.reviewer),
+      route: current.route,
     }));
     try {
       await startRoomRun({
@@ -2096,6 +2117,7 @@ export function App() {
               streamTitle={streamTitle}
               onStop={handleStop}
               onResume={handleResume}
+              onAbandon={handleAbandon}
             />
           )}
           {run.state === "ready" && activity.length > 0 && (
@@ -2199,14 +2221,14 @@ export function App() {
                     sideChatAvailable
                       ? participant.kind !== activeShipAgent
                       : composerMode === "ask"
-                      ? !participantCanChat(participant)
+                      ? !canUseChat(participant)
                       : composerMode === "quick-edit"
-                        ? !participantCanQuickEdit(participant)
+                        ? !canUseChat(participant)
                       : run.state === "promoting"
                         ? true
                         : sideChatAvailable
                         ? participant.kind !== activeShipAgent
-                        : !participantIsRunnable(participant)
+                        : !isRunnableParticipant(participant)
                   }
                   onClick={() =>
                     setObjective(
@@ -2215,10 +2237,10 @@ export function App() {
                   }
                   title={
                     (composerMode === "ask"
-                      ? participantCanChat(participant)
+                      ? canUseChat(participant)
                       : composerMode === "quick-edit"
-                        ? participantCanQuickEdit(participant)
-                        : participantIsRunnable(participant))
+                        ? canUseChat(participant)
+                        : isRunnableParticipant(participant))
                       ? `${autonomyLabel(participant.capabilities.autonomyMode)}: ${participant.capabilities.autonomyNote}`
                       : participant.capabilities.autonomyNote
                   }

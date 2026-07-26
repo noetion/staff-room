@@ -51,6 +51,7 @@ struct Database(Mutex<Connection>);
 #[derive(Default)]
 struct RuntimeState {
     cancellations: AsyncMutex<HashMap<String, watch::Sender<bool>>>,
+    active_ship_runs: AsyncMutex<HashSet<String>>,
     provider_cache: AsyncMutex<HashMap<String, Participant>>,
     quick_edits: AsyncMutex<HashMap<String, QuickEditState>>,
 }
@@ -140,6 +141,13 @@ struct RunEvent {
     detail: String,
     text_delta: Option<String>,
     context_bytes: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StopRunResult {
+    cancelled: bool,
+    reason: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -332,6 +340,15 @@ struct StoredRun {
     instruction_files: Vec<String>,
     skill_files: Vec<String>,
     recovery_count: u32,
+    route: Vec<StoredRouteStep>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredRouteStep {
+    agent: Option<String>,
+    label: String,
+    state: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -538,6 +555,19 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             finished_at TEXT,
             FOREIGN KEY(project_id) REFERENCES projects(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS run_events (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            state TEXT NOT NULL,
+            current_owner TEXT,
+            detail TEXT NOT NULL DEFAULT '',
+            context_bytes INTEGER,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(run_id) REFERENCES runs(id)
         );
 
         CREATE TABLE IF NOT EXISTS provider_sessions (
@@ -922,15 +952,25 @@ fn reconcile_interrupted_runs(connection: &Connection) -> rusqlite::Result<usize
          WHERE state = 'running'",
         [],
     )?;
-    connection.execute(
+    let promoting = connection.execute(
+        "UPDATE runs
+         SET state = 'waiting',
+             current_owner = NULL,
+             stop_reason = 'Promotion state unknown — inspect the repository before continuing.',
+             finished_at = CURRENT_TIMESTAMP
+         WHERE state = 'promoting'",
+        [],
+    )?;
+    let interrupted = connection.execute(
         "UPDATE runs
          SET state = 'stopped',
              current_owner = NULL,
              stop_reason = 'Agent Room closed or restarted while this run was active. The managed worktree was preserved for recovery.',
              finished_at = CURRENT_TIMESTAMP
-         WHERE state IN ('selecting', 'working', 'verifying', 'reviewing', 'revising', 'promoting')",
+         WHERE state IN ('selecting', 'working', 'verifying', 'reviewing', 'revising')",
         [],
-    )
+    )?;
+    Ok(promoting + interrupted)
 }
 
 fn command_output<I, S>(
@@ -1716,6 +1756,14 @@ fn git_static(repository: &Path, args: &[&str]) -> Result<String, String> {
 fn git_status(repository: &Path) -> String {
     git_static(repository, &["status", "--short", "--branch"])
         .unwrap_or_else(|error| format!("Git evidence unavailable: {error}"))
+}
+
+fn review_mutation_guard(repository: &Path) -> Result<String, String> {
+    let head = git_static(repository, &["rev-parse", "HEAD"])?;
+    let status = git_static(repository, &["status", "--porcelain"])?;
+    let mut hasher = Sha256::new();
+    hasher.update(status.as_bytes());
+    Ok(format!("{head}:{:x}", hasher.finalize()))
 }
 
 fn changed_files(repository: &Path, base_head: &str) -> Vec<String> {
@@ -3088,7 +3136,10 @@ fn update_run(
     finished: bool,
 ) -> Result<(), String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
-    connection
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
         .execute(
             "UPDATE runs SET
                state = ?1,
@@ -3113,7 +3164,37 @@ fn update_run(
             ],
         )
         .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO run_events
+             (id, run_id, event_type, phase, state, current_owner, detail, context_bytes)
+             VALUES (?1, ?2, 'transition', ?3, ?4, ?5, ?6, ?7)",
+            params![
+                Uuid::new_v4().to_string(),
+                run_id,
+                phase_for_run_state(state),
+                state,
+                current_owner,
+                stop_reason.unwrap_or_default(),
+                context_bytes as i64,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn phase_for_run_state(state: &str) -> &'static str {
+    match state {
+        "selecting" => "prepare",
+        "working" => "build",
+        "verifying" => "verify",
+        "reviewing" => "review",
+        "revising" => "revise",
+        "promoting" => "promote",
+        "complete" => "complete",
+        _ => "ship",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4481,6 +4562,12 @@ fn load_room_snapshot(database: &Database, project_id: &str) -> Result<RoomSnaps
                     skill_files: serde_json::from_str(&row.get::<_, String>(17)?)
                         .unwrap_or_default(),
                     recovery_count: row.get::<_, i64>(18)?.max(0) as u32,
+                    route: stored_run_route(
+                        &row.get::<_, String>(2)?,
+                        row.get::<_, i64>(6)?.max(0) as u32,
+                        row.get::<_, Option<String>>(4)?.as_deref(),
+                        row.get::<_, Option<String>>(5)?.as_deref(),
+                    ),
                 })
             },
         )
@@ -4587,10 +4674,147 @@ fn load_room_snapshot(database: &Database, project_id: &str) -> Result<RoomSnaps
     })
 }
 
+fn stored_run_route(
+    state: &str,
+    review_count: u32,
+    writer: Option<&str>,
+    reviewer: Option<&str>,
+) -> Vec<StoredRouteStep> {
+    let phases = [
+        ("Build", writer),
+        ("Verify", None),
+        ("Review", reviewer),
+        ("Revise", writer),
+        ("Final review", reviewer),
+        ("Promote", None),
+    ];
+    let current = match state {
+        "selecting" | "working" => 0,
+        "verifying" => 1,
+        "reviewing" if review_count > 1 => 4,
+        "reviewing" => 2,
+        "revising" => 3,
+        "promoting" => 5,
+        "complete" => phases.len(),
+        _ => 0,
+    };
+    phases
+        .iter()
+        .enumerate()
+        .map(|(index, (label, agent))| StoredRouteStep {
+            agent: agent.map(str::to_owned),
+            label: (*label).to_owned(),
+            state: if index < current {
+                "complete"
+            } else if index == current {
+                "current"
+            } else {
+                "next"
+            }
+            .to_owned(),
+        })
+        .collect()
+}
+
 #[tauri::command]
-async fn stop_run(runtime: State<'_, RuntimeState>, run_id: String) -> Result<bool, String> {
+async fn stop_run(
+    runtime: State<'_, RuntimeState>,
+    run_id: String,
+) -> Result<StopRunResult, String> {
     let sender = runtime.cancellations.lock().await.get(&run_id).cloned();
-    Ok(sender.map(|value| value.send(true).is_ok()).unwrap_or(false))
+    match sender {
+        Some(sender) if sender.send(true).is_ok() => Ok(StopRunResult {
+            cancelled: true,
+            reason: "Cancellation requested. Agent Room will preserve recoverable work.".to_owned(),
+        }),
+        Some(_) => Ok(StopRunResult {
+            cancelled: false,
+            reason: "This run has already finished and can no longer be cancelled.".to_owned(),
+        }),
+        None => Ok(StopRunResult {
+            cancelled: false,
+            reason: "Cancellation is not available yet or the run has already finished.".to_owned(),
+        }),
+    }
+}
+
+#[tauri::command]
+fn abandon_run(
+    app: AppHandle,
+    database: State<'_, Database>,
+    run_id: String,
+) -> Result<(), String> {
+    type AbandonRow = (String, Option<String>, String, String, String);
+    let database = database.inner();
+    let row = {
+        let connection = database.0.lock().map_err(|error| error.to_string())?;
+        connection
+            .query_row(
+                "SELECT runs.state, runs.worktree_path, runs.branch, runs.isolation_kind,
+                        projects.repository_path
+                 FROM runs JOIN projects ON projects.id = runs.project_id
+                 WHERE runs.id = ?1",
+                [&run_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "The Ship run could not be found.".to_owned())?
+    };
+    let (state, worktree_path, branch, isolation_kind, repository_path): AbandonRow = row;
+    if run_state_allows_side_chat(&state) || state == "promoting" || state == "selecting" {
+        return Err("An active Ship run cannot be abandoned. Stop it first.".to_owned());
+    }
+    let worktree = PathBuf::from(
+        worktree_path.ok_or_else(|| "This Ship run has no preserved worktree to abandon.".to_owned())?,
+    );
+    if !worktree.exists() {
+        return Err("The preserved worktree no longer exists.".to_owned());
+    }
+    let managed_root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("worktrees");
+    let isolation = IsolationContext {
+        worktree,
+        branch,
+        base_branch: String::new(),
+        base_head: String::new(),
+        snapshot_head: String::new(),
+        isolation_kind,
+        workspace_fingerprint: None,
+    };
+    if let Some(error) = discard_isolation(Path::new(&repository_path), &isolation, &managed_root) {
+        return Err(format!("Could not remove the preserved isolation: {error}"));
+    }
+    update_run(database, &run_id, "abandoned", None, 0, 0, None, 0, None, true)?;
+    database
+        .0
+        .lock()
+        .map_err(|error| error.to_string())?
+        .execute("UPDATE runs SET worktree_path = NULL WHERE id = ?1", [&run_id])
+        .map_err(|error| error.to_string())?;
+    emit_event(
+        &app,
+        &run_id,
+        "complete",
+        "ship",
+        "abandoned",
+        None,
+        "Ship run abandoned",
+        "The preserved worktree was removed.",
+        None,
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -4734,6 +4958,12 @@ async fn start_room_chat(
 ) -> Result<ChatResult, String> {
     let chat_started = Instant::now();
     let database = database.inner();
+    let (cancel_sender, cancel_receiver) = watch::channel(false);
+    runtime
+        .cancellations
+        .lock()
+        .await
+        .insert(request.run_id.clone(), cancel_sender);
     let active_run = if let Some(active_run_id) = request.active_run_id.as_deref() {
         let connection = database.0.lock().map_err(|error| error.to_string())?;
         connection
@@ -4825,13 +5055,6 @@ async fn start_room_chat(
         session_id.is_some(),
         None,
     )?;
-    let (cancel_sender, cancel_receiver) = watch::channel(false);
-    runtime
-        .cancellations
-        .lock()
-        .await
-        .insert(request.run_id.clone(), cancel_sender);
-
     persist_message(
         database,
         &request.project_id,
@@ -5238,6 +5461,12 @@ async fn execute_room_run(
     runtime: &RuntimeState,
     request: StartRunRequest,
 ) -> Result<StartRunResult, String> {
+    let (cancel_sender, cancel_receiver) = watch::channel(false);
+    runtime
+        .cancellations
+        .lock()
+        .await
+        .insert(request.run_id.clone(), cancel_sender);
     let base_repository = PathBuf::from(&request.repository_path);
     git_static(&base_repository, &["rev-parse", "--show-toplevel"])
         .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
@@ -5330,13 +5559,6 @@ async fn execute_room_run(
     let builder_profile = provider_profile(database, &request.project_id, &builder.kind, "build")?;
     let reviewer_profile =
         provider_profile(database, &request.project_id, &reviewer.kind, "review")?;
-    let (cancel_sender, cancel_receiver) = watch::channel(false);
-    runtime
-        .cancellations
-        .lock()
-        .await
-        .insert(request.run_id.clone(), cancel_sender);
-
     let (isolation, recovery_session, recovery_count) = if let Some((
         stored_objective,
         state,
@@ -5923,6 +6145,7 @@ async fn execute_room_run(
     )?;
     let review_output_path = artifact_dir.join("review.final.txt");
     let review_preflight_ms = review_started.elapsed().as_millis() as u64;
+    let review_guard = review_mutation_guard(&worktree)?;
     let review_result = invoke_provider(
         &app,
         &request.run_id,
@@ -5939,6 +6162,44 @@ async fn execute_room_run(
     )
     .await?;
     let review_total_ms = review_started.elapsed().as_millis() as u64;
+    if review_mutation_guard(&worktree)? != review_guard {
+        let reason = "The reviewer modified the worktree.".to_owned();
+        final_failure(
+            &app,
+            database,
+            &request.project_id,
+            &request.run_id,
+            "failed",
+            &reason,
+            Some(&worktree),
+            1,
+            0,
+            max_context_bytes,
+        )?;
+        runtime.cancellations.lock().await.remove(&request.run_id);
+        return Ok(StartRunResult {
+            run_id: request.run_id,
+            state: "failed".to_owned(),
+            summary: review_result.summary,
+            builder: builder.kind.clone(),
+            reviewer: reviewer.kind.clone(),
+            degraded_review,
+            session_id: build_result.session_id,
+            changed_files: files,
+            git_status: git_status(&worktree),
+            verification,
+            stopped: false,
+            promoted: false,
+            worktree_path: Some(worktree.to_string_lossy().into_owned()),
+            branch,
+            context_bytes: max_context_bytes,
+            artifact_path: Some(artifact_dir.to_string_lossy().into_owned()),
+            instruction_files: instruction_files.clone(),
+            skill_files: skill_files.clone(),
+            recovery_count,
+            attention_reason: Some(reason),
+        });
+    }
     persist_handoff(
         database,
         &request.run_id,
@@ -6295,6 +6556,7 @@ async fn execute_room_run(
         );
         let final_output_path = artifact_dir.join("final-review.final.txt");
         let final_review_preflight_ms = final_review_started.elapsed().as_millis() as u64;
+        let final_review_guard = review_mutation_guard(&worktree)?;
         let final_result = invoke_provider(
             &app,
             &request.run_id,
@@ -6311,6 +6573,44 @@ async fn execute_room_run(
         )
         .await?;
         let final_review_total_ms = final_review_started.elapsed().as_millis() as u64;
+        if review_mutation_guard(&worktree)? != final_review_guard {
+            let reason = "The reviewer modified the worktree.".to_owned();
+            final_failure(
+                &app,
+                database,
+                &request.project_id,
+                &request.run_id,
+                "failed",
+                &reason,
+                Some(&worktree),
+                review_count,
+                revision_count,
+                max_context_bytes,
+            )?;
+            runtime.cancellations.lock().await.remove(&request.run_id);
+            return Ok(StartRunResult {
+                run_id: request.run_id,
+                state: "failed".to_owned(),
+                summary: final_result.summary,
+                builder: builder.kind.clone(),
+                reviewer: reviewer.kind.clone(),
+                degraded_review,
+                session_id: build_result.session_id,
+                changed_files: files,
+                git_status: git_status(&worktree),
+                verification,
+                stopped: false,
+                promoted: false,
+                worktree_path: Some(worktree.to_string_lossy().into_owned()),
+                branch,
+                context_bytes: max_context_bytes,
+                artifact_path: Some(artifact_dir.to_string_lossy().into_owned()),
+                instruction_files: instruction_files.clone(),
+                skill_files: skill_files.clone(),
+                recovery_count,
+                attention_reason: Some(reason),
+            });
+        }
         final_review_summary = final_result.summary.clone();
         final_approved = review_handoff_decision(&final_result);
         persist_handoff(
@@ -6727,7 +7027,15 @@ async fn start_room_run(
 ) -> Result<StartRunResult, String> {
     let run_id = request.run_id.clone();
     let project_id = request.project_id.clone();
+    {
+        let mut active_runs = runtime.active_ship_runs.lock().await;
+        if !active_runs.is_empty() {
+            return Err("A Ship run is already active. Stop, wait for, or abandon it before starting another.".to_owned());
+        }
+        active_runs.insert(run_id.clone());
+    }
     let result = execute_room_run(app.clone(), database.inner(), runtime.inner(), request).await;
+    runtime.active_ship_runs.lock().await.remove(&run_id);
     if let Err(error) = result.as_ref() {
         let _ = finalize_unhandled_run_error(&app, database.inner(), &project_id, &run_id, error);
         runtime.cancellations.lock().await.remove(&run_id);
@@ -6774,7 +7082,8 @@ pub fn run() {
             quick_edit_apply,
             quick_edit_discard,
             start_room_run,
-            stop_run
+            stop_run,
+            abandon_run
         ])
         .run(tauri::generate_context!())
         .expect("error while running Agent Room");
@@ -7414,6 +7723,13 @@ mod tests {
             .expect("insert active run");
         connection
             .execute(
+                "INSERT INTO runs (id, project_id, objective, state)
+                 VALUES ('run-2', 'project-1', 'Promotion', 'promoting')",
+                [],
+            )
+            .expect("insert promoting run");
+        connection
+            .execute(
                 "INSERT INTO activations
                  (id, run_id, phase, participant_kind, state, context_bytes)
                  VALUES ('activation-1', 'run-1', 'build', 'codex', 'running', 0)",
@@ -7423,7 +7739,7 @@ mod tests {
 
         assert_eq!(
             reconcile_interrupted_runs(&connection).expect("reconcile runs"),
-            1
+            2
         );
         let run: (String, Option<String>, Option<String>) = connection
             .query_row(
@@ -7443,6 +7759,26 @@ mod tests {
         assert!(run.1.is_none());
         assert!(run.2.expect("stop reason").contains("preserved"));
         assert_eq!(activation, "failed");
+        let promoting: (String, String) = connection
+            .query_row(
+                "SELECT state, stop_reason FROM runs WHERE id = 'run-2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read promoting run");
+        assert_eq!(promoting.0, "waiting");
+        assert!(promoting.1.contains("Promotion state unknown"));
+    }
+
+    #[test]
+    fn review_mutation_guard_detects_a_review_write() {
+        let (root, repository) = test_repository();
+        let before = review_mutation_guard(&repository).expect("record review guard");
+        std::fs::write(repository.join("reviewer-note.txt"), "unexpected write\n")
+            .expect("simulate reviewer write");
+        let after = review_mutation_guard(&repository).expect("record changed review guard");
+        assert_ne!(before, after);
+        remove_test_repository(&root);
     }
 
     #[test]
