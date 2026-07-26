@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { canRevise, contextPacketSize, createRun, explicitAgent, requestReview } from "./coordination";
+import {
+  canRevise,
+  contextPacketSize,
+  createRun,
+  explicitAgent,
+  requestReview,
+  routeForPhase,
+} from "./coordination";
 import type { Participant } from "./model";
 
 const capabilities = {
@@ -9,6 +16,12 @@ const capabilities = {
   exactResume: true,
   cancellation: true,
   writeMode: true,
+  approvalBridge: true,
+  usageReporting: true,
+  repositoryScoping: true,
+  autonomyMode: "isolated-auto" as const,
+  autonomyNote: "Test capability.",
+  capabilityProof: ["Test proof."],
 };
 
 const participants: Participant[] = [
@@ -30,7 +43,7 @@ describe("coordination policy", () => {
     expect(run.currentOwner).toBeUndefined();
   });
 
-  it("never assigns review to the writer", () => {
+  it("never assigns review to the writer when a second participant exists", () => {
     const reviewed = requestReview(createRun("@codex build this", participants), participants);
     expect(reviewed.currentOwner).toBe("claude");
     expect(reviewed.reviewCount).toBe(1);
@@ -41,7 +54,20 @@ describe("coordination policy", () => {
     expect(canRevise(run)).toBe(false);
   });
 
-  it("measures selected context in bytes", () => {
-    expect(contextPacketSize(["room", "é"])).toBe(6);
+  it("measures selected context in UTF-8 bytes", () => {
+    expect(contextPacketSize(["room", "\u00e9"])).toBe(6);
+  });
+
+  it("renders the bounded revision route deterministically", () => {
+    const route = routeForPhase("final-review", "codex", "claude");
+    expect(route.map((step) => step.label)).toEqual([
+      "Build",
+      "Verify",
+      "Review",
+      "Revise",
+      "Final review",
+      "Promote",
+    ]);
+    expect(route.find((step) => step.label === "Final review")?.state).toBe("current");
   });
 });

@@ -5,8 +5,11 @@ import {
   Braces,
   Check,
   ChevronRight,
+  CircleAlert,
   CircleStop,
+  Gauge,
   GitBranch,
+  HardDrive,
   History,
   PanelRight,
   Play,
@@ -15,10 +18,11 @@ import {
   ShieldCheck,
   Sparkles,
   TerminalSquare,
+  Workflow,
   X,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { createRun } from "./coordination";
+import { createRun, participantIsRunnable, routeForPhase } from "./coordination";
 import type {
   AgentKind,
   NativeEnvironment,
@@ -26,26 +30,118 @@ import type {
   Project,
   RoomMessage,
   Run,
+  RunState,
+  StoredRun,
+  VerificationResult,
 } from "./model";
 import { agentNames } from "./model";
 import {
   getEnvironment,
   isNativeApp,
-  onActivationEvent,
-  startCodexRun,
+  loadRoom,
+  onRunEvent,
+  saveProject,
+  startRoomRun,
   stopRun,
+  type RunEvent,
 } from "./native";
 import { previewEnvironment, seedMessages, seedProject, seedRun } from "./seed";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 
-function initials(kind: AgentKind): string {
+const activeStates: RunState[] = [
+  "selecting",
+  "working",
+  "verifying",
+  "reviewing",
+  "revising",
+  "promoting",
+];
+
+const validStates: RunState[] = [
+  "ready",
+  "selecting",
+  "working",
+  "verifying",
+  "reviewing",
+  "revising",
+  "promoting",
+  "waiting",
+  "complete",
+  "failed",
+  "stopped",
+];
+
+function asRunState(value: string): RunState {
+  return validStates.includes(value as RunState) ? (value as RunState) : "working";
+}
+
+function initials(kind?: AgentKind): string {
+  if (!kind) return "AR";
   return { codex: "CX", claude: "CL", cursor: "CU", antigravity: "AG" }[kind];
 }
 
 function relativeTime(timestamp: string): string {
-  const minutes = Math.max(0, Math.round((Date.now() - new Date(timestamp).getTime()) / 60_000));
-  return minutes < 1 ? "now" : `${minutes}m`;
+  const normalized = timestamp.includes("T") ? timestamp : `${timestamp.replace(" ", "T")}Z`;
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(normalized).getTime()) / 60_000));
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.floor(minutes / 60)}h`;
+}
+
+function contextLabel(bytes = 0): string {
+  if (!bytes) return "Packet not assembled";
+  return `${Math.max(1, Math.round(bytes / 1024))} KiB / 48 KiB`;
+}
+
+function autonomyLabel(mode: Participant["capabilities"]["autonomyMode"]): string {
+  return {
+    "isolated-auto": "Isolated auto",
+    "reviewed-auto": "Reviewed auto",
+    "unattended-bypass": "Sandbox bypass",
+    manual: "Manual",
+    unavailable: "Unavailable",
+  }[mode];
+}
+
+function phaseFromStoredRun(run: StoredRun): string {
+  if (run.state === "complete") return "complete";
+  if (run.state === "verifying") return "verify";
+  if (run.state === "revising") return "revise";
+  if (run.state === "promoting") return "promote";
+  if (run.state === "reviewing") return run.reviewCount > 1 ? "final-review" : "review";
+  return "build";
+}
+
+function hydrateRun(stored: StoredRun): Run {
+  const route = routeForPhase(phaseFromStoredRun(stored), stored.writer, stored.reviewer);
+  if (stored.state === "complete") {
+    route.forEach((step) => {
+      step.state = "complete";
+    });
+  }
+  return {
+    id: stored.id,
+    objective: stored.objective,
+    state: stored.state,
+    currentOwner: stored.currentOwner,
+    route,
+    reviewCount: stored.reviewCount,
+    revisionCount: stored.revisionCount,
+    startedAt: stored.startedAt,
+    stopReason: stored.stopReason,
+    nativeSessionId: stored.nativeSessionId,
+    writer: stored.writer,
+    reviewer: stored.reviewer,
+    degradedReview: stored.degradedReview,
+    worktreePath: stored.worktreePath,
+    branch: stored.branch,
+    contextBytes: stored.contextBytes,
+    artifactPath: stored.artifactPath,
+    instructionFiles: stored.instructionFiles,
+    skillFiles: stored.skillFiles,
+    recoveryCount: stored.recoveryCount,
+  };
 }
 
 function ParticipantMark({ participant }: { participant: Participant }) {
@@ -60,15 +156,22 @@ function RunLens({
   run,
   participants,
   onStop,
+  onResume,
 }: {
   run: Run;
   participants: Participant[];
   onStop: () => void;
+  onResume: () => void;
 }) {
   const active = run.currentOwner
     ? participants.find((participant) => participant.kind === run.currentOwner)
     : undefined;
-  const isRunning = ["working", "reviewing", "revising", "selecting"].includes(run.state);
+  const running = activeStates.includes(run.state);
+  const autonomy = active?.capabilities.autonomyMode;
+  const recoverable =
+    Boolean(run.worktreePath) &&
+    ["waiting", "failed", "stopped"].includes(run.state) &&
+    (run.recoveryCount ?? 0) < 2;
 
   return (
     <section className={`run-lens state-${run.state}`} aria-label="Current run" aria-live="polite">
@@ -76,44 +179,89 @@ function RunLens({
       <div className="lens-copy">
         <span className="eyebrow">
           <span className="state-pulse" />
-          {run.state === "ready" ? "Room ready" : run.state.replace("_", " ")}
+          {run.state === "ready" ? "Room ready" : run.state.replace("-", " ")}
         </span>
         <strong>
           {run.state === "waiting"
-            ? "Your input is needed"
+            ? "Your attention is needed"
             : active
-              ? `${active.name} owns this turn`
-              : "State one objective"}
+              ? `${active.name} owns this phase`
+              : run.state === "complete"
+                ? "Verified handoff complete"
+                : "State one objective"}
         </strong>
         <span className="lens-objective">{run.stopReason ?? run.objective}</span>
       </div>
-      <div className="route" aria-label="Run route">
-        {run.route.length ? (
-          run.route.map((step, index) => (
-            <div className={`route-step ${step.state}`} key={`${step.agent}-${index}`}>
-              <span>{initials(step.agent)}</span>
-              <small>{step.label}</small>
-              {index < run.route.length - 1 && <ArrowRight size={14} aria-hidden="true" />}
-            </div>
-          ))
-        ) : (
-          <div className="route-placeholder">Objective → work → evidence</div>
-        )}
+
+      <div className="route-shell">
+        <span className="handoff-beam" aria-hidden="true" />
+        <div className="route" aria-label="Autonomous route">
+          {run.route.length ? (
+            run.route.map((step, index) => (
+              <div className={`route-step ${step.state}`} key={`${step.label}-${index}`}>
+                <span>{step.agent ? initials(step.agent) : index + 1}</span>
+                <small>{step.label}</small>
+                {index < run.route.length - 1 && <ArrowRight size={13} aria-hidden="true" />}
+              </div>
+            ))
+          ) : (
+            <div className="route-placeholder">Build / verify / review / promote</div>
+          )}
+        </div>
       </div>
+
       <div className="lens-action">
-        {isRunning ? (
-          <button className="danger-button" onClick={onStop}>
+        {running ? (
+          <button type="button" className="danger-button" onClick={onStop}>
             <CircleStop size={16} />
-            Stop run
+            Stop
+          </button>
+        ) : recoverable ? (
+          <button type="button" className="send-button recovery-button" onClick={onResume}>
+            <History size={15} />
+            Resume recovery
           </button>
         ) : (
           <div className="limit-readout">
             <span>{run.revisionCount}/1 revisions</span>
             <span>{run.reviewCount}/2 reviews</span>
+            <span>{run.recoveryCount ?? 0}/2 recoveries</span>
           </div>
         )}
       </div>
+
+      <div className="lens-facts">
+        <span>
+          <ShieldCheck size={13} />
+          {run.degradedReview ? "Same-provider review" : run.reviewer ? "Independent review" : "Reviewer selected at run time"}
+        </span>
+        <span>
+          <Gauge size={13} />
+          {contextLabel(run.contextBytes)}
+        </span>
+        <span>
+          <Workflow size={13} />
+          {autonomy ? autonomyLabel(autonomy) : "Bounded autonomous route"}
+        </span>
+      </div>
     </section>
+  );
+}
+
+function VerificationList({ verification }: { verification: VerificationResult[] }) {
+  if (!verification.length) return null;
+  return (
+    <div className="verification-list">
+      {verification.map((result) => (
+        <div className={`verification-row verification-${result.status}`} key={result.label}>
+          {result.status === "passed" ? <Check size={13} /> : <CircleAlert size={13} />}
+          <span>
+            <strong>{result.label}</strong>
+            <small>{result.status}</small>
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -130,7 +278,13 @@ function TimelineEntry({ message }: { message: RoomMessage }) {
     <article className={`timeline-entry entry-${message.kind}`}>
       <div className="entry-rail">
         <span className="entry-dot">
-          {isHuman ? <Sparkles size={13} /> : message.kind === "evidence" ? <ShieldCheck size={13} /> : <Bot size={13} />}
+          {isHuman ? (
+            <Sparkles size={13} />
+          ) : message.kind === "evidence" ? (
+            <ShieldCheck size={13} />
+          ) : (
+            <Bot size={13} />
+          )}
         </span>
         <span className="entry-line" />
       </div>
@@ -141,40 +295,76 @@ function TimelineEntry({ message }: { message: RoomMessage }) {
           <span className="entry-kind">{message.kind}</span>
         </header>
         <p>{message.body}</p>
-        {message.reason && <div className="reason-line"><Braces size={14} />{message.reason}</div>}
+        {message.reason && (
+          <div className="reason-line">
+            <Braces size={14} />
+            <span>{message.reason}</span>
+          </div>
+        )}
         {message.changedFiles?.length ? (
           <div className="file-list">
-            {message.changedFiles.map((file) => <code key={file}>{file}</code>)}
+            {message.changedFiles.map((file) => (
+              <code key={file}>{file}</code>
+            ))}
           </div>
         ) : null}
+        <VerificationList verification={message.verification ?? []} />
       </div>
     </article>
   );
 }
 
-function ProjectRail({ project }: { project: Project }) {
+function ProjectRail({
+  project,
+  run,
+  installedCount,
+}: {
+  project: Project;
+  run: Run;
+  installedCount: number;
+}) {
   return (
     <aside className="project-rail">
       <nav className="primary-nav" aria-label="Primary">
-        <button className="nav-button active" aria-label="Rooms"><TerminalSquare size={19} /><span>Rooms</span></button>
-        <button className="nav-button" aria-label="Activity"><Activity size={19} /><span>Activity</span></button>
-        <button className="nav-button" aria-label="Settings"><Settings size={19} /><span>Settings</span></button>
+        <button type="button" className="nav-button active" aria-label="Rooms">
+          <TerminalSquare size={19} />
+          <span>Rooms</span>
+        </button>
+        <button type="button" className="nav-button" aria-label="Activity">
+          <Activity size={19} />
+          <span>Activity</span>
+        </button>
+        <button type="button" className="nav-button" aria-label="Settings">
+          <Settings size={19} />
+          <span>Settings</span>
+        </button>
       </nav>
       <div className="rail-section">
-        <span className="rail-label">Recent rooms</span>
-        <button className="project-row selected">
+        <span className="rail-label">Project room</span>
+        <button type="button" className="project-row selected">
           <span className="project-monogram">AR</span>
           <span>
             <strong>{project.name}</strong>
-            <small>Ready · Codex available</small>
+            <small>
+              {run.state} / {installedCount} agents ready
+            </small>
           </span>
           <ChevronRight size={15} />
         </button>
       </div>
-      <button className="new-room-button"><span>+</span> New project</button>
+      <div className="rail-policy">
+        <ShieldCheck size={15} />
+        <span>
+          <strong>Autonomous policy</strong>
+          <small>Interrupts only when policy cannot continue safely.</small>
+        </span>
+      </div>
       <div className="rail-foot">
         <span className="local-indicator" />
-        <span><strong>Local only</strong><small>Room data stays here</small></span>
+        <span>
+          <strong>Local orchestration</strong>
+          <small>SQLite and managed Git worktrees</small>
+        </span>
       </div>
     </aside>
   );
@@ -185,70 +375,203 @@ function Inspector({
   environment,
   activeTab,
   setActiveTab,
-  lastMessage,
+  run,
+  messages,
 }: {
   project: Project;
   environment: NativeEnvironment;
   activeTab: InspectorTab;
   setActiveTab: (tab: InspectorTab) => void;
-  lastMessage?: RoomMessage;
+  run: Run;
+  messages: RoomMessage[];
 }) {
   const tabs: InspectorTab[] = ["Repository", "Participants", "Evidence", "Memory"];
+  const latestEvidence = [...messages].reverse().find((message) => message.kind === "evidence");
+  const verification = latestEvidence?.verification ?? [];
   return (
     <aside className="inspector">
       <div className="inspector-tabs" role="tablist">
         {tabs.map((tab) => (
           <button
+            type="button"
             key={tab}
+            id={`inspector-tab-${tab.toLowerCase()}`}
             className={activeTab === tab ? "active" : ""}
             onClick={() => setActiveTab(tab)}
             role="tab"
             aria-selected={activeTab === tab}
+            aria-controls={`inspector-panel-${tab.toLowerCase()}`}
+            tabIndex={activeTab === tab ? 0 : -1}
           >
             {tab}
           </button>
         ))}
       </div>
+
       {activeTab === "Repository" && (
-        <div className="inspector-body">
-          <div className="inspector-heading"><GitBranch size={17} /><span><small>Repository</small><strong>{project.name}</strong></span></div>
-          <div className="data-row"><span>Branch</span><code>{environment.branch || "unavailable"}</code></div>
+        <div
+          className="inspector-body"
+          id="inspector-panel-repository"
+          role="tabpanel"
+          aria-labelledby="inspector-tab-repository"
+        >
+          <div className="inspector-heading">
+            <GitBranch size={17} />
+            <span>
+              <small>Base checkout</small>
+              <strong>{project.name}</strong>
+            </span>
+          </div>
+          <div className="data-row">
+            <span>Branch</span>
+            <code>{environment.branch || "unavailable"}</code>
+          </div>
+          <div className="data-row">
+            <span>Run branch</span>
+            <code>{run.branch ?? "Created per objective"}</code>
+          </div>
           <div className="path-block">{environment.repositoryPath}</div>
-          <div className="status-note"><Check size={15} /><span><strong>Working tree observed</strong><small>Evidence is captured before and after native runs.</small></span></div>
-        </div>
-      )}
-      {activeTab === "Participants" && (
-        <div className="inspector-body participant-list">
-          {environment.participants.map((participant) => (
-            <div className="participant-row" key={participant.kind}>
-              <ParticipantMark participant={participant} />
-              <span className="participant-copy">
-                <strong>{participant.name}</strong>
-                <small>{participant.installed ? participant.version ?? "Installed" : "Not installed"}</small>
-              </span>
-              <span className={`status-chip ${participant.installed ? "available" : ""}`}>
-                {participant.installed ? "Ready" : "Unavailable"}
+          {run.worktreePath && (
+            <div className="recovery-block">
+              <HardDrive size={15} />
+              <span>
+                <strong>Recoverable worktree</strong>
+                <code>{run.worktreePath}</code>
               </span>
             </div>
+          )}
+          {run.artifactPath && (
+            <div className="recovery-block log-block">
+              <Braces size={15} />
+              <span>
+                <strong>Durable run artifacts</strong>
+                <code>{run.artifactPath}</code>
+              </span>
+            </div>
+          )}
+          <div className="status-note">
+            <Check size={15} />
+            <span>
+              <strong>Promotion is gated</strong>
+              <small>The base HEAD must remain clean and unchanged before a fast-forward.</small>
+            </span>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "Participants" && (
+        <div
+          className="inspector-body participant-list"
+          id="inspector-panel-participants"
+          role="tabpanel"
+          aria-labelledby="inspector-tab-participants"
+        >
+          {environment.participants.map((participant) => (
+            <div className="participant-card" key={participant.kind}>
+              <div className="participant-row">
+                <ParticipantMark participant={participant} />
+                <span className="participant-copy">
+                  <strong>{participant.name}</strong>
+                  <small>{participant.installed ? participant.version ?? "Installed" : "Not installed"}</small>
+                </span>
+                <span className={`status-chip mode-${participant.capabilities.autonomyMode}`}>
+                  {autonomyLabel(participant.capabilities.autonomyMode)}
+                </span>
+              </div>
+              <p>{participant.capabilities.autonomyNote}</p>
+              <div className="capability-line">
+                <span>{participant.capabilities.exactResume ? "Resume" : "Fresh session"}</span>
+                <span>{participant.capabilities.structuredOutput ? "Structured" : "Text result"}</span>
+                <span>{participant.capabilities.streaming ? "Streaming" : "Completion only"}</span>
+              </div>
+              <ul className="capability-proof">
+                {participant.capabilities.capabilityProof.map((proof) => (
+                  <li key={proof}>{proof}</li>
+                ))}
+              </ul>
+            </div>
           ))}
-          <p className="inspector-help">Unavailable participants are never silently substituted.</p>
+          <p className="inspector-help">
+            Missing capabilities are shown as downgrades. Agent Room never substitutes an unavailable CLI.
+          </p>
         </div>
       )}
+
       {activeTab === "Evidence" && (
-        <div className="inspector-body">
-          <div className="evidence-tile"><ShieldCheck size={18} /><span><strong>Repository truth</strong><small>Direct Git evidence, not an agent claim</small></span></div>
-          <div className="data-row"><span>Latest event</span><strong>{lastMessage?.kind ?? "None yet"}</strong></div>
-          <div className="data-row"><span>Changed files</span><strong>{lastMessage?.changedFiles?.length ?? 0}</strong></div>
-          <div className="data-row"><span>Verification</span><strong>Not configured</strong></div>
+        <div
+          className="inspector-body"
+          id="inspector-panel-evidence"
+          role="tabpanel"
+          aria-labelledby="inspector-tab-evidence"
+        >
+          <div className="evidence-tile">
+            <ShieldCheck size={18} />
+            <span>
+              <strong>Coordinator-owned evidence</strong>
+              <small>Git and process results decide completion, not an agent claim.</small>
+            </span>
+          </div>
+          <div className="data-row">
+            <span>Changed files</span>
+            <strong>{latestEvidence?.changedFiles?.length ?? 0}</strong>
+          </div>
+          <div className="data-row">
+            <span>Context packet</span>
+            <strong>{contextLabel(run.contextBytes)}</strong>
+          </div>
+          <div className="data-row">
+            <span>Review</span>
+            <strong>{run.degradedReview ? "Same provider" : run.reviewer ? "Independent" : "Pending"}</strong>
+          </div>
+          <div className="data-row">
+            <span>Handoff contract</span>
+            <strong>Schema v1</strong>
+          </div>
+          <VerificationList verification={verification} />
         </div>
       )}
+
       {activeTab === "Memory" && (
-        <div className="inspector-body memory-body">
+        <div
+          className="inspector-body memory-body"
+          id="inspector-panel-memory"
+          role="tabpanel"
+          aria-labelledby="inspector-tab-memory"
+        >
           <span className="memory-label">Current direction</span>
-          <p>Use a local room to carry objectives, evidence, and review findings between coding agents.</p>
-          <span className="memory-label">Constraints</span>
-          <p>One active writer. No self-review. One automatic revision. Two reviews maximum.</p>
-          <button className="secondary-button"><History size={15} /> View revisions</button>
+          <p>
+            Carry one objective, compact handoffs, repository evidence, and review findings between coding CLIs.
+          </p>
+          <span className="memory-label">Autonomy boundary</span>
+          <p>
+            One writer, managed worktree, deterministic routing, one revision, two reviews, then complete or notify.
+          </p>
+          <span className="memory-label">Context policy</span>
+          <p>Native session history plus a measured 48 KiB delta packet. No full room replay.</p>
+          <span className="memory-label">Instruction hierarchy</span>
+          {run.instructionFiles?.length ? (
+            <div className="context-file-list">
+              {run.instructionFiles.map((file) => (
+                <code key={file}>{file}</code>
+              ))}
+            </div>
+          ) : (
+            <p>No repository AGENTS.md or CLAUDE.md files were discovered for this run.</p>
+          )}
+          <span className="memory-label">Selected project skills</span>
+          {run.skillFiles?.length ? (
+            <div className="context-file-list">
+              {run.skillFiles.map((file) => (
+                <code key={file}>{file}</code>
+              ))}
+            </div>
+          ) : (
+            <p>No repository-local skill matched this objective. Provider-global skills remain provider-owned.</p>
+          )}
+          <button type="button" className="secondary-button">
+            <History size={15} />
+            {run.recoveryCount ?? 0} of 2 recovery attempts used
+          </button>
         </div>
       )}
     </aside>
@@ -262,44 +585,105 @@ export function App() {
   const [run, setRun] = useState<Run>(seedRun);
   const [objective, setObjective] = useState("");
   const [stream, setStream] = useState("");
+  const [streamTitle, setStreamTitle] = useState("Provider events");
   const [activeTab, setActiveTab] = useState<InspectorTab>("Repository");
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [uiError, setUiError] = useState("");
   const timelineRef = useRef<HTMLDivElement>(null);
+  const runRef = useRef(run);
   const native = isNativeApp();
 
   useEffect(() => {
+    runRef.current = run;
+  }, [run]);
+
+  async function refreshRoom(projectId = project.id) {
     if (!native) return;
+    const snapshot = await loadRoom(projectId);
+    if (snapshot.messages.length) setMessages(snapshot.messages);
+    if (snapshot.latestRun) setRun(hydrateRun(snapshot.latestRun));
+  }
+
+  useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
     getEnvironment()
-      .then((nextEnvironment) => {
-        setEnvironment(nextEnvironment);
-        setProject((current) => ({
-          ...current,
+      .then(async (nextEnvironment) => {
+        if (disposed) return;
+        const nextProject = {
+          ...seedProject,
           repositoryPath: nextEnvironment.repositoryPath,
           branch: nextEnvironment.branch,
-        }));
+        };
+        setEnvironment(nextEnvironment);
+        setProject(nextProject);
+        await saveProject(nextProject);
+        await refreshRoom(nextProject.id);
       })
       .catch((error) => console.error("Failed to inspect native environment", error));
-    let unlisten: (() => void) | undefined;
-    onActivationEvent((event) => {
-      if (event.stream === "stdout") setStream((current) => `${current}${event.payload}\n`);
-    }).then((dispose) => { unlisten = dispose; });
-    return () => unlisten?.();
+
+    onRunEvent((event: RunEvent) => {
+      if (event.eventType === "stream") {
+        setStreamTitle(event.agent ? `${agentNames[event.agent]} / ${event.phase}` : event.title);
+        setStream((current) => `${current}${event.detail}\n`.slice(-12_000));
+        return;
+      }
+      setRun((current) => {
+        if (current.id !== event.runId) return current;
+        const writer = current.writer ?? (event.phase === "build" ? event.agent : undefined);
+        const reviewer =
+          current.reviewer ?? (["review", "final-review"].includes(event.phase) ? event.agent : undefined);
+        return {
+          ...current,
+          state: asRunState(event.state),
+          currentOwner: event.agent,
+          writer,
+          reviewer,
+          contextBytes: Math.max(current.contextBytes ?? 0, event.contextBytes ?? 0),
+          stopReason: event.eventType === "attention" ? event.detail : current.stopReason,
+          route: routeForPhase(event.phase, writer, reviewer),
+        };
+      });
+    }).then((dispose) => {
+      unlisten = dispose;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [native]);
 
   useEffect(() => {
-    timelineRef.current?.scrollTo({ top: timelineRef.current.scrollHeight, behavior: "smooth" });
+    timelineRef.current?.scrollTo({
+      top: timelineRef.current.scrollHeight,
+      behavior: "smooth",
+    });
   }, [messages, stream]);
 
   const installedCount = useMemo(
-    () => environment.participants.filter((participant) => participant.installed).length,
+    () => environment.participants.filter(participantIsRunnable).length,
     [environment],
   );
 
   async function submitObjective(event: FormEvent) {
     event.preventDefault();
     const text = objective.trim();
-    if (!text || ["working", "reviewing", "revising"].includes(run.state)) return;
+    if (!text || activeStates.includes(run.state)) return;
+    setUiError("");
+
     const nextRun = createRun(text, environment.participants);
+    const writer = nextRun.currentOwner;
+    const reviewer =
+      environment.participants.find(
+        (participant) => participantIsRunnable(participant) && participant.kind !== writer,
+      )?.kind ?? writer;
+    nextRun.writer = writer;
+    nextRun.reviewer = reviewer;
+    nextRun.degradedReview = Boolean(writer && reviewer === writer);
+    nextRun.route = routeForPhase("build", writer, reviewer);
     setRun(nextRun);
     setObjective("");
     setStream("");
@@ -315,127 +699,238 @@ export function App() {
       },
     ]);
 
-    if (!nextRun.currentOwner) {
-      setMessages((current) => [...current, {
-        id: crypto.randomUUID(),
-        kind: "decision",
-        sender: "system",
-        body: nextRun.stopReason ?? "Choose an available participant.",
-        createdAt: new Date().toISOString(),
-        runId: nextRun.id,
-      }]);
+    if (!writer) {
+      setMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          kind: "decision",
+          sender: "system",
+          body: nextRun.stopReason ?? "Choose an available participant.",
+          createdAt: new Date().toISOString(),
+          runId: nextRun.id,
+        },
+      ]);
       return;
     }
 
     if (!native) {
-      setRun({ ...nextRun, state: "waiting", stopReason: "Desktop runtime required to execute this objective." });
-      setMessages((current) => [...current, {
-        id: crypto.randomUUID(),
-        kind: "status",
-        sender: "system",
-        body: "Preview mode does not execute provider CLIs. Launch the Tauri desktop app to run Codex in this repository.",
-        reason: "The browser preview is intentionally read-only.",
-        createdAt: new Date().toISOString(),
-        runId: nextRun.id,
-      }]);
+      setRun({
+        ...nextRun,
+        state: "waiting",
+        stopReason: "Desktop runtime required to execute this objective.",
+      });
+      setMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          kind: "status",
+          sender: "system",
+          body: "Preview mode shows the v1 interface but never starts provider CLIs.",
+          reason: "Launch the Tauri desktop app to create a managed worktree and run the autonomous route.",
+          createdAt: new Date().toISOString(),
+          runId: nextRun.id,
+        },
+      ]);
       return;
     }
 
     try {
-      const result = await startCodexRun(project.id, text, project.repositoryPath);
-      setRun((current) => ({
-        ...current,
-        id: result.runId,
-        state: result.stopped ? "stopped" : "complete",
-        nativeSessionId: result.sessionId,
-        route: current.route.map((step) => ({ ...step, state: "complete" })),
-      }));
-      setMessages((current) => [...current, {
-        id: crypto.randomUUID(),
-        kind: "agent",
-        sender: "codex",
-        body: result.summary || "Codex completed without a final summary.",
-        createdAt: new Date().toISOString(),
-        runId: result.runId,
-        changedFiles: result.changedFiles,
-      }, {
-        id: crypto.randomUUID(),
-        kind: "evidence",
-        sender: "system",
-        body: result.changedFiles.length
-          ? `${result.changedFiles.length} changed file${result.changedFiles.length === 1 ? "" : "s"} captured from Git.`
-          : "Git reported no changed files for this run.",
-        reason: result.gitStatus,
-        createdAt: new Date().toISOString(),
-        runId: result.runId,
-        changedFiles: result.changedFiles,
-      }]);
+      await startRoomRun({
+        runId: nextRun.id,
+        projectId: project.id,
+        objective: text,
+        repositoryPath: project.repositoryPath,
+        requestedAgent: writer,
+      });
+      await refreshRoom(project.id);
+      const nextEnvironment = await getEnvironment();
+      setEnvironment(nextEnvironment);
+      setProject((current) => ({ ...current, branch: nextEnvironment.branch }));
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      setUiError(detail);
       setRun((current) => ({ ...current, state: "failed", stopReason: detail }));
-      setMessages((current) => [...current, {
-        id: crypto.randomUUID(),
-        kind: "error",
-        sender: "system",
-        body: "Codex stopped before returning a result.",
-        reason: `${detail} Repository state may contain partial changes; inspect Git evidence before retrying.`,
-        createdAt: new Date().toISOString(),
-        runId: nextRun.id,
-      }]);
+      setMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          kind: "error",
+          sender: "system",
+          body: "The autonomous route could not start.",
+          reason: detail,
+          createdAt: new Date().toISOString(),
+          runId: nextRun.id,
+        },
+      ]);
+      await refreshRoom(project.id).catch(() => undefined);
     }
   }
 
   async function handleStop() {
-    if (native) await stopRun(run.id);
-    setRun((current) => ({ ...current, state: "stopped", stopReason: "Stopped by you." }));
+    if (native) await stopRun(runRef.current.id);
+    setRun((current) => ({
+      ...current,
+      state: "stopped",
+      stopReason: "Stop requested. Agent Room is preserving recoverable work.",
+    }));
+  }
+
+  async function handleResume() {
+    if (
+      !native ||
+      !run.worktreePath ||
+      activeStates.includes(run.state) ||
+      (run.recoveryCount ?? 0) >= 2
+    ) {
+      return;
+    }
+    setUiError("");
+    setStream("");
+    setRun((current) => ({
+      ...current,
+      state: "working",
+      currentOwner: current.writer,
+      stopReason: undefined,
+      recoveryCount: (current.recoveryCount ?? 0) + 1,
+      route: routeForPhase("build", current.writer, current.reviewer),
+    }));
+    try {
+      await startRoomRun({
+        runId: run.id,
+        projectId: project.id,
+        objective: run.objective,
+        repositoryPath: project.repositoryPath,
+        requestedAgent: run.writer,
+      });
+      await refreshRoom(project.id);
+      setEnvironment(await getEnvironment());
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setUiError(detail);
+      setRun((current) => ({ ...current, state: "failed", stopReason: detail }));
+      await refreshRoom(project.id).catch(() => undefined);
+    }
   }
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#room-main">
+        Skip to room
+      </a>
       <header className="topbar">
-        <div className="brand"><span className="brand-mark"><span /></span><strong>Agent Room</strong></div>
-        <button className="project-switch"><span className="project-monogram small">AR</span><span><strong>{project.name}</strong><small>{project.branch}</small></span><ChevronRight size={15} /></button>
-        <button className="search-button"><Search size={16} /><span>Search rooms and evidence</span><kbd>Ctrl K</kbd></button>
-        <div className="topbar-status"><span className={native ? "online" : ""} />{native ? "Desktop runtime" : "Preview mode"}</div>
-        <button className="icon-button context-toggle" aria-label="Toggle context" onClick={() => setInspectorOpen((open) => !open)}><PanelRight size={18} /></button>
-        <button className="icon-button" aria-label="Settings"><Settings size={18} /></button>
+        <div className="brand">
+          <span className="brand-mark">
+            <span />
+          </span>
+          <strong>Agent Room</strong>
+        </div>
+        <button type="button" className="project-switch">
+          <span className="project-monogram small">AR</span>
+          <span>
+            <strong>{project.name}</strong>
+            <small>{project.branch}</small>
+          </span>
+          <ChevronRight size={15} />
+        </button>
+        <button type="button" className="search-button">
+          <Search size={16} />
+          <span>Search rooms and evidence</span>
+          <kbd>Ctrl K</kbd>
+        </button>
+        <div className="topbar-status">
+          <span className={native ? "online" : ""} />
+          {native ? "Autonomous runtime" : "Read-only preview"}
+        </div>
+        <button
+          type="button"
+          className="icon-button context-toggle"
+          aria-label="Toggle context"
+          onClick={() => setInspectorOpen((open) => !open)}
+        >
+          <PanelRight size={18} />
+        </button>
+        <button type="button" className="icon-button" aria-label="Settings">
+          <Settings size={18} />
+        </button>
       </header>
 
-      <ProjectRail project={project} />
+      <ProjectRail project={project} run={run} installedCount={installedCount} />
 
-      <main className="room">
+      <main className="room" id="room-main" tabIndex={-1}>
         <div className="room-header">
           <div>
-            <span className="eyebrow">Project room</span>
+            <span className="eyebrow">Autonomous project room</span>
             <h1>{project.name}</h1>
             <p>{project.goal}</p>
           </div>
-          <div className="room-meta"><span><GitBranch size={14} />{project.branch}</span><span><Bot size={14} />{installedCount} of 4 ready</span></div>
+          <div className="room-meta">
+            <span>
+              <GitBranch size={14} />
+              {project.branch}
+            </span>
+            <span>
+              <Bot size={14} />
+              {installedCount} of 4 ready
+            </span>
+          </div>
         </div>
 
-        <RunLens run={run} participants={environment.participants} onStop={handleStop} />
+        <RunLens
+          run={run}
+          participants={environment.participants}
+          onStop={handleStop}
+          onResume={handleResume}
+        />
 
-        <div className="timeline" ref={timelineRef}>
-          <div className="timeline-date"><span>Room opened</span></div>
-          {messages.map((message) => <TimelineEntry key={message.id} message={message} />)}
-          {stream && (
-            <article className="stream-block">
-              <header><span className="stream-pulse" /><strong>Codex is working</strong><small>Live provider events</small></header>
-              <pre>{stream.slice(-5000)}</pre>
+        <div className="timeline" ref={timelineRef} role="feed" aria-label="Room timeline">
+          <div className="timeline-date">
+            <span>Durable room</span>
+          </div>
+          {messages.map((message) => (
+            <TimelineEntry key={message.id} message={message} />
+          ))}
+          {stream && activeStates.includes(run.state) && (
+            <article
+              className="stream-block"
+              role="log"
+              aria-live="polite"
+              aria-relevant="additions text"
+            >
+              <header>
+                <span className="stream-pulse" />
+                <strong>{streamTitle}</strong>
+                <small>Live, capped locally</small>
+              </header>
+              <pre>{stream}</pre>
             </article>
           )}
         </div>
 
         <form className="composer" onSubmit={submitObjective}>
-          <div className="composer-context"><span><TerminalSquare size={14} />{project.name}</span><span><Bot size={14} />Mentions route explicitly</span></div>
+          <div className="composer-context">
+            <span>
+              <TerminalSquare size={14} />
+              {project.name}
+            </span>
+            <span>
+              <ShieldCheck size={14} />
+              Isolate, verify, review, promote
+            </span>
+          </div>
+          <label className="composer-label" htmlFor="room-objective">
+            Engineering objective
+            <span>State it once. Agent Room carries the handoffs.</span>
+          </label>
           <textarea
+            id="room-objective"
             value={objective}
             onChange={(event) => setObjective(event.target.value)}
             onKeyDown={(event) => {
               if (event.ctrlKey && event.key === "Enter") event.currentTarget.form?.requestSubmit();
             }}
-            placeholder="@codex State the objective once…"
-            aria-label="Objective"
+            placeholder="@codex State the objective once..."
+            aria-describedby={uiError ? "composer-error" : undefined}
             rows={2}
           />
           <div className="composer-actions">
@@ -444,27 +939,59 @@ export function App() {
                 <button
                   type="button"
                   key={participant.kind}
-                  disabled={!participant.installed}
-                  onClick={() => setObjective((current) => `@${participant.kind} ${current.replace(/^@\w+\s*/, "")}`)}
-                  title={participant.installed ? `Route to ${participant.name}` : `${participant.name} is not installed`}
+                  disabled={!participantIsRunnable(participant)}
+                  onClick={() =>
+                    setObjective(
+                      (current) => `@${participant.kind} ${current.replace(/^@\w+\s*/, "")}`,
+                    )
+                  }
+                  title={
+                    participantIsRunnable(participant)
+                      ? `${autonomyLabel(participant.capabilities.autonomyMode)}: ${participant.capabilities.autonomyNote}`
+                      : participant.capabilities.autonomyNote
+                  }
                 >
                   <ParticipantMark participant={participant} />
                   <span>{participant.name}</span>
                 </button>
               ))}
             </div>
-            <button className="send-button" disabled={!objective.trim() || ["working", "reviewing", "revising"].includes(run.state)}>
+            <button
+              type="submit"
+              className="send-button"
+              disabled={!objective.trim() || activeStates.includes(run.state)}
+              aria-busy={activeStates.includes(run.state)}
+            >
               <Play size={15} fill="currentColor" />
-              Send objective
-              <kbd>Ctrl ↵</kbd>
+              Run autonomously
+              <kbd>Ctrl Enter</kbd>
             </button>
           </div>
+          {uiError && (
+            <p className="composer-error" id="composer-error" role="alert">
+              {uiError}
+            </p>
+          )}
         </form>
       </main>
 
       <div className={`inspector-wrap ${inspectorOpen ? "open" : ""}`}>
-        <button className="inspector-close" aria-label="Close context" onClick={() => setInspectorOpen(false)}><X size={18} /></button>
-        <Inspector project={project} environment={environment} activeTab={activeTab} setActiveTab={setActiveTab} lastMessage={messages.at(-1)} />
+        <button
+          type="button"
+          className="inspector-close"
+          aria-label="Close context"
+          onClick={() => setInspectorOpen(false)}
+        >
+          <X size={18} />
+        </button>
+        <Inspector
+          project={project}
+          environment={environment}
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          run={run}
+          messages={messages}
+        />
       </div>
     </div>
   );

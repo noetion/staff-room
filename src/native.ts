@@ -1,11 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type { NativeEnvironment, StartRunResult } from "./model";
+import type {
+  AgentKind,
+  NativeEnvironment,
+  Project,
+  RoomSnapshot,
+  StartRunResult,
+} from "./model";
 
-export interface ActivationEvent {
+export interface RunEvent {
   runId: string;
-  stream: "stdout" | "stderr" | "status";
-  payload: string;
+  eventType: "phase" | "stream" | "attention" | "complete";
+  phase: string;
+  state: string;
+  agent?: AgentKind;
+  title: string;
+  detail: string;
+  contextBytes?: number;
 }
 
 export function isNativeApp(): boolean {
@@ -16,24 +27,32 @@ export async function getEnvironment(): Promise<NativeEnvironment> {
   return invoke<NativeEnvironment>("get_environment");
 }
 
-export async function startCodexRun(
-  projectId: string,
-  objective: string,
-  repositoryPath: string,
+export async function saveProject(project: Project): Promise<void> {
+  return invoke("save_project", { project });
+}
+
+export async function loadRoom(projectId: string): Promise<RoomSnapshot> {
+  return invoke<RoomSnapshot>("load_room", { projectId });
+}
+
+export async function startRoomRun(
+  request: {
+    runId: string;
+    projectId: string;
+    objective: string;
+    repositoryPath: string;
+    requestedAgent?: AgentKind;
+  },
 ): Promise<StartRunResult> {
-  return invoke<StartRunResult>("start_codex_run", {
-    projectId,
-    objective,
-    repositoryPath,
-  });
+  return invoke<StartRunResult>("start_room_run", { request });
 }
 
 export async function stopRun(runId: string): Promise<boolean> {
   return invoke<boolean>("stop_run", { runId });
 }
 
-export async function onActivationEvent(
-  callback: (event: ActivationEvent) => void,
+export async function onRunEvent(
+  callback: (event: RunEvent) => void,
 ): Promise<UnlistenFn> {
-  return listen<ActivationEvent>("activation-event", (event) => callback(event.payload));
+  return listen<RunEvent>("run-event", (event) => callback(event.payload));
 }

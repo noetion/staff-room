@@ -1,31 +1,26 @@
-# Codex provider report
+# Codex provider
 
 ## Local proof
 
 - Executable: `<user-home>\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`
-- Version: `codex-cli 0.144.4`
+- Version tested: `codex-cli 0.144.4`
 - Status: installed
+- Live-help proof: exec, never-ask approvals, workspace sandbox, JSONL, final-output capture, and resume
 
-## Adapter surface
+## Working v1 contract
 
 - Non-interactive turn: `codex exec`
-- Repository scope: `--cd <path>`
-- Structured events: `--json` newline-delimited JSON
-- Final response: `--output-last-message <path>`
-- Structured final result: `--output-schema <path>`
-- Session resume: `codex exec resume <session-id>`
-- Sandbox: `--sandbox read-only|workspace-write|danger-full-access`
-- Cancellation: owned child-process termination
+- Repository scope: global `--cd <managed-worktree>`
+- Structured events: `--json`
+- Final response: `--output-last-message <durable-run-artifact-file>`
+- Final handoff: Agent Room schema-v1 JSON record between explicit result markers
+- Session resume: `codex exec resume <session-id> -`
+- Build/revision policy: `--ask-for-approval never --sandbox workspace-write`
+- Review policy: `--ask-for-approval never --sandbox read-only`
+- Cancellation: terminate only the child process owned by the run
 
-## First-slice command shape
+The `never` approval policy returns denied escalation failures to the model instead of asking the user. The filesystem sandbox remains active. Agent Room does not use `--dangerously-bypass-approvals-and-sandbox`.
 
-```text
-codex exec
-  --json
-  --sandbox workspace-write
-  --cd <repository>
-  --output-last-message <app-cache-file>
-  <objective>
-```
+## Capability result
 
-The executable is launched directly with an argument array. No shell command string is evaluated.
+`isolated-auto`: complete unattended repository work inside the managed worktree without routine approval prompts.

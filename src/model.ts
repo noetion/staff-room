@@ -4,8 +4,10 @@ export type RunState =
   | "ready"
   | "selecting"
   | "working"
+  | "verifying"
   | "reviewing"
   | "revising"
+  | "promoting"
   | "waiting"
   | "complete"
   | "failed"
@@ -28,6 +30,17 @@ export interface ProviderCapabilities {
   exactResume: boolean;
   cancellation: boolean;
   writeMode: boolean;
+  approvalBridge: boolean;
+  usageReporting: boolean;
+  repositoryScoping: boolean;
+  autonomyMode:
+    | "isolated-auto"
+    | "reviewed-auto"
+    | "unattended-bypass"
+    | "manual"
+    | "unavailable";
+  autonomyNote: string;
+  capabilityProof: string[];
 }
 
 export interface Participant {
@@ -36,7 +49,7 @@ export interface Participant {
   installed: boolean;
   version?: string;
   executablePath?: string;
-  state: "ready" | "running" | "reviewing" | "unavailable";
+  state: "ready" | "running" | "reviewing" | "manual" | "unavailable";
   capabilities: ProviderCapabilities;
 }
 
@@ -67,8 +80,8 @@ export interface VerificationResult {
 }
 
 export interface RouteStep {
-  agent: AgentKind;
-  label: "Build" | "Review" | "Revise" | "Final review";
+  agent?: AgentKind;
+  label: "Build" | "Verify" | "Review" | "Revise" | "Final review" | "Promote";
   state: "complete" | "current" | "next";
 }
 
@@ -83,6 +96,16 @@ export interface Run {
   startedAt: string;
   stopReason?: string;
   nativeSessionId?: string;
+  writer?: AgentKind;
+  reviewer?: AgentKind;
+  degradedReview?: boolean;
+  worktreePath?: string;
+  branch?: string;
+  contextBytes?: number;
+  artifactPath?: string;
+  instructionFiles?: string[];
+  skillFiles?: string[];
+  recoveryCount?: number;
 }
 
 export interface NativeEnvironment {
@@ -94,11 +117,52 @@ export interface NativeEnvironment {
 
 export interface StartRunResult {
   runId: string;
+  state: RunState;
   summary: string;
+  builder: AgentKind;
+  reviewer: AgentKind;
+  degradedReview: boolean;
   sessionId?: string;
   changedFiles: string[];
   gitStatus: string;
+  verification: VerificationResult[];
   stopped: boolean;
+  promoted: boolean;
+  worktreePath?: string;
+  branch: string;
+  contextBytes: number;
+  attentionReason?: string;
+  artifactPath?: string;
+  instructionFiles: string[];
+  skillFiles: string[];
+  recoveryCount: number;
+}
+
+export interface StoredRun {
+  id: string;
+  objective: string;
+  state: RunState;
+  currentOwner?: AgentKind;
+  writer?: AgentKind;
+  reviewer?: AgentKind;
+  reviewCount: number;
+  revisionCount: number;
+  startedAt: string;
+  stopReason?: string;
+  nativeSessionId?: string;
+  worktreePath?: string;
+  branch?: string;
+  contextBytes: number;
+  degradedReview: boolean;
+  artifactPath?: string;
+  instructionFiles: string[];
+  skillFiles: string[];
+  recoveryCount: number;
+}
+
+export interface RoomSnapshot {
+  messages: RoomMessage[];
+  latestRun?: StoredRun;
 }
 
 export const agentNames: Record<AgentKind, string> = {

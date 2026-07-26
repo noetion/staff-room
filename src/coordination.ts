@@ -2,6 +2,13 @@ import type { AgentKind, Participant, RouteStep, Run } from "./model";
 
 const mentionPattern = /@(codex|claude|cursor|antigravity)\b/i;
 
+export function participantIsRunnable(participant: Participant): boolean {
+  return (
+    participant.installed &&
+    !["manual", "unavailable"].includes(participant.capabilities.autonomyMode)
+  );
+}
+
 export function explicitAgent(objective: string): AgentKind | undefined {
   return objective.match(mentionPattern)?.[1].toLowerCase() as AgentKind | undefined;
 }
@@ -13,12 +20,16 @@ export function selectParticipant(
 ): AgentKind | undefined {
   const requested = explicitAgent(objective);
   if (requested) {
-    return participants.find((participant) => participant.kind === requested && participant.installed)?.kind;
+    return participants.find(
+      (participant) => participant.kind === requested && participantIsRunnable(participant),
+    )?.kind;
   }
   if (replyTarget) {
-    return participants.find((participant) => participant.kind === replyTarget && participant.installed)?.kind;
+    return participants.find(
+      (participant) => participant.kind === replyTarget && participantIsRunnable(participant),
+    )?.kind;
   }
-  return participants.find((participant) => participant.installed)?.kind;
+  return participants.find(participantIsRunnable)?.kind;
 }
 
 export function createRun(
@@ -47,7 +58,7 @@ export function requestReview(
 ): Run {
   if (!run.currentOwner) return run;
   const reviewer = participants.find(
-    (participant) => participant.installed && participant.kind !== run.currentOwner,
+    (participant) => participantIsRunnable(participant) && participant.kind !== run.currentOwner,
   );
   if (!reviewer) {
     return {
@@ -80,4 +91,39 @@ export function isTerminal(run: Run): boolean {
 
 export function contextPacketSize(parts: string[]): number {
   return parts.reduce((total, part) => total + new TextEncoder().encode(part).length, 0);
+}
+
+export function routeForPhase(
+  phase: string,
+  writer?: AgentKind,
+  reviewer?: AgentKind,
+): RouteStep[] {
+  const steps: RouteStep[] = [
+    { agent: writer, label: "Build", state: "next" },
+    { label: "Verify", state: "next" },
+    { agent: reviewer, label: "Review", state: "next" },
+  ];
+  if (phase === "revise" || phase === "final-review") {
+    steps.push(
+      { agent: writer, label: "Revise", state: "next" },
+      { agent: reviewer, label: "Final review", state: "next" },
+    );
+  }
+  steps.push({ label: "Promote", state: "next" });
+
+  const order: Record<string, number> = {
+    prepare: 0,
+    build: 0,
+    verify: 1,
+    review: 2,
+    revise: 3,
+    "final-review": 4,
+    promote: steps.length - 1,
+    complete: steps.length,
+  };
+  const current = order[phase] ?? 0;
+  return steps.map((step, index) => ({
+    ...step,
+    state: index < current ? "complete" : index === current ? "current" : "next",
+  }));
 }
