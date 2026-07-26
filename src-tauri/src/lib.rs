@@ -28,7 +28,7 @@ use uuid::Uuid;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt as _;
 
-const CONTEXT_BUDGET_BYTES: usize = 48 * 1024;
+const BUILD_CONTEXT_BUDGET_BYTES: usize = 48 * 1024;
 const SOURCE_BUDGET_BYTES: usize = 16 * 1024;
 const CHAT_TIMELINE_BUDGET_BYTES: usize = 32 * 1024;
 const PROCESS_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
@@ -467,6 +467,16 @@ impl Phase {
             Self::FinalReview => "final-review",
         }
     }
+
+    fn context_budget_bytes(self) -> usize {
+        match self {
+            Self::Chat => 8 * 1024,
+            Self::Build => BUILD_CONTEXT_BUDGET_BYTES,
+            Self::Review => 32 * 1024,
+            Self::Revise => 16 * 1024,
+            Self::FinalReview => 12 * 1024,
+        }
+    }
 }
 
 fn idle_timeout_seconds(_phase: Phase) -> u64 {
@@ -492,6 +502,12 @@ struct ProviderRun {
     session_resumed: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ChatSession {
+    provider_session_id: String,
+    last_seen_message_rowid: i64,
+}
+
 struct ChatReceiptMetrics {
     context_bytes: usize,
     preflight_ms: u64,
@@ -500,6 +516,7 @@ struct ChatReceiptMetrics {
 
 struct ReceiptMetrics {
     context_bytes: usize,
+    packet_bytes_saved: usize,
     preflight_ms: u64,
     total_ms: u64,
 }
@@ -618,6 +635,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             project_id TEXT NOT NULL,
             participant_kind TEXT NOT NULL,
             provider_session_id TEXT NOT NULL,
+            last_seen_message_rowid INTEGER NOT NULL DEFAULT 0,
             last_used_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(project_id, participant_kind),
             FOREIGN KEY(project_id) REFERENCES projects(id)
@@ -782,6 +800,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE chat_receipts ADD COLUMN total_ms INTEGER",
         "ALTER TABLE chat_receipts ADD COLUMN stdout_log_path TEXT",
         "ALTER TABLE chat_receipts ADD COLUMN stderr_log_path TEXT",
+        "ALTER TABLE chat_sessions ADD COLUMN last_seen_message_rowid INTEGER NOT NULL DEFAULT 0",
     ] {
         let _ = connection.execute(statement, []);
     }
@@ -2151,13 +2170,13 @@ fn project_memory(repository: &Path) -> String {
     )
 }
 
-fn assemble_packet(sections: &[(&str, String)]) -> (String, usize) {
+fn assemble_packet(budget: usize, sections: &[(&str, String)]) -> (String, usize) {
     let mut packet = String::new();
     for (title, content) in sections {
         if content.trim().is_empty() {
             continue;
         }
-        let remaining = CONTEXT_BUDGET_BYTES.saturating_sub(packet.len());
+        let remaining = budget.saturating_sub(packet.len());
         if remaining < 128 {
             packet.push_str("\n\n[context budget reached]");
             break;
@@ -3161,6 +3180,9 @@ async fn invoke_provider(
     .collect::<Vec<_>>()
     .join("\n");
 
+    let session_resumed = participant.capabilities.exact_resume
+        && effective_session_id.is_some()
+        && parsed_session.as_deref() == effective_session_id;
     Ok(ProviderRun {
         summary,
         session_id: parsed_session.or(assigned_session_id),
@@ -3182,7 +3204,7 @@ async fn invoke_provider(
         stderr_log_path: stderr_log_path.to_string_lossy().into_owned(),
         process_start_ms,
         first_output_ms,
-        session_resumed: participant.capabilities.exact_resume && effective_session_id.is_some(),
+        session_resumed,
     })
 }
 
@@ -3369,6 +3391,7 @@ fn save_chat_session(
     project_id: &str,
     participant: &str,
     session_id: Option<&str>,
+    last_seen_message_rowid: i64,
 ) -> Result<(), String> {
     let Some(session_id) = session_id else {
         return Ok(());
@@ -3376,12 +3399,13 @@ fn save_chat_session(
     let connection = database.0.lock().map_err(|error| error.to_string())?;
     connection
         .execute(
-            "INSERT INTO chat_sessions (project_id, participant_kind, provider_session_id)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO chat_sessions (project_id, participant_kind, provider_session_id, last_seen_message_rowid)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(project_id, participant_kind) DO UPDATE SET
                provider_session_id = excluded.provider_session_id,
+               last_seen_message_rowid = excluded.last_seen_message_rowid,
                last_used_at = CURRENT_TIMESTAMP",
-            params![project_id, participant, session_id],
+            params![project_id, participant, session_id, last_seen_message_rowid],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -3391,16 +3415,32 @@ fn load_chat_session(
     database: &Database,
     project_id: &str,
     participant: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<ChatSession>, String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
     connection
         .query_row(
-            "SELECT provider_session_id FROM chat_sessions
+            "SELECT provider_session_id, last_seen_message_rowid FROM chat_sessions
              WHERE project_id = ?1 AND participant_kind = ?2",
             params![project_id, participant],
-            |row| row.get(0),
+            |row| {
+                Ok(ChatSession {
+                    provider_session_id: row.get(0)?,
+                    last_seen_message_rowid: row.get(1)?,
+                })
+            },
         )
         .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn latest_room_message_marker(database: &Database, project_id: &str) -> Result<i64, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .query_row(
+            "SELECT COALESCE(MAX(rowid), 0) FROM messages WHERE project_id = ?1",
+            [project_id],
+            |row| row.get(0),
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -3484,7 +3524,7 @@ fn persist_receipt(
                 }),
                 metrics.total_ms as i64,
                 result.session_resumed as i64,
-                0_i64,
+                metrics.packet_bytes_saved as i64,
                 result.stdout_log_path,
                 result.stderr_log_path,
             ],
@@ -4667,7 +4707,7 @@ fn recent_chat_handoff(
     database: &Database,
     project_id: &str,
     target_participant: &str,
-    resumed_target_session: bool,
+    last_seen_message_rowid: i64,
     exclude_run_id: Option<&str>,
 ) -> Result<Option<String>, String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
@@ -4675,14 +4715,13 @@ fn recent_chat_handoff(
         .prepare(
             "SELECT sender_kind, message_kind, body
              FROM messages
-             WHERE project_id = ?1 AND message_kind IN ('human', 'agent')
-               AND (?2 IS NULL OR run_id IS NULL OR run_id <> ?2)
-             ORDER BY created_at DESC, rowid DESC
-             LIMIT 8",
+             WHERE project_id = ?1 AND rowid > ?2 AND message_kind IN ('human', 'agent')
+               AND (?3 IS NULL OR run_id IS NULL OR run_id <> ?3)
+             ORDER BY rowid ASC",
         )
         .map_err(|error| error.to_string())?;
     let messages = statement
-        .query_map(params![project_id, exclude_run_id], |row| {
+        .query_map(params![project_id, last_seen_message_rowid, exclude_run_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -4692,33 +4731,27 @@ fn recent_chat_handoff(
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    let Some(agent_index) = messages.iter().position(|(_, kind, _)| kind == "agent") else {
-        return Ok(None);
-    };
-    let (agent, _, answer) = &messages[agent_index];
-    if resumed_target_session && agent == target_participant {
+    if messages.is_empty() {
         return Ok(None);
     }
-    let prior_user = messages
-        .iter()
-        .skip(agent_index + 1)
-        .find(|(_, kind, _)| kind == "human")
-        .map(|(_, _, body)| body.as_str());
-    let agent_name = provider_names(agent).0;
-    let handoff = match prior_user {
-        Some(user) => format!(
-            "Recent room handoff from another provider or a non-resumable session:\nUser: {}\n{}: {}",
-            truncate_utf8(user, CHAT_HANDOFF_BUDGET_BYTES / 3),
-            agent_name,
-            truncate_utf8(answer, CHAT_HANDOFF_BUDGET_BYTES * 2 / 3),
-        ),
-        None => format!(
-            "Recent room handoff from another provider or a non-resumable session:\n{}: {}",
-            agent_name,
-            truncate_utf8(answer, CHAT_HANDOFF_BUDGET_BYTES),
-        ),
-    };
-    Ok(Some(truncate_utf8(&handoff, CHAT_HANDOFF_BUDGET_BYTES)))
+    let mut handoff = format!(
+        "Room messages since {} last saw the room:\n",
+        provider_names(target_participant).0
+    );
+    for (sender, kind, body) in messages {
+        let label = if kind == "human" {
+            "User".to_owned()
+        } else {
+            provider_names(&sender).0.to_owned()
+        };
+        let entry = format!("{label}: {body}\n");
+        let remaining = CHAT_HANDOFF_BUDGET_BYTES.saturating_sub(handoff.len());
+        if remaining == 0 {
+            break;
+        }
+        handoff.push_str(&truncate_utf8(&entry, remaining));
+    }
+    Ok(Some(handoff))
 }
 
 fn objective_needs_room_context(objective: &str) -> bool {
@@ -5297,7 +5330,10 @@ async fn start_room_chat(
         database,
         &request.project_id,
         &participant.kind,
-        session_id.is_some(),
+        session_id
+            .as_ref()
+            .map(|session| session.last_seen_message_rowid)
+            .unwrap_or_default(),
         None,
     )?;
     persist_message(
@@ -5341,15 +5377,20 @@ async fn start_room_chat(
              For substantial or unattended implementation work, do not edit first; use the autonomous Ship intent when its trigger matches.\n\nUser message:\n{message}"
         )
     };
+    if settings.autonomous_ship_enabled && active_run.is_none() {
+        if session_id.is_some() {
+            prompt.push_str("\n\nAutonomous Ship remains armed. Follow the previously supplied skill when its trigger matches.");
+        } else {
+            prompt.push_str(&format!(
+                "\n\nAutonomous Ship is armed for this project. Apply the following skill when its trigger matches. The skill is `{AUTONOMOUS_SHIP_SKILL_PATH}`:\n\n{AUTONOMOUS_SHIP_SKILL}"
+            ));
+        }
+    }
     if let Some(handoff) = room_handoff {
         prompt.push_str("\n\n");
         prompt.push_str(&handoff);
     }
-    if settings.autonomous_ship_enabled && active_run.is_none() {
-        prompt.push_str(&format!(
-            "\n\nAutonomous Ship is armed for this project. Apply the following skill when its trigger matches. The skill is `{AUTONOMOUS_SHIP_SKILL_PATH}`:\n\n{AUTONOMOUS_SHIP_SKILL}"
-        ));
-    }
+    let prompt = truncate_utf8(&prompt, Phase::Chat.context_budget_bytes());
     let artifact_dir = run_artifact_directory(&app, &request.run_id)?;
     let output_path = artifact_dir.join("chat.final.txt");
     let preflight_ms = chat_started.elapsed().as_millis() as u64;
@@ -5361,7 +5402,7 @@ async fn start_room_chat(
         ProviderMode::Ask,
         &prompt,
         &repository,
-        session_id.as_deref(),
+        session_id.as_ref().map(|session| session.provider_session_id.as_str()),
         profile.model.as_deref(),
         profile.effort.as_deref(),
         &output_path,
@@ -5382,12 +5423,6 @@ async fn start_room_chat(
         }
     };
     let total_ms = chat_started.elapsed().as_millis() as u64;
-    save_chat_session(
-        database,
-        &request.project_id,
-        &participant.kind,
-        result.session_id.as_deref(),
-    )?;
     persist_chat_receipt(
         database,
         &request.project_id,
@@ -5490,6 +5525,13 @@ async fn start_room_chat(
         &[],
         None,
     )?;
+    save_chat_session(
+        database,
+        &request.project_id,
+        &participant.kind,
+        result.session_id.as_deref(),
+        latest_room_message_marker(database, &request.project_id)?,
+    )?;
     if let Some(intent) = ship_intent.as_ref() {
         persist_message(
             database,
@@ -5590,11 +5632,11 @@ async fn quick_edit_start(
         .lock()
         .await
         .insert(request.edit_id.clone(), cancel_sender);
-    let prompt = format!(
+    let prompt = truncate_utf8(&format!(
         "You are in Quick Edit mode inside an isolated worktree. Make only the requested bounded edit. \
          Do not modify the user's attached checkout, create another worktree, run broad verification, or start Ship. \
          Explain the completed edit briefly.\n\nUser request:\n{message}"
-    );
+    ), 16 * 1024);
     let result = invoke_provider(
         &app,
         &request.edit_id,
@@ -6050,7 +6092,7 @@ async fn execute_room_run(
             database,
             &request.project_id,
             &builder.kind,
-            false,
+            0,
             Some(&request.run_id),
         )?
     } else {
@@ -6074,17 +6116,15 @@ async fn execute_room_run(
         ),
     ];
     if let Some(context) = room_context {
-        build_sections.insert(
-            1,
-            (
-                "Recent room context",
-                format!(
-                    "The objective refers to the recent conversation. Resolve pronouns from this bounded handoff and implement the previously described change:\n{context}"
-                ),
+        build_sections.push((
+            "Recent room context",
+            format!(
+                "The objective refers to the recent conversation. Resolve pronouns from this bounded handoff and implement the previously described change:\n{context}"
             ),
-        );
+        ));
     }
-    let (build_packet, build_context_bytes) = assemble_packet(&build_sections);
+    let (build_packet, build_context_bytes) =
+        assemble_packet(Phase::Build.context_budget_bytes(), &build_sections);
     let mut max_context_bytes = build_context_bytes;
     emit_event(
         &app,
@@ -6162,6 +6202,7 @@ async fn execute_room_run(
         &builder_profile,
         ReceiptMetrics {
             context_bytes: build_context_bytes,
+            packet_bytes_saved: 0,
             preflight_ms: build_preflight_ms,
             total_ms: build_total_ms,
         },
@@ -6380,7 +6421,7 @@ async fn execute_room_run(
     );
     let review_started = Instant::now();
     let (review_instructions, _) = repository_instructions(&worktree, &files);
-    let (review_packet, review_context_bytes) = assemble_packet(&[
+    let (review_packet, review_context_bytes) = assemble_packet(Phase::Review.context_budget_bytes(), &[
         ("Objective", request.objective.clone()),
         ("Review assignment", review_assignment),
         ("Applicable repository instructions", review_instructions),
@@ -6520,6 +6561,7 @@ async fn execute_room_run(
         &reviewer_profile,
         ReceiptMetrics {
             context_bytes: review_context_bytes,
+            packet_bytes_saved: 0,
             preflight_ms: review_preflight_ms,
             total_ms: review_total_ms,
         },
@@ -6622,8 +6664,13 @@ async fn execute_room_run(
             verification_summary(&verification),
             handoff_contract(Phase::Revise)
         );
+        let revision_evidence = format!(
+            "Review findings:\n{}\n\nVerification:\n{}",
+            truncate_utf8(&review_result.summary, SOURCE_BUDGET_BYTES),
+            verification_summary(&verification),
+        );
         let (revision_instructions, _) = repository_instructions(&worktree, &files);
-        let (revision_packet, revision_context_bytes) = assemble_packet(&[
+        let (full_revision_packet, full_revision_context_bytes) = assemble_packet(Phase::Build.context_budget_bytes(), &[
             ("Objective", request.objective.clone()),
             ("Revision assignment", revision_assignment),
             ("Applicable repository instructions", revision_instructions),
@@ -6636,6 +6683,16 @@ async fn execute_room_run(
                     .to_owned(),
             ),
         ]);
+        let revision_resume_requested = builder.capabilities.exact_resume
+            && build_result.session_id.is_some();
+        let (revision_packet, revision_context_bytes) = if revision_resume_requested {
+            assemble_packet(
+                Phase::Revise.context_budget_bytes(),
+                &[("Revision evidence", revision_evidence)],
+            )
+        } else {
+            (full_revision_packet.clone(), full_revision_context_bytes)
+        };
         max_context_bytes = max_context_bytes.max(revision_context_bytes);
         update_run(
             database,
@@ -6662,7 +6719,7 @@ async fn execute_room_run(
         );
         let revision_output_path = artifact_dir.join("revision.final.txt");
         let revision_preflight_ms = revision_started.elapsed().as_millis() as u64;
-        let revision_result = invoke_provider(
+        let mut revision_result = invoke_provider(
             &app,
             &request.run_id,
         builder,
@@ -6677,6 +6734,36 @@ async fn execute_room_run(
             cancel_receiver.clone(),
         )
         .await?;
+        let mut recorded_revision_context_bytes = revision_context_bytes;
+        if revision_resume_requested && !revision_result.session_resumed {
+            emit_event(
+                &app,
+                &request.run_id,
+                "resume",
+                "revise",
+                "working",
+                Some(&builder.kind),
+                "Resume unavailable",
+                "The provider reported a new or unknown session, so Agent Room resent the full revision packet.",
+                Some(full_revision_context_bytes),
+            );
+            revision_result = invoke_provider(
+                &app,
+                &request.run_id,
+                builder,
+                Phase::Revise,
+                ProviderMode::Ship,
+                &full_revision_packet,
+                &worktree,
+                None,
+                builder_profile.model.as_deref(),
+                builder_profile.effort.as_deref(),
+                &revision_output_path,
+                cancel_receiver.clone(),
+            )
+            .await?;
+            recorded_revision_context_bytes = full_revision_context_bytes;
+        }
         let revision_total_ms = revision_started.elapsed().as_millis() as u64;
         persist_handoff(
             database,
@@ -6696,7 +6783,7 @@ async fn execute_room_run(
                 "failed"
             },
             revision_result.session_id.as_deref(),
-            revision_context_bytes,
+            recorded_revision_context_bytes,
             Some(&truncate_utf8(&revision_result.summary, 8 * 1024)),
         )?;
         persist_receipt(
@@ -6706,7 +6793,12 @@ async fn execute_room_run(
             builder,
             &builder_profile,
             ReceiptMetrics {
-                context_bytes: revision_context_bytes,
+                context_bytes: recorded_revision_context_bytes,
+                packet_bytes_saved: if revision_result.session_resumed {
+                    full_revision_context_bytes.saturating_sub(recorded_revision_context_bytes)
+                } else {
+                    0
+                },
                 preflight_ms: revision_preflight_ms,
                 total_ms: revision_total_ms,
             },
@@ -6812,7 +6904,12 @@ async fn execute_room_run(
              Do not request optional improvements.\n\n{}",
             handoff_contract(Phase::FinalReview)
         );
-        let (final_packet, final_context_bytes) = assemble_packet(&[
+        let final_evidence = format!(
+            "Post-revision verification:\n{}\n\nCurrent focused delta:\n{}",
+            verification_summary(&verification),
+            diff_evidence(&worktree, &snapshot_head),
+        );
+        let (full_final_packet, full_final_context_bytes) = assemble_packet(Phase::Review.context_budget_bytes(), &[
             ("Objective", request.objective.clone()),
             ("Final review assignment", final_assignment),
             (
@@ -6828,6 +6925,16 @@ async fn execute_room_run(
                 diff_evidence(&worktree, &snapshot_head),
             ),
         ]);
+        let final_resume_requested = reviewer.capabilities.exact_resume
+            && review_result.session_id.is_some();
+        let (final_packet, final_context_bytes) = if final_resume_requested {
+            assemble_packet(
+                Phase::FinalReview.context_budget_bytes(),
+                &[("Final review evidence", final_evidence)],
+            )
+        } else {
+            (full_final_packet.clone(), full_final_context_bytes)
+        };
         max_context_bytes = max_context_bytes.max(final_context_bytes);
         update_run(
             database,
@@ -6855,7 +6962,7 @@ async fn execute_room_run(
         let final_output_path = artifact_dir.join("final-review.final.txt");
         let final_review_preflight_ms = final_review_started.elapsed().as_millis() as u64;
         let final_review_guard = review_mutation_guard(&worktree)?;
-        let final_result = invoke_provider(
+        let mut final_result = invoke_provider(
             &app,
             &request.run_id,
         reviewer,
@@ -6870,6 +6977,36 @@ async fn execute_room_run(
             cancel_receiver.clone(),
         )
         .await?;
+        let mut recorded_final_context_bytes = final_context_bytes;
+        if final_resume_requested && !final_result.session_resumed {
+            emit_event(
+                &app,
+                &request.run_id,
+                "resume",
+                "final-review",
+                "working",
+                Some(&reviewer.kind),
+                "Resume unavailable",
+                "The provider reported a new or unknown session, so Agent Room resent the full final-review packet.",
+                Some(full_final_context_bytes),
+            );
+            final_result = invoke_provider(
+                &app,
+                &request.run_id,
+                reviewer,
+                Phase::FinalReview,
+                ProviderMode::Ship,
+                &full_final_packet,
+                &worktree,
+                None,
+                reviewer_profile.model.as_deref(),
+                reviewer_profile.effort.as_deref(),
+                &final_output_path,
+                cancel_receiver.clone(),
+            )
+            .await?;
+            recorded_final_context_bytes = full_final_context_bytes;
+        }
         let final_review_total_ms = final_review_started.elapsed().as_millis() as u64;
         if review_mutation_guard(&worktree)? != final_review_guard {
             let reason = "The reviewer modified the worktree.".to_owned();
@@ -6929,7 +7066,7 @@ async fn execute_room_run(
                 "failed"
             },
             final_result.session_id.as_deref(),
-            final_context_bytes,
+            recorded_final_context_bytes,
             Some(&truncate_utf8(&final_result.summary, 8 * 1024)),
         )?;
         persist_receipt(
@@ -6939,7 +7076,12 @@ async fn execute_room_run(
             reviewer,
             &reviewer_profile,
             ReceiptMetrics {
-                context_bytes: final_context_bytes,
+                context_bytes: recorded_final_context_bytes,
+                packet_bytes_saved: if final_result.session_resumed {
+                    full_final_context_bytes.saturating_sub(recorded_final_context_bytes)
+                } else {
+                    0
+                },
                 preflight_ms: final_review_preflight_ms,
                 total_ms: final_review_total_ms,
             },
@@ -7553,9 +7695,9 @@ mod tests {
 
     #[test]
     fn context_packet_is_bounded_and_explicitly_truncated() {
-        let oversized = "x".repeat(CONTEXT_BUDGET_BYTES * 2);
-        let (packet, bytes) = assemble_packet(&[("Large", oversized)]);
-        assert!(bytes <= CONTEXT_BUDGET_BYTES);
+        let oversized = "x".repeat(BUILD_CONTEXT_BUDGET_BYTES * 2);
+        let (packet, bytes) = assemble_packet(Phase::Build.context_budget_bytes(), &[("Large", oversized)]);
+        assert!(bytes <= BUILD_CONTEXT_BUDGET_BYTES);
         assert!(packet.contains("truncated"));
     }
 
@@ -8215,7 +8357,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_provider_handoff_is_bounded_and_skips_resumed_owner() {
+    fn cross_provider_handoff_uses_each_session_watermark() {
         let connection = Connection::open_in_memory().expect("open test database");
         migrate(&connection).expect("migrate test database");
         connection
@@ -8252,18 +8394,18 @@ mod tests {
         .expect("persist agent message");
 
         assert!(
-            recent_chat_handoff(&database, "project-1", "codex", true, None)
+            recent_chat_handoff(&database, "project-1", "codex", 2, None)
                 .expect("same-provider handoff")
                 .is_none()
         );
-        let switched = recent_chat_handoff(&database, "project-1", "claude", true, None)
+        let switched = recent_chat_handoff(&database, "project-1", "claude", 0, None)
             .expect("cross-provider handoff")
             .expect("handoff exists");
         assert!(switched.contains("Codex"));
         assert!(switched.contains("Explain the architecture."));
         assert!(switched.len() <= CHAT_HANDOFF_BUDGET_BYTES);
         assert!(
-            recent_chat_handoff(&database, "project-1", "codex", false, None)
+            recent_chat_handoff(&database, "project-1", "codex", 0, None)
                 .expect("fresh same-provider handoff")
                 .is_some()
         );
@@ -8293,7 +8435,7 @@ mod tests {
         )
         .expect("persist failed build response");
         let recovery_context =
-            recent_chat_handoff(&database, "project-1", "codex", false, Some("ship-1"))
+            recent_chat_handoff(&database, "project-1", "codex", 0, Some("ship-1"))
                 .expect("recovery context")
                 .expect("prior chat remains available");
         assert!(recovery_context.contains("Explain the architecture."));
