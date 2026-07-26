@@ -348,31 +348,9 @@ function VerificationList({ verification }: { verification: VerificationResult[]
   );
 }
 
-function visibleMessageReason(reason?: string): string | undefined {
-  if (!reason) return undefined;
-  const legacyDiagnosticSignals = [
-    "fatal: detected dubious ownership",
-    "codex_models_manager::",
-    "supports_reasoning_summaries",
-    "to add an exception for this directory",
-  ];
-  if (!legacyDiagnosticSignals.some((signal) => reason.toLocaleLowerCase().includes(signal))) {
-    return reason;
-  }
-  const recovery = reason
-    .split(/\r?\n/)
-    .find((line) => line.trim().toLocaleLowerCase().startsWith("recoverable worktree:"));
-  return [
-    "Earlier provider diagnostics are hidden from the conversation. Full details remain in the durable run artifacts.",
-    recovery?.trim(),
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
 function TimelineEntry({ message }: { message: RoomMessage }) {
   const isHuman = message.kind === "human";
-  const reason = visibleMessageReason(message.reason);
+  const reason = message.reason;
   const senderName =
     message.sender === "human"
       ? "You"

@@ -1,4 +1,3 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,14 +5,10 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     ffi::OsStr,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
     process::Command as StdCommand,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
-    },
-    thread,
+    sync::Mutex,
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -34,7 +29,6 @@ const SOURCE_BUDGET_BYTES: usize = 16 * 1024;
 const PROCESS_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const PROCESS_TIMEOUT_SECONDS: u64 = 20 * 60;
 const PROCESS_IDLE_TIMEOUT_SECONDS: u64 = 5 * 60;
-const CHAT_IDLE_TIMEOUT_SECONDS: u64 = 75;
 const MAX_RECOVERY_ATTEMPTS: u32 = 2;
 const MAX_SELECTED_SKILLS: usize = 3;
 const CHAT_HANDOFF_BUDGET_BYTES: usize = 4 * 1024;
@@ -44,7 +38,6 @@ const SHIP_INTENT_START: &str = "AGENT_ROOM_SHIP_INTENT_START";
 const SHIP_INTENT_END: &str = "AGENT_ROOM_SHIP_INTENT_END";
 const AUTONOMOUS_SHIP_SKILL_PATH: &str = ".agents/skills/autonomous-ship/SKILL.md";
 const AUTONOMOUS_SHIP_SKILL: &str = include_str!("../../.agents/skills/autonomous-ship/SKILL.md");
-const EMBEDDED_TUI_CHAT_ENABLED: bool = false;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -53,17 +46,7 @@ struct Database(Mutex<Connection>);
 #[derive(Default)]
 struct RuntimeState {
     cancellations: AsyncMutex<HashMap<String, watch::Sender<bool>>>,
-    interactive_sessions: AsyncMutex<HashMap<String, InteractiveSession>>,
-    interactive_runs: AsyncMutex<HashMap<String, String>>,
     provider_cache: AsyncMutex<HashMap<String, Participant>>,
-}
-
-struct InteractiveSession {
-    _master: Box<dyn portable_pty::MasterPty + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
-    active_run_id: Arc<Mutex<String>>,
-    closed_by_owner: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -219,14 +202,6 @@ struct ChatRequest {
     repository_path: String,
     requested_agent: Option<String>,
     active_run_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalInputRequest {
-    project_id: String,
-    participant_kind: String,
-    key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -397,12 +372,8 @@ impl Phase {
     }
 }
 
-fn idle_timeout_seconds(phase: Phase) -> u64 {
-    if phase == Phase::Chat {
-        CHAT_IDLE_TIMEOUT_SECONDS
-    } else {
-        PROCESS_IDLE_TIMEOUT_SECONDS
-    }
+fn idle_timeout_seconds(_phase: Phase) -> u64 {
+    PROCESS_IDLE_TIMEOUT_SECONDS
 }
 
 #[derive(Debug)]
@@ -2151,13 +2122,6 @@ fn apply_provider_environment(command: &mut Command, repository: &Path) {
     hide_tokio_command_window(command);
 }
 
-fn apply_interactive_provider_environment(command: &mut CommandBuilder, repository: &Path) {
-    command.env("NO_COLOR", "1");
-    command.env("GIT_CONFIG_COUNT", "1");
-    command.env("GIT_CONFIG_KEY_0", "safe.directory");
-    command.env("GIT_CONFIG_VALUE_0", repository);
-}
-
 fn provider_activity(kind: &str, value: &Value) -> Option<(String, String)> {
     let event_type = value
         .get("type")
@@ -2430,14 +2394,6 @@ async fn invoke_provider(
             if let Some(effort) = requested_effort {
                 command.arg("--effort").arg(effort);
             }
-            if participant
-                .capabilities
-                .capability_proof
-                .iter()
-                .any(|proof| proof.contains("max-turns: true"))
-            {
-                command.arg("--max-turns").arg("30");
-            }
             if participant.capabilities.exact_resume {
                 if let Some(id) = session_id {
                     command.arg("--resume").arg(id);
@@ -2479,7 +2435,7 @@ async fn invoke_provider(
                     .arg("--mode")
                     .arg(if allow_writes { "accept-edits" } else { "plan" })
                     .arg("--print-timeout")
-                    .arg(format!("{CHAT_IDLE_TIMEOUT_SECONDS}s"));
+                    .arg(format!("{PROCESS_IDLE_TIMEOUT_SECONDS}s"));
             }
             if let Some(model) = requested_model {
                 command.arg("--model").arg(model);
@@ -2769,410 +2725,6 @@ fn provider_failure_reason(provider: &str, activity: &str, run: &ProviderRun) ->
         "{provider} could not complete {activity}. {}",
         provider_log_note(run)
     )
-}
-
-fn terminal_session_key(project_id: &str, participant: &str) -> String {
-    format!("{project_id}:{participant}")
-}
-
-fn antigravity_chat_response(screen: &str) -> Option<String> {
-    let lines = screen.lines().collect::<Vec<_>>();
-    let prompt_index = lines.iter().rposition(|line| {
-        let line = line.trim_start();
-        line.starts_with("> /plan ") || line.starts_with("> /accept-edits ")
-    })?;
-    let response_lines = lines
-        .iter()
-        .skip(prompt_index + 1)
-        .take_while(|line| {
-            let line = line.trim();
-            !(line.chars().count() >= 20
-                && line
-                    .chars()
-                    .all(|character| matches!(character, '─' | '-' | '━')))
-        })
-        .copied()
-        .collect::<Vec<_>>();
-    let first_content = response_lines
-        .iter()
-        .position(|line| !line.trim().is_empty())?;
-    let last_content = response_lines
-        .iter()
-        .rposition(|line| !line.trim().is_empty())?;
-    let response_lines = &response_lines[first_content..=last_content];
-    let common_indent = response_lines
-        .iter()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.len() - line.trim_start_matches(' ').len())
-        .min()
-        .unwrap_or(0);
-    let response = response_lines
-        .iter()
-        .map(|line| line.get(common_indent..).unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!response.trim().is_empty()).then(|| response.trim().to_owned())
-}
-
-fn terminal_screen_needs_input(screen: &str) -> bool {
-    screen.contains("Choose your color scheme:")
-        || screen.contains("Terms of Service & Data Use")
-        || screen.contains("Navigate · enter")
-        || (screen.contains("[Previous]") && screen.contains("[Done]"))
-}
-
-fn antigravity_response_is_complete(screen: &str) -> bool {
-    screen.contains("for shortcuts")
-        && (screen.contains("Plan mode:") || screen.contains("Accept edits mode:"))
-}
-
-fn interactive_command(
-    kind: &str,
-    executable: &Path,
-    repository: &Path,
-    model: Option<&str>,
-    effort: Option<&str>,
-    initial_prompt: Option<&str>,
-) -> Result<CommandBuilder, String> {
-    let mut command = CommandBuilder::new(executable);
-    command.cwd(repository);
-    match kind {
-        "antigravity" => {
-            command.arg("--sandbox");
-            command.arg("--add-dir");
-            command.arg(repository);
-            command.arg("--dangerously-skip-permissions");
-            command.arg("--mode");
-            command.arg("plan");
-            command.arg("--prompt-interactive");
-            let initial_prompt = initial_prompt.ok_or_else(|| {
-                "Antigravity interactive mode requires an initial user message.".to_owned()
-            })?;
-            command.arg(initial_prompt);
-            if let Some(model) = model {
-                command.arg("--model");
-                command.arg(model);
-            }
-            if let Some(effort) = effort {
-                command.arg("--effort");
-                command.arg(effort);
-            }
-        }
-        "codex" => {
-            command.arg("-C");
-            command.arg(repository);
-            if let Some(model) = model {
-                command.arg("--model");
-                command.arg(model);
-            }
-            if let Some(effort) = effort {
-                command.arg("-c");
-                command.arg(format!("model_reasoning_effort=\"{effort}\""));
-            }
-        }
-        "claude" => {
-            command.arg("--permission-mode");
-            command.arg("plan");
-            if let Some(model) = model {
-                command.arg("--model");
-                command.arg(model);
-            }
-            if let Some(effort) = effort {
-                command.arg("--effort");
-                command.arg(effort);
-            }
-        }
-        "cursor" => {
-            if let Some(model) = model {
-                command.arg("--model");
-                command.arg(cursor_model_with_effort(model, effort));
-            }
-        }
-        _ => return Err(format!("Unsupported provider: {kind}")),
-    }
-    Ok(command)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn spawn_interactive_session(
-    app: &AppHandle,
-    run_id: &str,
-    project_id: &str,
-    kind: &str,
-    executable: &Path,
-    repository: &Path,
-    model: Option<&str>,
-    effort: Option<&str>,
-    initial_prompt: Option<&str>,
-) -> Result<InteractiveSession, String> {
-    let system = native_pty_system();
-    let pair = system
-        .openpty(PtySize {
-            rows: 36,
-            cols: 132,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| format!("Failed to open native terminal: {error}"))?;
-    let master = pair.master;
-    let slave = pair.slave;
-    let command = interactive_command(kind, executable, repository, model, effort, initial_prompt)?;
-    let mut command = command;
-    apply_interactive_provider_environment(&mut command, repository);
-    let mut child = slave.spawn_command(command).map_err(|error| {
-        format!(
-            "Failed to start interactive {} session: {error}",
-            provider_names(kind).0
-        )
-    })?;
-    drop(slave);
-    let mut reader = master
-        .try_clone_reader()
-        .map_err(|error| error.to_string())?;
-    let writer = Arc::new(Mutex::new(
-        master.take_writer().map_err(|error| error.to_string())?,
-    ));
-    #[cfg(windows)]
-    {
-        // portable-pty enables ConPTY cursor inheritance. Windows waits for the
-        // terminal host to answer its cursor-position query before starting the child.
-        let mut startup_writer = writer.lock().map_err(|error| error.to_string())?;
-        startup_writer
-            .write_all(b"\x1b[1;1R")
-            .and_then(|_| startup_writer.flush())
-            .map_err(|error| format!("Failed to initialize the Windows terminal: {error}"))?;
-    }
-    let event_app = app.clone();
-    let event_project_id = project_id.to_owned();
-    let active_run_id = Arc::new(Mutex::new(run_id.to_owned()));
-    let event_run = active_run_id.clone();
-    let event_agent = kind.to_owned();
-    let terminal_writer = writer.clone();
-    let closed_by_owner = Arc::new(AtomicBool::new(false));
-    let event_closed_by_owner = closed_by_owner.clone();
-    let (readiness_sender, readiness_receiver) = mpsc::sync_channel(1);
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 4096];
-        let mut terminal = vt100::Parser::new(36, 132, 200);
-        let mut last_screen = String::new();
-        let mut last_completed_run_id = String::new();
-        let mut readiness_sent = false;
-        let mut accepted_antigravity_theme = false;
-        while let Ok(count) = reader.read(&mut buffer) {
-            if count == 0 {
-                break;
-            }
-            terminal.process(&buffer[..count]);
-            let output = terminal.screen().contents().trim_end().to_owned();
-            if !output.trim().is_empty() {
-                if event_agent == "antigravity"
-                    && !accepted_antigravity_theme
-                    && output.contains("Choose your color scheme:")
-                    && output.contains("[Next]")
-                {
-                    if let Ok(mut writer) = terminal_writer.lock() {
-                        let _ = writer.write_all(b"\r").and_then(|_| writer.flush());
-                    }
-                    accepted_antigravity_theme = true;
-                }
-                if !readiness_sent {
-                    let _ = readiness_sender.send(());
-                    readiness_sent = true;
-                }
-                if output != last_screen {
-                    let current_run_id =
-                        event_run.lock().map(|run| run.clone()).unwrap_or_default();
-                    let response = (event_agent == "antigravity")
-                        .then(|| antigravity_chat_response(&output))
-                        .flatten();
-                    let needs_input = terminal_screen_needs_input(&output);
-                    if needs_input {
-                        emit_event(
-                            &event_app,
-                            &current_run_id,
-                            "stream",
-                            "chat",
-                            "working",
-                            Some(&event_agent),
-                            "Native terminal input",
-                            &output,
-                            None,
-                        );
-                    } else if let Some(response) = response.as_deref() {
-                        emit_event(
-                            &event_app,
-                            &current_run_id,
-                            "stream",
-                            "chat",
-                            "working",
-                            Some(&event_agent),
-                            "Native chat response",
-                            response,
-                            None,
-                        );
-                        if antigravity_response_is_complete(&output)
-                            && current_run_id != last_completed_run_id
-                        {
-                            let database = event_app.state::<Database>();
-                            match persist_message(
-                                database.inner(),
-                                &event_project_id,
-                                &current_run_id,
-                                &event_agent,
-                                "agent",
-                                response,
-                                &[],
-                                &[],
-                                None,
-                            ) {
-                                Ok(()) => {
-                                    emit_event(
-                                        &event_app,
-                                        &current_run_id,
-                                        "complete",
-                                        "chat",
-                                        "complete",
-                                        Some(&event_agent),
-                                        "Chat response complete",
-                                        "The provider returned to its prompt.",
-                                        None,
-                                    );
-                                    last_completed_run_id = current_run_id;
-                                }
-                                Err(error) => emit_event(
-                                    &event_app,
-                                    &current_run_id,
-                                    "attention",
-                                    "chat",
-                                    "attention",
-                                    Some(&event_agent),
-                                    "Could not save the chat response",
-                                    &error,
-                                    None,
-                                ),
-                            }
-                        }
-                    } else {
-                        let (title, detail) = if event_agent == "antigravity" {
-                            (
-                                "Native chat activity",
-                                "Antigravity is working in the retained project session.",
-                            )
-                        } else {
-                            ("Native terminal", output.as_str())
-                        };
-                        emit_event(
-                            &event_app,
-                            &current_run_id,
-                            "stream",
-                            "chat",
-                            "working",
-                            Some(&event_agent),
-                            title,
-                            detail,
-                            None,
-                        );
-                    }
-                    last_screen = output;
-                }
-            }
-        }
-        if !event_closed_by_owner.load(Ordering::Acquire) {
-            emit_event(
-                &event_app,
-                &event_run.lock().map(|run| run.clone()).unwrap_or_default(),
-                "attention",
-                "chat",
-                "attention",
-                Some(&event_agent),
-                "Native terminal ended",
-                "The provider's interactive terminal exited unexpectedly. The next message will create a fresh session.",
-                None,
-            );
-        }
-    });
-    if readiness_receiver
-        .recv_timeout(Duration::from_secs(3))
-        .is_err()
-    {
-        closed_by_owner.store(true, Ordering::Release);
-        let status = child
-            .try_wait()
-            .map_err(|error| format!("Failed to inspect native terminal startup: {error}"))?;
-        if status.is_none() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        return Err(match status {
-            Some(status) => format!(
-                "{} interactive terminal exited before readiness: {status:?}",
-                provider_names(kind).0
-            ),
-            None => format!(
-                "{} interactive terminal did not become ready within 3 seconds.",
-                provider_names(kind).0
-            ),
-        });
-    }
-    Ok(InteractiveSession {
-        _master: master,
-        writer,
-        child: Arc::new(Mutex::new(child)),
-        active_run_id,
-        closed_by_owner,
-    })
-}
-
-fn interactive_session_has_ended(session: &InteractiveSession) -> bool {
-    session
-        .child
-        .lock()
-        .ok()
-        .and_then(|mut child| child.try_wait().ok())
-        .is_none_or(|status| status.is_some())
-}
-
-fn close_interactive_session(session: &InteractiveSession) -> Result<(), String> {
-    session.closed_by_owner.store(true, Ordering::Release);
-    let mut child = session.child.lock().map_err(|error| error.to_string())?;
-    if child
-        .try_wait()
-        .map_err(|error| format!("Failed to inspect the native terminal: {error}"))?
-        .is_some()
-    {
-        return Ok(());
-    }
-    child
-        .kill()
-        .map_err(|error| format!("Failed to stop the native terminal: {error}"))?;
-    child
-        .wait()
-        .map(|_| ())
-        .map_err(|error| format!("Failed to wait for the native terminal to stop: {error}"))
-}
-
-fn terminal_key_sequence(key: &str) -> Result<Vec<u8>, String> {
-    let sequence = match key {
-        "up" => b"\x1b[A".to_vec(),
-        "down" => b"\x1b[B".to_vec(),
-        "right" => b"\x1b[C".to_vec(),
-        "left" => b"\x1b[D".to_vec(),
-        "enter" => b"\r".to_vec(),
-        "space" => b" ".to_vec(),
-        "tab" => b"\t".to_vec(),
-        "escape" => b"\x1b".to_vec(),
-        "backspace" => b"\x7f".to_vec(),
-        _ => {
-            let Some(character) = key.strip_prefix("text:") else {
-                return Err(format!("Unsupported terminal key: {key}"));
-            };
-            if character.chars().count() != 1 {
-                return Err("Terminal text input must contain exactly one character.".to_owned());
-            }
-            character.as_bytes().to_vec()
-        }
-    };
-    Ok(sequence)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4292,7 +3844,6 @@ fn load_provider_profiles(
 #[tauri::command]
 async fn save_provider_profile(
     database: State<'_, Database>,
-    runtime: State<'_, RuntimeState>,
     profile: ProviderProfileInput,
 ) -> Result<(), String> {
     if !matches!(
@@ -4337,20 +3888,6 @@ async fn save_provider_profile(
             )
             .map_err(|error| error.to_string())?;
     }
-    let session_key = terminal_session_key(&profile.project_id, &profile.participant_kind);
-    let session = runtime
-        .interactive_sessions
-        .lock()
-        .await
-        .remove(&session_key);
-    if let Some(session) = session {
-        close_interactive_session(&session)?;
-    }
-    runtime
-        .interactive_runs
-        .lock()
-        .await
-        .retain(|_, active_session| active_session != &session_key);
     Ok(())
 }
 
@@ -4628,52 +4165,7 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
 #[tauri::command]
 async fn stop_run(runtime: State<'_, RuntimeState>, run_id: String) -> Result<bool, String> {
     let sender = runtime.cancellations.lock().await.get(&run_id).cloned();
-    let cancelled = sender
-        .map(|value| value.send(true).is_ok())
-        .unwrap_or(false);
-    let session_key = runtime.interactive_runs.lock().await.remove(&run_id);
-    let stopped_session = if let Some(session_key) = session_key {
-        let session = runtime
-            .interactive_sessions
-            .lock()
-            .await
-            .remove(&session_key);
-        if let Some(session) = session {
-            close_interactive_session(&session)?;
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    Ok(cancelled || stopped_session)
-}
-
-#[tauri::command]
-async fn send_terminal_key(
-    runtime: State<'_, RuntimeState>,
-    request: TerminalInputRequest,
-) -> Result<(), String> {
-    let session_key = terminal_session_key(&request.project_id, &request.participant_kind);
-    let writer = runtime
-        .interactive_sessions
-        .lock()
-        .await
-        .get(&session_key)
-        .map(|session| session.writer.clone())
-        .ok_or_else(|| {
-            format!(
-                "No live {} terminal session is available.",
-                provider_names(&request.participant_kind).0
-            )
-        })?;
-    let sequence = terminal_key_sequence(&request.key)?;
-    let mut writer = writer.lock().map_err(|error| error.to_string())?;
-    writer
-        .write_all(&sequence)
-        .and_then(|_| writer.flush())
-        .map_err(|error| format!("Failed to send terminal input: {error}"))
+    Ok(sender.map(|value| value.send(true).is_ok()).unwrap_or(false))
 }
 
 #[tauri::command]
@@ -4734,7 +4226,7 @@ async fn test_provider_connection(
             detail: if let Some(detail) = authentication_detail {
                 detail
             } else if result.idle_timed_out {
-                format!("No provider output within {CHAT_IDLE_TIMEOUT_SECONDS} seconds.")
+                format!("No provider output within {PROCESS_IDLE_TIMEOUT_SECONDS} seconds.")
             } else if !result.summary.trim().is_empty() {
                 format!(
                     "Connection test expected READY but received: {}",
@@ -4897,142 +4389,6 @@ async fn start_room_chat(
     };
     let profile = provider_profile(database, &request.project_id, &participant.kind, "chat")?;
     let settings = project_settings(database, &request.project_id)?;
-    if EMBEDDED_TUI_CHAT_ENABLED
-        && matches!(
-            participant.kind.as_str(),
-            "codex" | "claude" | "cursor" | "antigravity"
-        )
-    {
-        let session_key = terminal_session_key(&request.project_id, &participant.kind);
-        let executable = find_provider_executable(&participant.kind)
-            .ok_or_else(|| format!("{} CLI is not installed.", participant.name))?;
-        let mut interactive_error = None;
-        for attempt in 0..2 {
-            let interactive_writer = {
-                let mut sessions = runtime.interactive_sessions.lock().await;
-                let needs_session = sessions
-                    .get(&session_key)
-                    .is_none_or(interactive_session_has_ended);
-                if needs_session {
-                    if let Some(stale) = sessions.remove(&session_key) {
-                        let _ = close_interactive_session(&stale);
-                    }
-                    match spawn_interactive_session(
-                        &app,
-                        &request.run_id,
-                        &request.project_id,
-                        &participant.kind,
-                        &executable,
-                        &repository,
-                        profile.model.as_deref(),
-                        profile.effort.as_deref(),
-                        Some(message),
-                    ) {
-                        Ok(session) => {
-                            sessions.insert(session_key.clone(), session);
-                        }
-                        Err(error) => {
-                            interactive_error = Some(error);
-                        }
-                    }
-                }
-                sessions.get(&session_key).map(|session| {
-                    (
-                        session.writer.clone(),
-                        session.active_run_id.clone(),
-                        needs_session && participant.kind == "antigravity",
-                    )
-                })
-            };
-            let Some((writer, active_run_id, message_was_initial_prompt)) = interactive_writer
-            else {
-                break;
-            };
-            *active_run_id.lock().map_err(|error| error.to_string())? = request.run_id.clone();
-            let sent = if message_was_initial_prompt {
-                Ok(())
-            } else {
-                let mut writer = writer.lock().map_err(|error| error.to_string())?;
-                writer
-                    .write_all(format!("{message}\r").as_bytes())
-                    .and_then(|_| writer.flush())
-            };
-            if sent.is_ok() {
-                persist_message(
-                    database,
-                    &request.project_id,
-                    &request.run_id,
-                    "human",
-                    "human",
-                    message,
-                    &[],
-                    &[],
-                    None,
-                )?;
-                runtime
-                    .interactive_runs
-                    .lock()
-                    .await
-                    .retain(|_, active_session| active_session != &session_key);
-                runtime
-                    .interactive_runs
-                    .lock()
-                    .await
-                    .insert(request.run_id.clone(), session_key.clone());
-                emit_event(
-                    &app,
-                    &request.run_id,
-                    "phase",
-                    "chat",
-                    "working",
-                    Some(&participant.kind),
-                    "Interactive native session",
-                    if attempt == 0 {
-                        "Warm native terminal session. Output appears as it is produced."
-                    } else {
-                        "The previous native terminal had ended, so Agent Room recreated it before sending."
-                    },
-                    None,
-                );
-                return Ok(ChatResult {
-                    run_id: request.run_id,
-                    participant: participant.kind.clone(),
-                    summary: format!("Interactive {} session is running.", participant.name),
-                    session_id: Some(session_key),
-                    actual_model: profile.model,
-                    stopped: false,
-                    ship_intent: None,
-                });
-            }
-            interactive_error = Some(format!(
-                "The native terminal closed while sending: {}",
-                sent.expect_err("checked above")
-            ));
-            if let Some(stale) = runtime
-                .interactive_sessions
-                .lock()
-                .await
-                .remove(&session_key)
-            {
-                let _ = close_interactive_session(&stale);
-            }
-        }
-        let compatibility_detail = interactive_error.unwrap_or_else(|| {
-            "This CLI could not open an interactive terminal, so Agent Room is using its compatible one-shot route."
-                .to_owned()
-        });
-        emit_event(
-            &app,
-            &request.run_id,
-            "phase",
-            "chat",
-            "working",
-            Some(&participant.kind),
-            "Compatibility chat route",
-            &compatibility_detail,
-            None,
-        );
-    }
     let session_id = load_chat_session(database, &request.project_id, &participant.kind)?;
     let room_handoff = recent_chat_handoff(
         database,
@@ -5118,41 +4474,7 @@ async fn start_room_chat(
         cancel_receiver.clone(),
     )
     .await;
-    let result = match first_result {
-        Ok(result)
-            if result.idle_timed_out
-                && result.summary.trim().is_empty()
-                && participant.kind == "antigravity" =>
-        {
-            emit_event(
-                &app,
-                &request.run_id,
-                "phase",
-                "chat",
-                "retrying",
-                Some(&participant.kind),
-                "Retrying Antigravity chat",
-                "Antigravity produced no output. Retrying once with a fresh chat session.",
-                None,
-            );
-            invoke_provider(
-                &app,
-                &request.run_id,
-                &participant,
-                Phase::Chat,
-                chat_can_write,
-                &prompt,
-                &repository,
-                None,
-                profile.model.as_deref(),
-                profile.effort.as_deref(),
-                &artifact_dir.join("chat.retry.final.txt"),
-                cancel_receiver,
-            )
-            .await
-        }
-        other => other,
-    };
+    let result = first_result;
     runtime.cancellations.lock().await.remove(&request.run_id);
     let result = match result {
         Ok(result) => result,
@@ -5195,7 +4517,7 @@ async fn start_room_chat(
             "Chat exceeded the 20 minute limit.".to_owned()
         } else if result.idle_timed_out {
             format!(
-                "Chat produced no output for {CHAT_IDLE_TIMEOUT_SECONDS} seconds and was stopped."
+                "Chat produced no output for {PROCESS_IDLE_TIMEOUT_SECONDS} seconds and was stopped."
             )
         } else {
             provider_failure_reason(&participant.name, "the chat response", &result)
@@ -6823,7 +6145,6 @@ pub fn run() {
             test_provider_connection,
             discover_provider_models,
             start_room_chat,
-            send_terminal_key,
             start_room_run,
             stop_run
         ])
@@ -6990,132 +6311,6 @@ mod tests {
                 "sonnet-4-thinking".to_owned(),
             ]
         );
-    }
-
-    #[test]
-    fn native_terminal_parser_replaces_redrawn_content() {
-        let mut terminal = vt100::Parser::new(4, 40, 0);
-        terminal.process(b"Signing in...");
-        terminal.process(b"\x1b[2J\x1b[HReady");
-        assert_eq!(terminal.screen().contents(), "Ready");
-    }
-
-    #[test]
-    fn antigravity_terminal_screen_extracts_only_the_current_chat_response() {
-        let screen = "\
-Earlier conversation content
-────────────────────────────────────────
-> /plan @antigravity hello
-
-  Hello! I am ready to work with you.
-
-  What task shall we plan today?
-
-────────────────────────────────────────
-> Plan mode: research & plan only
-────────────────────────────────────────
-? for shortcuts                 plan · Gemini 3.6 Flash · high";
-        assert_eq!(
-            antigravity_chat_response(screen).as_deref(),
-            Some("Hello! I am ready to work with you.\n\nWhat task shall we plan today?")
-        );
-        assert!(antigravity_response_is_complete(screen));
-        assert!(!terminal_screen_needs_input(screen));
-    }
-
-    #[test]
-    fn onboarding_screen_remains_an_interactive_terminal() {
-        assert!(terminal_screen_needs_input(
-            "Terms of Service & Data Use\n> Previous    [Done]\n↑/↓ Navigate · enter Confirm"
-        ));
-        assert!(antigravity_chat_response("Choose your color scheme:").is_none());
-    }
-
-    #[test]
-    fn terminal_input_allows_navigation_and_one_typed_character() {
-        assert_eq!(terminal_key_sequence("down").unwrap(), b"\x1b[B");
-        assert_eq!(terminal_key_sequence("enter").unwrap(), b"\r");
-        assert_eq!(terminal_key_sequence("text:y").unwrap(), b"y");
-        assert!(terminal_key_sequence("text:yes").is_err());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_native_pty_remains_alive_for_two_turns() {
-        let system = native_pty_system();
-        let pair = system
-            .openpty(PtySize {
-                rows: 12,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .expect("open Windows PTY");
-        let master = pair.master;
-        let slave = pair.slave;
-        let mut command = CommandBuilder::new("cmd.exe");
-        command.arg("/D");
-        command.arg("/Q");
-        command.arg("/K");
-        command.arg("echo AGENT_ROOM_READY");
-        let mut child = slave.spawn_command(command).expect("spawn cmd.exe");
-        drop(slave);
-
-        let mut reader = master.try_clone_reader().expect("clone PTY reader");
-        let mut writer = master.take_writer().expect("take PTY writer");
-        writer
-            .write_all(b"\x1b[1;1R")
-            .and_then(|_| writer.flush())
-            .expect("answer the Windows cursor-position request");
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let _reader_thread = thread::spawn(move || {
-            let mut buffer = [0_u8; 1024];
-            while let Ok(count) = reader.read(&mut buffer) {
-                if count == 0 {
-                    break;
-                }
-                if sender
-                    .send(String::from_utf8_lossy(&buffer[..count]).into_owned())
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-
-        let receive_until = |marker: &str| {
-            let deadline = std::time::Instant::now() + Duration::from_secs(3);
-            let mut output = String::new();
-            while std::time::Instant::now() < deadline {
-                if let Ok(chunk) = receiver.recv_timeout(Duration::from_millis(100)) {
-                    output.push_str(&chunk);
-                    if output.contains(marker) {
-                        return true;
-                    }
-                }
-            }
-            false
-        };
-
-        let first_response_received = receive_until("AGENT_ROOM_READY");
-        let alive_after_first_turn = child.try_wait().expect("inspect child").is_none();
-
-        writer
-            .write_all(b"echo AGENT_ROOM_PONG\r\n")
-            .expect("send second turn");
-        writer.flush().expect("flush second turn");
-        let second_response_received = receive_until("AGENT_ROOM_PONG");
-        let alive_after_second_turn = child.try_wait().expect("inspect child").is_none();
-
-        child.kill().expect("stop cmd.exe");
-        child.wait().expect("wait for cmd.exe");
-        drop(writer);
-        drop(master);
-
-        assert!(first_response_received);
-        assert!(alive_after_first_turn);
-        assert!(second_response_received);
-        assert!(alive_after_second_turn);
     }
 
     #[test]
@@ -8087,12 +7282,4 @@ Earlier conversation content
         assert!(extract_phase_handoff("plain provider text", Phase::Chat).is_err());
     }
 
-    #[test]
-    fn chat_uses_a_shorter_idle_limit_than_autonomous_phases() {
-        assert_eq!(idle_timeout_seconds(Phase::Chat), CHAT_IDLE_TIMEOUT_SECONDS);
-        assert_eq!(
-            idle_timeout_seconds(Phase::Build),
-            PROCESS_IDLE_TIMEOUT_SECONDS
-        );
-    }
 }

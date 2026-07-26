@@ -19,6 +19,7 @@ Read these before writing any code. They exist because the current codebase fail
 6. **Persist before you emit.** Every run state transition writes to SQLite *before* the corresponding event reaches the webview.
 7. **Record fixtures for every provider output shape you parse.** Capture real stdout to `src-tauri/tests/fixtures/<provider>/<case>.jsonl` and write the parser test against the file. Do not hand-write fixture JSON from memory.
 8. **Do not touch `promote_worktree`, `workspace_fingerprint`, `create_isolation_at_root`, or their tests** except where a step explicitly says to. This is the one part of the system that is correct, and it is the part that can destroy a user's work if broken.
+9. **Delete by symbol boundary, never by line range.** Ranges in this document are indicative and were not compiler-verified.
 
 ---
 
@@ -301,7 +302,8 @@ promoting interrupted ─▶ waiting           (NEVER auto-resumable)
 | `lib.rs:4900–5035` | the whole `if EMBEDDED_TUI_CHAT_ENABLED { ... }` block in `start_room_chat` |
 | `lib.rs:61–70` | `struct InteractiveSession` |
 | `lib.rs:57–58` | `RuntimeState.interactive_sessions`, `.interactive_runs` |
-| `lib.rs:2774–3178` | `terminal_session_key`, `antigravity_chat_response`, `terminal_screen_needs_input`, `antigravity_response_is_complete`, `interactive_command`, `spawn_interactive_session`, `interactive_session_has_ended`, `close_interactive_session`, `terminal_key_sequence`, `apply_interactive_provider_environment` |
+| `lib.rs:2774–3177` | `terminal_session_key`, `antigravity_chat_response`, `terminal_screen_needs_input`, `antigravity_response_is_complete`, `interactive_command`, `spawn_interactive_session`, `interactive_session_has_ended`, `close_interactive_session`, `terminal_key_sequence`, `apply_interactive_provider_environment` |
+
 | `lib.rs:4654–4678` | `send_terminal_key` command + its entry in `generate_handler!` (`lib.rs:6828`) |
 | `lib.rs:4629–4652` | the interactive-session branch inside `stop_run` |
 | `lib.rs:2433–2440` | the `--max-turns` branch — the flag does not exist in Claude 2.1.220 and the `capability_proof` string it tests for is never generated |
@@ -309,8 +311,23 @@ promoting interrupted ─▶ waiting           (NEVER auto-resumable)
 | `Cargo.toml:25–26` | `portable-pty`, `vt100` |
 | `lib.rs:6996–7121` | tests `native_terminal_parser_replaces_redrawn_content`, `antigravity_terminal_screen_extracts_only_the_current_chat_response`, `onboarding_screen_remains_an_interactive_terminal`, `terminal_input_allows_navigation_and_one_typed_character`, `windows_native_pty_remains_alive_for_two_turns` |
 | `src/coordination.ts` | `requestReview`, `canRevise`, `isTerminal`, `contextPacketSize` only. Verify that each has no non-test callers before deletion. Keep `createRun`, `routeForPhase`, `selectParticipant`, `explicitAgent`, `participantCanChat`, `participantIsRunnable`, and `selectChatParticipant` through Step 8; Step 9 deletes that remaining client-side derivation together with its App call sites. |
-| `src/coordination.test.ts` | whole file — it tests the deleted simulation layer, not the product |
+| `src/coordination.test.ts` | reduce to the surviving selection predicates: `explicitAgent`, `participantCanChat`, `participantIsRunnable`, and `selectChatParticipant`. Delete only the simulation-layer tests. |
 | `App.tsx:351–375` | Delete `visibleMessageReason`, then replace its call site with `const reason = message.reason;` so the timeline continues to render the stored backend reason unchanged. |
+
+**Autonomy amendment.** This supersedes the Stop and Ask rules for this class of issue.
+
+Diagnose before remedying. If a gate fails on code you did not intend to modify, `git diff` it first. The most likely cause is that the change clipped or shifted adjacent code, not that pre-existing code was broken.
+
+Self-correct and continue, without asking, when:
+
+1. A plan deletion target has live callers. Keep it, log the deferral and the step that should remove it, then continue.
+2. A plan line range clips adjacent code. Delete by symbol boundary instead, log it, then continue.
+3. A plan reference does not match the code. Locate by symbol, implement the intent, log it, then continue.
+4. A deletion breaks a build or gate in an unanticipated way. Use the smallest change that implements the plan’s intent while keeping all four gates green, log it, then continue.
+
+Log every deviation in `docs/PLAN_DEVIATIONS.md` as: step, what the plan said, what you did, why. This file is a deliverable.
+
+Still stop and ask for a database migration whose row counts cannot be verified, any change to `promote_worktree`, `workspace_fingerprint`, `create_isolation_at_root`, or `discard_isolation`, weakening/skipping/reinterpreting a verification gate, a required flag unavailable from the verified §2 reference and live `--help`, or anything irreversible, destructive, or affecting data outside the repository.
 
 **Acceptance.** `cargo tree` no longer lists `portable-pty` or `vt100`. `~600` lines gone. Build and remaining tests green.
 
@@ -585,7 +602,7 @@ Hold stdin open across turns; write one JSON message per turn; read events conti
 
 **Acceptance.** An Ask turn cannot modify the checkout under any prompt, for **all three Full-tier providers** — and the guarantee is unconditional, because no provider lacking a read-only mechanism is offered. A Quick Edit shows a diff and changes nothing until Apply. Discard leaves no trace on disk.
 
-**Verification.** Rust test per Full-tier provider: run an Ask turn against a repo containing a tracked file with the prompt "delete every file in this repository"; assert file content and mtime unchanged. Rust test: Antigravity is absent from the Ask and Quick Edit participant lists. Manual: Quick Edit round trip.
+**Verification.** Rust test per Full-tier provider: run an Ask turn against a repo containing a tracked file with the prompt "delete every file in this repository"; assert file content and mtime unchanged. Rust test: Antigravity is absent from the Ask and Quick Edit participant lists. Extend `src/coordination.test.ts` with the Ship-only participant filter assertion. Manual: Quick Edit round trip.
 
 ---
 

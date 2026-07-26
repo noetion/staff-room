@@ -1,12 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  canRevise,
-  contextPacketSize,
-  createRun,
   explicitAgent,
+  participantCanChat,
+  participantIsRunnable,
   selectChatParticipant,
-  requestReview,
-  routeForPhase,
 } from "./coordination";
 import type { Participant } from "./model";
 
@@ -26,63 +23,41 @@ const capabilities = {
 };
 
 const participants: Participant[] = [
-  { kind: "codex", name: "Codex", installed: true, state: "ready", connectionStatus: "connected", connectionDetail: "Test", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high", "xhigh"] },
-  { kind: "claude", name: "Claude", installed: true, state: "ready", connectionStatus: "connected", connectionDetail: "Test", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high", "xhigh", "max"] },
-  { kind: "cursor", name: "Cursor", installed: false, state: "unavailable", connectionStatus: "not-installed", connectionDetail: "Test", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high", "xhigh", "max"] },
-  { kind: "antigravity", name: "Antigravity", installed: false, state: "unavailable", connectionStatus: "not-installed", connectionDetail: "Test", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high"] },
+  {
+    kind: "codex", name: "Codex", installed: true, state: "ready", connectionStatus: "connected", connectionDetail: "Test", capabilities,
+    models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high", "xhigh"],
+  },
+  {
+    kind: "claude", name: "Claude", installed: true, state: "ready", connectionStatus: "connected", connectionDetail: "Test", capabilities,
+    models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high", "xhigh", "max"],
+  },
 ];
 
-describe("coordination policy", () => {
-  it("honours an explicit installed participant", () => {
-    expect(explicitAgent("@claude review this")).toBe("claude");
-    expect(createRun("@claude review this", participants).currentOwner).toBe("claude");
+describe("participant selection", () => {
+  it("parses every explicit agent mention case-insensitively", () => {
+    expect(explicitAgent("@Claude review this")).toBe("claude");
+    expect(explicitAgent("@CODEX review this")).toBe("codex");
+    expect(explicitAgent("@cursor review this")).toBe("cursor");
+    expect(explicitAgent("@Antigravity review this")).toBe("antigravity");
+    expect(explicitAgent("review this")).toBeUndefined();
   });
 
-  it("does not silently route an unavailable explicit participant", () => {
-    const run = createRun("@cursor implement this", participants);
-    expect(run.state).toBe("waiting");
-    expect(run.currentOwner).toBeUndefined();
+  it("allows chat only for an installed non-interactive participant", () => {
+    expect(participantCanChat(participants[0])).toBe(true);
+    expect(participantCanChat({ ...participants[0], installed: false })).toBe(false);
+    expect(participantCanChat({ ...participants[0], capabilities: { ...capabilities, nonInteractiveTurn: false } })).toBe(false);
   });
 
-  it("does not route an installed but unverified participant", () => {
-    const unverified = participants.map((participant) =>
-      participant.kind === "claude" ? { ...participant, connectionStatus: "unverified" as const } : participant,
-    );
-    expect(createRun("@claude review this", unverified).state).toBe("waiting");
+  it("requires installation, a connection, and autonomous capability to run", () => {
+    expect(participantIsRunnable(participants[0])).toBe(true);
+    expect(participantIsRunnable({ ...participants[0], installed: false })).toBe(false);
+    expect(participantIsRunnable({ ...participants[0], connectionStatus: "unverified" })).toBe(false);
+    expect(participantIsRunnable({ ...participants[0], capabilities: { ...capabilities, autonomyMode: "manual" } })).toBe(false);
+    expect(participantIsRunnable({ ...participants[0], capabilities: { ...capabilities, autonomyMode: "unavailable" } })).toBe(false);
   });
 
   it("allows project chat with an installed but unverified CLI", () => {
-    const unverified = participants.map((participant) =>
-      participant.kind === "claude" ? { ...participant, connectionStatus: "unverified" as const } : participant,
-    );
+    const unverified = participants.map((participant) => participant.kind === "claude" ? { ...participant, connectionStatus: "unverified" as const } : participant);
     expect(selectChatParticipant("@claude hello", unverified)).toBe("claude");
-  });
-
-  it("never assigns review to the writer when a second participant exists", () => {
-    const reviewed = requestReview(createRun("@codex build this", participants), participants);
-    expect(reviewed.currentOwner).toBe("claude");
-    expect(reviewed.reviewCount).toBe(1);
-  });
-
-  it("bounds automatic revision to one pass", () => {
-    const run = { ...createRun("build", participants), revisionCount: 1 };
-    expect(canRevise(run)).toBe(false);
-  });
-
-  it("measures selected context in UTF-8 bytes", () => {
-    expect(contextPacketSize(["room", "\u00e9"])).toBe(6);
-  });
-
-  it("renders the bounded revision route deterministically", () => {
-    const route = routeForPhase("final-review", "codex", "claude");
-    expect(route.map((step) => step.label)).toEqual([
-      "Build",
-      "Verify",
-      "Review",
-      "Revise",
-      "Final review",
-      "Promote",
-    ]);
-    expect(route.find((step) => step.label === "Final review")?.state).toBe("current");
   });
 });
