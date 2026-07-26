@@ -30,6 +30,7 @@ use std::os::windows::process::CommandExt as _;
 
 const CONTEXT_BUDGET_BYTES: usize = 48 * 1024;
 const SOURCE_BUDGET_BYTES: usize = 16 * 1024;
+const CHAT_TIMELINE_BUDGET_BYTES: usize = 32 * 1024;
 const PROCESS_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const PROCESS_TIMEOUT_SECONDS: u64 = 20 * 60;
 const PROCESS_IDLE_TIMEOUT_SECONDS: u64 = 5 * 60;
@@ -129,6 +130,7 @@ struct RunEvent {
     agent: Option<String>,
     title: String,
     detail: String,
+    text_delta: Option<String>,
     context_bytes: Option<usize>,
 }
 
@@ -2348,6 +2350,54 @@ fn provider_chat_fragment(kind: &str, value: &Value) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
+fn provider_thinking_fragment<'a>(kind: &str, value: &'a Value) -> Option<&'a str> {
+    if kind != "claude" || value.get("type").and_then(Value::as_str) != Some("stream_event") {
+        return None;
+    }
+    let event = value.get("event")?;
+    if event.get("type").and_then(Value::as_str) != Some("content_block_delta") {
+        return None;
+    }
+    let delta = event.get("delta")?;
+    (delta.get("type").and_then(Value::as_str) == Some("thinking_delta"))
+        .then(|| delta.get("thinking").and_then(Value::as_str))
+        .flatten()
+        .filter(|text| !text.trim().is_empty())
+}
+
+#[derive(Default)]
+struct ChatStreamBuffer {
+    result_text: String,
+    pending_text: String,
+    thinking: String,
+    thinking_updated: bool,
+}
+
+impl ChatStreamBuffer {
+    fn push_fragment(&mut self, fragment: &str) {
+        self.result_text.push_str(fragment);
+        self.pending_text.push_str(fragment);
+    }
+
+    fn replace_snapshot(&mut self, text: String) {
+        let delta = text
+            .strip_prefix(&self.result_text)
+            .unwrap_or(&text)
+            .to_owned();
+        self.result_text = text;
+        self.pending_text.push_str(&delta);
+    }
+
+    fn push_thinking(&mut self, fragment: &str) {
+        self.thinking.push_str(fragment);
+        self.thinking_updated = true;
+    }
+
+    fn take_text_delta(&mut self) -> Option<String> {
+        (!self.pending_text.is_empty()).then(|| std::mem::take(&mut self.pending_text))
+    }
+}
+
 fn apply_provider_environment(command: &mut Command, repository: &Path) {
     command.env("NO_COLOR", "1");
     command
@@ -2478,9 +2528,53 @@ fn emit_event(
             agent: agent.map(str::to_owned),
             title: title.to_owned(),
             detail: detail.to_owned(),
+            text_delta: None,
             context_bytes,
         },
     );
+}
+
+fn emit_text_delta(app: &AppHandle, run_id: &str, phase: &str, agent: &str, text: String) {
+    let _ = app.emit(
+        "run-event",
+        RunEvent {
+            run_id: run_id.to_owned(),
+            event_type: "text-delta".to_owned(),
+            phase: phase.to_owned(),
+            state: "running".to_owned(),
+            agent: Some(agent.to_owned()),
+            title: "Chat response".to_owned(),
+            detail: String::new(),
+            text_delta: Some(text),
+            context_bytes: None,
+        },
+    );
+}
+
+fn flush_chat_stream(
+    app: &AppHandle,
+    run_id: &str,
+    phase: &str,
+    agent: &str,
+    stream: &mut ChatStreamBuffer,
+) {
+    if let Some(text) = stream.take_text_delta() {
+        emit_text_delta(app, run_id, phase, agent, text);
+    }
+    if stream.thinking_updated {
+        emit_event(
+            app,
+            run_id,
+            "stream",
+            phase,
+            "running",
+            Some(agent),
+            "Thinking",
+            &truncate_utf8(&stream.thinking, 2 * 1024),
+            None,
+        );
+        stream.thinking_updated = false;
+    }
 }
 
 async fn preallocate_cursor_session(executable: &Path) -> Result<String, String> {
@@ -2652,12 +2746,36 @@ async fn invoke_provider(
         let mut lines = BufReader::new(stdout).lines();
         let mut session_id = None;
         let mut result_text = String::new();
+        let mut chat_stream = ChatStreamBuffer::default();
         let mut raw = String::new();
         let mut actual_model = None;
         let mut usage = ProviderUsage::default();
         let mut activity_emitted = false;
         let mut first_output_ms = None;
-        while let Ok(Some(line)) = lines.next_line().await {
+        let mut stream_flush = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(50),
+            Duration::from_millis(50),
+        );
+        loop {
+            let line = tokio::select! {
+                line = lines.next_line() => match line {
+                    Ok(line) => line,
+                    Err(_) => break,
+                },
+                _ = stream_flush.tick(), if completion_phase == Phase::Chat => {
+                    flush_chat_stream(
+                        &stdout_app,
+                        &stdout_run,
+                        &stdout_phase,
+                        &stdout_agent,
+                        &mut chat_stream,
+                    );
+                    continue;
+                }
+            };
+            let Some(line) = line else {
+                break;
+            };
             first_output_ms.get_or_insert_with(|| stdout_started.elapsed().as_millis() as u64);
             stdout_activity.send_modify(|value| *value = value.saturating_add(1));
             append_capped(&mut raw, &line);
@@ -2665,7 +2783,13 @@ async fn invoke_provider(
                 session_id = session_id.or_else(|| parse_session_id(&value));
                 actual_model = actual_model.or_else(|| reported_model(&value));
                 merge_usage(&mut usage, &value);
-                if let Some((title, detail)) = provider_activity(&stdout_agent, &value) {
+                let thinking_fragment = (completion_phase == Phase::Chat)
+                    .then(|| provider_thinking_fragment(&stdout_agent, &value))
+                    .flatten();
+                if let Some(fragment) = thinking_fragment {
+                    chat_stream.push_thinking(fragment);
+                    activity_emitted = true;
+                } else if let Some((title, detail)) = provider_activity(&stdout_agent, &value) {
                     emit_event(
                         &stdout_app,
                         &stdout_run,
@@ -2681,41 +2805,23 @@ async fn invoke_provider(
                 }
                 if completion_phase == Phase::Chat {
                     if let Some(fragment) = provider_chat_fragment(&stdout_agent, &value) {
-                        result_text.push_str(&fragment);
+                        chat_stream.push_fragment(&fragment);
                     } else if let Some(text) = provider_chat_text(&stdout_agent, &value) {
-                        result_text = text;
+                        chat_stream.replace_snapshot(text);
                     } else if let Some(text) = parse_result_text(&value) {
-                        result_text = text;
+                        chat_stream.replace_snapshot(text);
                     }
                 } else if let Some(text) = parse_result_text(&value) {
                     result_text = text;
                 }
             } else if completion_phase == Phase::Chat && !structured_chat {
-                append_capped(&mut result_text, &line);
+                chat_stream.push_fragment(&format!("{line}\n"));
             }
             if raw.contains(HANDOFF_END) && extract_phase_handoff(&raw, completion_phase).is_ok() {
                 completion_sender.send_replace(true);
             }
             if completion_phase == Phase::Chat {
-                if result_text.trim().is_empty() {
-                    if !activity_emitted {
-                        emit_event(
-                            &stdout_app,
-                            &stdout_run,
-                            "stream",
-                            &stdout_phase,
-                            "running",
-                            Some(&stdout_agent),
-                            "Chat activity",
-                            &format!(
-                                "{} is working in the attached repository.",
-                                provider_names(&stdout_agent).0
-                            ),
-                            None,
-                        );
-                        activity_emitted = true;
-                    }
-                } else {
+                if chat_stream.result_text.trim().is_empty() && !activity_emitted {
                     emit_event(
                         &stdout_app,
                         &stdout_run,
@@ -2723,10 +2829,14 @@ async fn invoke_provider(
                         &stdout_phase,
                         "running",
                         Some(&stdout_agent),
-                        "Chat response",
-                        &truncate_utf8(result_text.trim(), SOURCE_BUDGET_BYTES),
+                        "Chat activity",
+                        &format!(
+                            "{} is working in the attached repository.",
+                            provider_names(&stdout_agent).0
+                        ),
                         None,
                     );
+                    activity_emitted = true;
                 }
             } else if !line.trim_start().starts_with('{') {
                 emit_event(
@@ -2742,9 +2852,22 @@ async fn invoke_provider(
                 );
             }
         }
+        if completion_phase == Phase::Chat {
+            flush_chat_stream(
+                &stdout_app,
+                &stdout_run,
+                &stdout_phase,
+                &stdout_agent,
+                &mut chat_stream,
+            );
+        }
         (
             session_id,
-            result_text,
+            if completion_phase == Phase::Chat {
+                chat_stream.result_text
+            } else {
+                result_text
+            },
             raw,
             actual_model,
             usage,
@@ -2819,7 +2942,13 @@ async fn invoke_provider(
     let summary = handoff
         .as_ref()
         .map(|value| value.summary.clone())
-        .unwrap_or_else(|| truncate_utf8(&raw_result, SOURCE_BUDGET_BYTES));
+        .unwrap_or_else(|| {
+            if phase == Phase::Chat {
+                raw_result.clone()
+            } else {
+                truncate_utf8(&raw_result, SOURCE_BUDGET_BYTES)
+            }
+        });
     let logical_success = if phase == Phase::Chat {
         chat_response_is_complete(&raw_result)
     } else {
@@ -4791,7 +4920,10 @@ async fn start_room_chat(
     } else {
         (None, None)
     };
-    let visible_summary = visible_chat_response(&result.summary);
+    let visible_summary = truncate_utf8(
+        &visible_chat_response(&result.summary),
+        CHAT_TIMELINE_BUDGET_BYTES,
+    );
     persist_message(
         database,
         &request.project_id,
@@ -7513,6 +7645,42 @@ mod tests {
             provider_chat_fragment("claude", &partial).as_deref(),
             Some("Cl")
         );
+    }
+
+    #[test]
+    fn chat_stream_coalesces_fixture_deltas_with_linear_event_bytes() {
+        let answer = "Claude stream output. ".repeat(1_100);
+        let mut stream = ChatStreamBuffer::default();
+        for fragment in answer.as_bytes().chunks(19) {
+            let event = serde_json::json!({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": std::str::from_utf8(fragment).expect("utf-8 fragment")}
+                }
+            });
+            stream.push_fragment(
+                &provider_chat_fragment("claude", &event).expect("fixture text delta"),
+            );
+        }
+        assert_eq!(stream.result_text, answer);
+
+        let delta = stream.take_text_delta().expect("coalesced delta");
+        assert_eq!(delta, answer);
+        let emitted_bytes = serde_json::to_vec(&RunEvent {
+            run_id: "fixture".to_owned(),
+            event_type: "text-delta".to_owned(),
+            phase: "chat".to_owned(),
+            state: "running".to_owned(),
+            agent: Some("claude".to_owned()),
+            title: "Chat response".to_owned(),
+            detail: String::new(),
+            text_delta: Some(delta),
+            context_bytes: None,
+        })
+        .expect("serialize event")
+        .len();
+        assert!(emitted_bytes < answer.len() * 2);
     }
 
     #[test]

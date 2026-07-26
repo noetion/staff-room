@@ -6,4 +6,5 @@
 - Step 1 | `src/coordination.test.ts` whole file | Reduced the file to four surviving participant-selection tests | The file also protects product behaviour used by later Ask/Quick Edit filtering.
 - Step 1 | Remove `Read` and `AsyncWriteExt` with the PTY code | Retained both imports | They are used by the one-shot process output and stdin paths that remain in v1.
 - Step 4 | `commands/mod.rs` and `db/migrations.rs` | Implemented the project commands and v1-to-v2 migration in `src-tauri/src/lib.rs` | This codebase owns Tauri commands and SQLite migrations in that file, so creating parallel modules would add unused architecture.
+- Step 6 | `events.rs` timer coalescing | Implemented the coalescing buffer and 50 ms timer alongside `RunEvent` in `src-tauri/src/lib.rs` | This codebase has no `events.rs`; placing it with the existing event emitter preserves the current ownership boundary.
 # Step 3 — Plan said `db/schema.rs`; the schema and additive migrations are owned by `src-tauri/src/lib.rs` in this codebase, so the equivalent columns were added there to preserve the existing migration path.

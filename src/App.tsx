@@ -1181,6 +1181,8 @@ export function App() {
   const timelineRef = useRef<HTMLDivElement>(null);
   const runRef = useRef(run);
   const chatRunRef = useRef<string | undefined>(undefined);
+  const streamTextBufferRef = useRef("");
+  const streamFrameRef = useRef<number | undefined>(undefined);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const contextToggleRef = useRef<HTMLButtonElement>(null);
   const native = isNativeApp();
@@ -1248,7 +1250,7 @@ export function App() {
       .catch((error) => console.error("Failed to inspect native environment", error));
 
     onRunEvent((event: RunEvent) => {
-      if (event.eventType === "stream") {
+      if (event.eventType === "stream" || event.eventType === "text-delta") {
         if (
           (event.phase === "chat" && event.runId !== chatRunRef.current) ||
           (event.phase !== "chat" && event.runId !== runRef.current.id)
@@ -1256,6 +1258,41 @@ export function App() {
           return;
         }
         setStreamTitle(event.agent ? `${agentNames[event.agent]} / ${event.phase}` : event.title);
+        if (event.eventType === "text-delta" && event.agent) {
+          const agent = event.agent;
+          streamTextBufferRef.current += event.textDelta ?? "";
+          if (streamFrameRef.current === undefined) {
+            streamFrameRef.current = requestAnimationFrame(() => {
+              streamFrameRef.current = undefined;
+              const body = streamTextBufferRef.current;
+              setActivity([]);
+              setMessages((current) => {
+                const existingIndex = current.findIndex(
+                  (message) =>
+                    message.runId === event.runId &&
+                    message.kind === "agent" &&
+                    message.sender === agent,
+                );
+                const message: RoomMessage = {
+                  id: existingIndex >= 0 ? current[existingIndex].id : `live-${event.runId}`,
+                  kind: "agent",
+                  sender: agent,
+                  body,
+                  createdAt:
+                    existingIndex >= 0
+                      ? current[existingIndex].createdAt
+                      : new Date().toISOString(),
+                  runId: event.runId,
+                };
+                if (existingIndex < 0) return [...current, message];
+                return current.map((currentMessage, index) =>
+                  index === existingIndex ? message : currentMessage,
+                );
+              });
+            });
+          }
+          return;
+        }
         if (
           (event.title === "Chat response" ||
             event.title === "Native chat response") &&
@@ -1356,6 +1393,9 @@ export function App() {
     return () => {
       disposed = true;
       unlisten?.();
+      if (streamFrameRef.current !== undefined) {
+        cancelAnimationFrame(streamFrameRef.current);
+      }
     };
   }, [native]);
 
@@ -1674,6 +1714,7 @@ export function App() {
     setUiError("");
     setObjective("");
     setActivity([]);
+    streamTextBufferRef.current = "";
     setStreamTitle(
       participant
         ? `${agentNames[participant]} / ${activeShip ? "active run" : "chat"}`

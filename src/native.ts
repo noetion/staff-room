@@ -15,12 +15,13 @@ import type {
 
 export interface RunEvent {
   runId: string;
-  eventType: "phase" | "stream" | "attention" | "complete";
+  eventType: "phase" | "stream" | "text-delta" | "attention" | "complete";
   phase: string;
   state: string;
   agent?: AgentKind;
   title: string;
   detail: string;
+  textDelta?: string;
   contextBytes?: number;
 }
 
