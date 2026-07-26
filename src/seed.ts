@@ -13,6 +13,7 @@ export const previewEnvironment: NativeEnvironment = {
   attached: true,
   repositoryPath: seedProject.repositoryPath,
   branch: "main",
+  contextBudgetBytes: 48 * 1024,
   participants: [
     {
       kind: "codex",

@@ -1,7 +1,7 @@
 mod providers;
 
 use providers::{Mode as ProviderMode, TurnRequest};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -29,6 +29,7 @@ use uuid::Uuid;
 use std::os::windows::process::CommandExt as _;
 
 const BUILD_CONTEXT_BUDGET_BYTES: usize = 48 * 1024;
+const ROOM_MESSAGE_PAGE_SIZE: usize = 100;
 const SOURCE_BUDGET_BYTES: usize = 16 * 1024;
 const CHAT_TIMELINE_BUDGET_BYTES: usize = 32 * 1024;
 const PROCESS_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
@@ -127,6 +128,7 @@ struct NativeEnvironment {
     repository_path: String,
     branch: String,
     participants: Vec<Participant>,
+    context_budget_bytes: usize,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -353,6 +355,13 @@ struct StoredMessage {
     reason: Option<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MessageCursor {
+    created_at: String,
+    id: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredRun {
@@ -390,6 +399,8 @@ struct StoredRouteStep {
 #[serde(rename_all = "camelCase")]
 struct RoomSnapshot {
     messages: Vec<StoredMessage>,
+    has_more: bool,
+    next_message_cursor: Option<MessageCursor>,
     latest_run: Option<StoredRun>,
     receipts: Vec<ExecutionReceipt>,
 }
@@ -578,6 +589,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(project_id) REFERENCES projects(id)
         );
+
+        CREATE INDEX IF NOT EXISTS messages_project_created_at_desc
+            ON messages(project_id, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS runs (
             id TEXT PRIMARY KEY,
@@ -4400,6 +4414,7 @@ async fn get_environment(
             repository_path: String::new(),
             branch: String::new(),
             participants: Vec::new(),
+            context_budget_bytes: BUILD_CONTEXT_BUDGET_BYTES,
         });
     };
     let participants = cached_participants(runtime.inner(), force_refresh.unwrap_or(false)).await?;
@@ -4410,6 +4425,7 @@ async fn get_environment(
         repository_path: project.repository_path,
         branch: project.branch,
         participants: participants_with_connections(database.inner(), &project.id, participants)?,
+        context_budget_bytes: BUILD_CONTEXT_BUDGET_BYTES,
     })
 }
 
@@ -4775,38 +4791,67 @@ fn objective_needs_room_context(objective: &str) -> bool {
 }
 
 #[tauri::command]
-fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSnapshot, String> {
-    load_room_snapshot(database.inner(), &project_id)
+fn load_room(
+    database: State<'_, Database>,
+    project_id: String,
+    before: Option<MessageCursor>,
+) -> Result<RoomSnapshot, String> {
+    load_room_snapshot(database.inner(), &project_id, before.as_ref())
 }
 
-fn load_room_snapshot(database: &Database, project_id: &str) -> Result<RoomSnapshot, String> {
+fn stored_message_from_row(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
+    let changed_json: String = row.get(6)?;
+    let verification_json: String = row.get(7)?;
+    Ok(StoredMessage {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        sender: row.get(2)?,
+        body: row.get(3)?,
+        created_at: row.get(4)?,
+        run_id: row.get(5)?,
+        changed_files: serde_json::from_str(&changed_json).unwrap_or_default(),
+        verification: serde_json::from_str(&verification_json).unwrap_or_default(),
+        reason: row.get(8)?,
+    })
+}
+
+fn load_room_snapshot(
+    database: &Database,
+    project_id: &str,
+    before: Option<&MessageCursor>,
+) -> Result<RoomSnapshot, String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
     let mut statement = connection
         .prepare(
             "SELECT id, message_kind, sender_kind, body, created_at, run_id,
                     changed_files_json, verification_json, reason
-             FROM messages WHERE project_id = ?1 ORDER BY created_at ASC LIMIT 200",
+             FROM messages
+             WHERE project_id = ?1
+               AND (?2 IS NULL OR created_at < ?2 OR (created_at = ?2 AND id < ?3))
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?4",
         )
         .map_err(|error| error.to_string())?;
-    let messages = statement
-        .query_map([&project_id], |row| {
-            let changed_json: String = row.get(6)?;
-            let verification_json: String = row.get(7)?;
-            Ok(StoredMessage {
-                id: row.get(0)?,
-                kind: row.get(1)?,
-                sender: row.get(2)?,
-                body: row.get(3)?,
-                created_at: row.get(4)?,
-                run_id: row.get(5)?,
-                changed_files: serde_json::from_str(&changed_json).unwrap_or_default(),
-                verification: serde_json::from_str(&verification_json).unwrap_or_default(),
-                reason: row.get(8)?,
-            })
-        })
+    let mut messages = statement
+        .query_map(
+            params![
+                project_id,
+                before.map(|cursor| cursor.created_at.as_str()),
+                before.map(|cursor| cursor.id.as_str()),
+                (ROOM_MESSAGE_PAGE_SIZE + 1) as i64,
+            ],
+            stored_message_from_row,
+        )
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    let has_more = messages.len() > ROOM_MESSAGE_PAGE_SIZE;
+    messages.truncate(ROOM_MESSAGE_PAGE_SIZE);
+    let next_message_cursor = messages.last().map(|message| MessageCursor {
+        created_at: message.created_at.clone(),
+        id: message.id.clone(),
+    });
+    messages.reverse();
     drop(statement);
 
     let latest_run = connection
@@ -4947,6 +4992,8 @@ fn load_room_snapshot(database: &Database, project_id: &str) -> Result<RoomSnaps
     receipts.sort_by(|left, right| left.created_at.cmp(&right.created_at));
     Ok(RoomSnapshot {
         messages,
+        has_more,
+        next_message_cursor,
         latest_run,
         receipts,
     })
@@ -7645,8 +7692,8 @@ mod tests {
                 .expect("write second message");
         }
 
-        let first_room = load_room_snapshot(&database, &first.id).expect("load first room");
-        let second_room = load_room_snapshot(&database, &second.id).expect("load second room");
+        let first_room = load_room_snapshot(&database, &first.id, None).expect("load first room");
+        let second_room = load_room_snapshot(&database, &second.id, None).expect("load second room");
         assert_eq!(first_room.messages.len(), 1);
         assert_eq!(first_room.messages[0].body, "first room");
         assert_eq!(second_room.messages.len(), 1);
@@ -7654,6 +7701,41 @@ mod tests {
 
         std::fs::remove_dir_all(first_root).expect("remove first test repository");
         std::fs::remove_dir_all(second_root).expect("remove second test repository");
+    }
+
+    #[test]
+    fn room_messages_page_backwards_from_the_newest_hundred() {
+        let connection = Connection::open_in_memory().expect("open test database");
+        migrate(&connection).expect("migrate test database");
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, goal, repository_path)
+                 VALUES ('project-1', 'Project', '', 'C:/project')",
+                [],
+            )
+            .expect("insert project");
+        for index in 0..500 {
+            connection
+                .execute(
+                    "INSERT INTO messages (id, project_id, sender_kind, message_kind, body)
+                     VALUES (?1, 'project-1', 'human', 'human', ?1)",
+                    [format!("message-{index:03}")],
+                )
+                .expect("insert message");
+        }
+        let database = Database(Mutex::new(connection));
+        let mut page = load_room_snapshot(&database, "project-1", None).expect("load newest page");
+        let mut message_ids = page.messages.iter().map(|message| message.id.clone()).collect::<Vec<_>>();
+        assert_eq!(message_ids.first().map(String::as_str), Some("message-400"));
+        assert_eq!(message_ids.last().map(String::as_str), Some("message-499"));
+        while page.has_more {
+            let cursor = page.next_message_cursor.clone().expect("cursor for older page");
+            page = load_room_snapshot(&database, "project-1", Some(&cursor)).expect("load older page");
+            message_ids.extend(page.messages.iter().map(|message| message.id.clone()));
+        }
+        assert_eq!(message_ids.len(), 500);
+        assert_eq!(message_ids.first().map(String::as_str), Some("message-400"));
+        assert_eq!(message_ids.last().map(String::as_str), Some("message-099"));
     }
 
     #[test]
@@ -8345,7 +8427,7 @@ mod tests {
         )
         .expect("persist chat receipt");
 
-        let snapshot = load_room_snapshot(&database, "project-1").expect("load room");
+        let snapshot = load_room_snapshot(&database, "project-1", None).expect("load room");
         let receipt = snapshot.receipts.first().expect("chat receipt");
         assert_eq!(receipt.context_bytes, 128);
         assert_eq!(receipt.preflight_ms, Some(10));

@@ -135,6 +135,7 @@ export interface NativeEnvironment {
   repositoryPath: string;
   branch: string;
   participants: Participant[];
+  contextBudgetBytes: number;
 }
 
 export interface StartRunResult {
@@ -261,8 +262,15 @@ export interface ModelDiscoveryResult {
 
 export interface RoomSnapshot {
   messages: RoomMessage[];
+  hasMore: boolean;
+  nextMessageCursor?: MessageCursor;
   latestRun?: StoredRun;
   receipts: ExecutionReceipt[];
+}
+
+export interface MessageCursor {
+  createdAt: string;
+  id: string;
 }
 
 export const agentNames: Record<AgentKind, string> = {

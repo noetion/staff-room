@@ -11,6 +11,7 @@ import type {
   ProjectSettings,
   VerificationConfig,
   QuickEditResult,
+  MessageCursor,
   RoomSnapshot,
   StartRunResult,
   StopRunResult,
@@ -56,8 +57,11 @@ export async function projectActive(): Promise<Project | undefined> {
   return invoke<Project | undefined>("project_active");
 }
 
-export async function loadRoom(projectId: string): Promise<RoomSnapshot> {
-  return invoke<RoomSnapshot>("load_room", { projectId });
+export async function loadRoom(
+  projectId: string,
+  before?: MessageCursor,
+): Promise<RoomSnapshot> {
+  return invoke<RoomSnapshot>("load_room", { projectId, before });
 }
 
 export async function loadProjectSettings(projectId: string): Promise<ProjectSettings> {

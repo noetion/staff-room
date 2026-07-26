@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleAlert,
   CircleStop,
+  Copy,
   Gauge,
   GitBranch,
   HardDrive,
@@ -94,6 +95,7 @@ const detachedEnvironment: NativeEnvironment = {
   repositoryPath: "",
   branch: "",
   participants: [],
+  contextBudgetBytes: 0,
 };
 
 const emptyRun: Run = {
@@ -149,9 +151,17 @@ function relativeTime(timestamp: string): string {
   return `${Math.floor(minutes / 60)}h`;
 }
 
-function contextLabel(bytes = 0): string {
+function elapsedTime(timestamp: string): string {
+  const started = new Date(timestamp).getTime();
+  if (!started || Number.isNaN(started)) return "just started";
+  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  return seconds < 60 ? `${seconds}s elapsed` : `${Math.floor(seconds / 60)}m ${seconds % 60}s elapsed`;
+}
+
+function contextLabel(bytes = 0, budgetBytes = 0): string {
   if (!bytes) return "Packet not assembled";
-  return `${Math.max(1, Math.round(bytes / 1024))} KiB / 48 KiB`;
+  const usage = `${Math.max(1, Math.round(bytes / 1024))} KiB`;
+  return budgetBytes ? `${usage} / ${Math.round(budgetBytes / 1024)} KiB` : usage;
 }
 
 function usageLabel(receipt: ExecutionReceipt): string {
@@ -175,7 +185,7 @@ function latencyLabel(receipt: ExecutionReceipt): string | undefined {
   const preflight = receipt.preflightMs === undefined
     ? undefined
     : `${(receipt.preflightMs / 1000).toFixed(2)}s preflight`;
-  return [`${total}s total`, first, preflight].filter(Boolean).join(" Â· ");
+  return [`${total}s total`, first, preflight].filter(Boolean).join(" · ");
 }
 
 function millisecondsLabel(value: number | undefined): string {
@@ -237,6 +247,13 @@ function canUseChat(participant: Participant): boolean {
   return participant.kind !== "antigravity" && participant.installed && participant.capabilities.nonInteractiveTurn;
 }
 
+function capabilityChips(participant: Participant): string[] {
+  if (participant.kind === "antigravity") {
+    return ["Ship only · no read-only mode", "cold start per turn", "completion stream, not token deltas", "usage not reported"];
+  }
+  return participant.kind === "cursor" ? ["cold start per turn", "usage not reported"] : [];
+}
+
 function chatAgentFor(
   objective: string,
   participants: Participant[],
@@ -261,6 +278,7 @@ function RunLens({
   participants,
   activity,
   streamTitle,
+  contextBudgetBytes,
   onStop,
   onResume,
   onAbandon,
@@ -269,6 +287,7 @@ function RunLens({
   participants: Participant[];
   activity: LiveActivityItem[];
   streamTitle: string;
+  contextBudgetBytes: number;
   onStop: () => void;
   onResume: () => void;
   onAbandon: () => void;
@@ -332,7 +351,7 @@ function RunLens({
               <span>live</span>
             </div>
             <div className="activity-list">
-              {activity.slice(-4).map((item, index) => (
+              {activity.slice(-1).map((item, index) => (
                 <div className="activity-item" key={`${item.title}-${index}`}>
                   <strong>{item.title}</strong>
                   <p>{item.detail}</p>
@@ -350,12 +369,14 @@ function RunLens({
             </span>
             <span>
               <Gauge size={12} />
-              {contextLabel(run.contextBytes)}
+              {contextLabel(run.contextBytes, contextBudgetBytes)}
             </span>
             <span>
               <Workflow size={12} />
               {autonomy ? autonomyLabel(autonomy) : "Bounded autonomous route"}
             </span>
+            <span>{elapsedTime(run.startedAt)}</span>
+            <span>{run.revisionCount}/1 revise · {run.reviewCount}/2 review · {run.recoveryCount ?? 0}/2 recover</span>
           </div>
           <div className="progress-action">
             {running ? (
@@ -408,6 +429,53 @@ function VerificationList({ verification }: { verification: VerificationResult[]
   );
 }
 
+function InlineMarkdown({ text }: { text: string }) {
+  return text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, index) => {
+    if (part.startsWith("`") && part.endsWith("`")) return <code key={index}>{part.slice(1, -1)}</code>;
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
+    return part;
+  });
+}
+
+function MarkdownBody({ body }: { body: string }) {
+  const [copiedBlock, setCopiedBlock] = useState<number>();
+  const blocks = body.split(/```([^\n`]*)\n?([\s\S]*?)```/g);
+
+  async function copyCode(index: number, code: string) {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedBlock(index);
+    } catch {
+      setCopiedBlock(undefined);
+    }
+  }
+
+  return (
+    <div className="markdown-body">
+      {blocks.map((block, index) => {
+        if (index % 3 === 1) return null;
+        if (index % 3 === 2) {
+          const language = blocks[index - 1].trim() || "text";
+          return (
+            <pre key={index}>
+              <div className="code-toolbar">
+                <span>{language}</span>
+                <button type="button" onClick={() => void copyCode(index, block)}>
+                  <Copy size={12} /> {copiedBlock === index ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <code>{block}</code>
+            </pre>
+          );
+        }
+        return block.split(/\n{2,}/).filter(Boolean).map((paragraph, paragraphIndex) => (
+          <p key={`${index}-${paragraphIndex}`}><InlineMarkdown text={paragraph} /></p>
+        ));
+      })}
+    </div>
+  );
+}
+
 function TimelineEntry({ message }: { message: RoomMessage }) {
   const isHuman = message.kind === "human";
   const reason = message.reason;
@@ -438,7 +506,7 @@ function TimelineEntry({ message }: { message: RoomMessage }) {
           <span>{relativeTime(message.createdAt)}</span>
           <span className="entry-kind">{message.kind}</span>
         </header>
-        <p>{message.body}</p>
+        <MarkdownBody body={message.body} />
         {reason && (
           <div className="reason-line">
             <Braces size={14} />
@@ -736,6 +804,11 @@ function ProviderProfileCard({
       <p className="connection-detail" role={participant.connectionStatus === "connected" ? undefined : "status"}>
         {participant.connectionDetail}
       </p>
+      {capabilityChips(participant).length > 0 && (
+        <div className="capability-chips" aria-label={`${participant.name} capability limits`}>
+          {capabilityChips(participant).map((chip) => <span key={chip}>{chip}</span>)}
+        </div>
+      )}
       <div className="route-profile-list">
         {routes.map((route) => (
           <div className="route-profile-row" key={route}>
@@ -1168,7 +1241,7 @@ function Inspector({
           </div>
           <div className="data-row">
             <span>Context packet</span>
-            <strong>{contextLabel(run.contextBytes)}</strong>
+            <strong>{contextLabel(run.contextBytes, environment.contextBudgetBytes)}</strong>
           </div>
           <div className="data-row">
             <span>Review</span>
@@ -1274,6 +1347,8 @@ export function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [environment, setEnvironment] = useState(detachedEnvironment);
   const [messages, setMessages] = useState<RoomMessage[]>([]);
+  const [hasMoreMessages, setHasMoreMessages] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [receipts, setReceipts] = useState<ExecutionReceipt[]>([]);
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [projectSettings, setProjectSettings] = useState<ProjectSettings>({
@@ -1303,7 +1378,9 @@ export function App() {
   const [savingProfileKind, setSavingProfileKind] = useState<AgentKind>();
   const [testingConnectionKind, setTestingConnectionKind] = useState<AgentKind>();
   const [uiError, setUiError] = useState("");
+  const [attention, setAttention] = useState<LiveActivityItem>();
   const timelineRef = useRef<HTMLDivElement>(null);
+  const loadingOlderMessagesRef = useRef(false);
   const runRef = useRef(run);
   const chatRunRef = useRef<string | undefined>(undefined);
   const streamTextBufferRef = useRef("");
@@ -1320,6 +1397,7 @@ export function App() {
     if (!native) return;
     const snapshot = await loadRoom(projectId);
     setMessages(snapshot.messages);
+    setHasMoreMessages(snapshot.hasMore);
     setRun(snapshot.latestRun ? hydrateRun(snapshot.latestRun) : emptyRun);
     setReceipts(snapshot.receipts);
   }
@@ -1337,6 +1415,7 @@ export function App() {
     setProjects(nextProjects);
     setEnvironment(nextEnvironment);
     setMessages(snapshot.messages);
+    setHasMoreMessages(snapshot.hasMore);
     setRun(snapshot.latestRun ? hydrateRun(snapshot.latestRun) : emptyRun);
     setReceipts(snapshot.receipts);
     setProfiles(nextProfiles);
@@ -1496,6 +1575,9 @@ export function App() {
           { title: event.title, detail: event.detail },
         ].slice(-12));
       }
+      if (event.runId === runRef.current.id && event.eventType === "attention") {
+        setAttention({ title: event.title, detail: event.detail });
+      }
       setRun((current) => {
         if (current.id !== event.runId) return current;
         return {
@@ -1525,11 +1607,40 @@ export function App() {
   }, [native]);
 
   useEffect(() => {
+    if (loadingOlderMessagesRef.current) {
+      loadingOlderMessagesRef.current = false;
+      return;
+    }
     timelineRef.current?.scrollTo({
       top: timelineRef.current.scrollHeight,
       behavior: "smooth",
     });
   }, [messages, activity]);
+
+  async function loadOlderMessages() {
+    const oldest = messages[0];
+    if (!native || !oldest || !hasMoreMessages || loadingOlderMessages) return;
+    const timeline = timelineRef.current;
+    const scrollHeight = timeline?.scrollHeight ?? 0;
+    const scrollTop = timeline?.scrollTop ?? 0;
+    loadingOlderMessagesRef.current = true;
+    setLoadingOlderMessages(true);
+    try {
+      const snapshot = await loadRoom(project.id, { createdAt: oldest.createdAt, id: oldest.id });
+      setMessages((current) => {
+        const known = new Set(current.map((message) => message.id));
+        return [...snapshot.messages.filter((message) => !known.has(message.id)), ...current];
+      });
+      setHasMoreMessages(snapshot.hasMore);
+      requestAnimationFrame(() => {
+        if (timeline) timeline.scrollTop = scrollTop + timeline.scrollHeight - scrollHeight;
+      });
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingOlderMessages(false);
+    }
+  }
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
@@ -2213,10 +2324,28 @@ export function App() {
           </div>
         </div>
 
+        {attention && (
+          <aside className="attention-banner" role="alert">
+            <CircleAlert size={16} />
+            <span><strong>{attention.title}</strong>{attention.detail}</span>
+            <button type="button" onClick={() => setAttention(undefined)} aria-label="Dismiss attention notice"><X size={14} /></button>
+          </aside>
+        )}
+
         <div className="timeline" ref={timelineRef} role="feed" aria-label="Room timeline">
           <div className="timeline-date">
             <span>Durable room</span>
           </div>
+          {hasMoreMessages && !searchQuery && (
+            <button
+              type="button"
+              className="load-older-messages"
+              onClick={() => void loadOlderMessages()}
+              disabled={loadingOlderMessages}
+            >
+              {loadingOlderMessages ? "Loading earlier messages…" : "Load earlier messages"}
+            </button>
+          )}
           {visibleMessages.map((message) => (
             <TimelineEntry key={message.id} message={message} />
           ))}
@@ -2229,6 +2358,7 @@ export function App() {
               participants={environment.participants}
               activity={activity}
               streamTitle={streamTitle}
+              contextBudgetBytes={environment.contextBudgetBytes}
               onStop={handleStop}
               onResume={handleResume}
               onAbandon={handleAbandon}
