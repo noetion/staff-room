@@ -7,3 +7,7 @@ src-tauri/target/
 *.log
 .agent-room/
 artifacts/
+
+run-build.ps1
+docs/BUILD_LOG.txt
+docs/BLOCKED.md

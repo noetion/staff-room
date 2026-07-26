@@ -266,21 +266,26 @@ promoting interrupted ─▶ waiting           (NEVER auto-resumable)
 
 ## 4. Step index
 
-| # | Step | Blocking for v1 | Depends on |
-|---|---|---|---|
-| 1 | Delete dead code | yes | — |
-| 2 | Split `lib.rs` into modules | yes | 1 |
-| 3 | Measurement columns | yes | 2 |
-| 4 | Real repository attachment | yes | 2 |
-| 5 | Adapter trait + verified command construction | yes | 2 |
-| 6 | TurnEvent delta streaming | yes | 5 |
-| 7 | SessionManager + warm Claude + warm Codex | yes | 5, 6 |
-| 8 | Ask / Quick Edit / Ship modes | yes | 5 |
-| 9 | RunCoordinator + abandon + truthful stop | yes | 2, 4 |
-| 10 | Verification prepare + `unavailable` status | yes | 9 |
-| 11 | Context deduplication | yes | 7, 9 |
-| 12 | UI corrections | yes | 6, 9 |
-| 13 | Acceptance run | yes | all |
+**Step numbers are stable identifiers, not execution order.** Step 2 is deferred
+to second-to-last (see its section for why). Nothing depends on it.
+
+**Execution order: 1 → 3 → 4 → 5 → 6 → 7 → 8 → 9 → 10 → 11 → 12 → 2 → 13.**
+
+| # | Step | Run | Blocking for v1 | Depends on |
+|---|---|---|---|---|
+| 1 | Delete dead code | 1st | yes | — |
+| 2 | Split `lib.rs` into modules | **12th** | yes | 12 |
+| 3 | Measurement columns | 2nd | yes | 1 |
+| 4 | Real repository attachment | 3rd | yes | 1 |
+| 5 | Adapter trait + verified command construction | 4th | yes | 1 |
+| 6 | TurnEvent delta streaming | 5th | yes | 5 |
+| 7 | SessionManager + warm Claude + warm Codex | 6th | yes | 5, 6 |
+| 8 | Ask / Quick Edit / Ship modes | 7th | yes | 5 |
+| 9 | RunCoordinator + abandon + truthful stop | 8th | yes | 4 |
+| 10 | Verification prepare + `unavailable` status | 9th | yes | 9 |
+| 11 | Context deduplication | 10th | yes | 7, 9 |
+| 12 | UI corrections | 11th | yes | 6, 9 |
+| 13 | Acceptance run | **13th** | yes | all |
 
 ---
 
@@ -337,7 +342,27 @@ Still stop and ask for a database migration whose row counts cannot be verified,
 
 ---
 
-### Step 2 — Split `lib.rs` into modules
+### Step 2 — Split `lib.rs` into modules  ·  **DEFERRED: RUN 12th, NOT 2nd**
+
+> **Do not run this step second.** Run it after Step 12 and before Step 13.
+>
+> It was originally placed here on the reasoning that a huge file is unsafe for an
+> agent with a bounded context window. Two attempts proved the opposite: *deciding*
+> module boundaries requires whole-file comprehension (~100k tokens before a line is
+> written), while every other step is a targeted edit to named functions that never
+> needs the whole file. Both attempts stalled after extracting one module.
+>
+> It also fails this plan's own test that each step produce a user-verifiable
+> improvement: it changes nothing a user can see and costs the most context of any step.
+>
+> Nothing downstream depends on it. Steps 3–12 land in `lib.rs`; the file grows to
+> roughly 9k lines before this step shrinks it. That is ugly and harmless.
+>
+> **When you do run it:** extract with PowerShell line slicing
+> (`$l = Get-Content lib.rs; $l[453..698] | Set-Content db/schema.rs`). Never load a
+> file into model context to move it. Run `cargo check` after each extraction and fix
+> only the symbols the compiler names. The compiler is the verification mechanism;
+> reading the moved code is not.
 
 **Goal.** Produce the layout in §3. Pure code motion; zero behaviour change.
 
@@ -813,19 +838,20 @@ These could not be resolved statically. Resolve each with a live test before the
 ## 9. Order of work, restated
 
 ```
-1  delete dead code            ~600 lines removed, 2 crates dropped
-2  split lib.rs                pure code motion, tests unchanged
-3  measurement columns         everything after this is provable
-4  repository attachment       the product becomes usable by a second person
-5  adapter trait + real flags  fixes the Windows argv bug, kills help-string probing
-6  delta streaming             O(n) instead of O(n²)
-7  session manager + warm      the speed claim becomes true
-8  Ask / Quick Edit / Ship     the safety claim becomes true (Antigravity Ship-only, §2.0)
-9  run coordinator             the state claim becomes true
-10 verification prepare        Ship stops failing for environmental reasons
-11 context dedup               the token claim becomes provable
-12 UI corrections              the interface stops lying
-13 acceptance run              record it
+run  step
+ 1   [1]  delete dead code            ~600 lines removed, 2 crates dropped
+ 2   [3]  measurement columns         everything after this is provable
+ 3   [4]  repository attachment       the product becomes usable by a second person
+ 4   [5]  adapter trait + real flags  fixes the Windows argv bug, kills help-string probing
+ 5   [6]  delta streaming             O(n) instead of O(n²)
+ 6   [7]  session manager + warm      the speed claim becomes true
+ 7   [8]  Ask / Quick Edit / Ship     the safety claim becomes true (Antigravity Ship-only, §2.0)
+ 8   [9]  run coordinator             the state claim becomes true
+ 9  [10]  verification prepare        Ship stops failing for environmental reasons
+10  [11]  context dedup               the token claim becomes provable
+11  [12]  UI corrections              the interface stops lying
+12   [2]  split lib.rs                pure code motion, deferred to here
+13  [13]  acceptance run              record it
 ```
 
-Steps 1–4 are the foundation and should land before anything else is attempted. Step 7 is the highest-risk step and should be shipped as Claude-only first, with Codex following once its fixture is captured.
+Steps 1, 3 and 4 are the foundation and should land before anything else is attempted. Step 7 is the highest-risk step and should be shipped as Claude-only first, with Codex following once its fixture is captured. Step 2 is deliberately last-but-one: it is pure code motion, nothing depends on it, and running it early blocked this build twice.
