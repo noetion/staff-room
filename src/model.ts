@@ -33,6 +33,7 @@ export interface ProviderCapabilities {
   approvalBridge: boolean;
   usageReporting: boolean;
   repositoryScoping: boolean;
+  warmSession: boolean;
   autonomyMode:
     | "isolated-auto"
     | "reviewed-auto"

@@ -21,3 +21,7 @@ Claude Code 2.1.220 no longer advertises `--max-turns`, so Agent Room does not p
 ## Capability result
 
 `reviewed-auto`: Claude Code's native auto permission mode mediates tool approvals without requiring the user to watch the run.
+
+## Warm-session evaluation
+
+- 2026-07-26, `Claude Code 2.1.220`: the stream-input probe emitted the expected session initialization event, then retried because this environment reported `apiKeySource: none` and produced no completed turn within 90 seconds. Claude remains `warm_session: false` until an authenticated two-turn test proves persistent input, recovery, and timing receipts.

@@ -1012,6 +1012,7 @@ function Inspector({
               <p>{participant.capabilities.autonomyNote}</p>
               <div className="capability-line">
                 <span>{participant.capabilities.exactResume ? "Resume" : "Fresh session"}</span>
+                <span>{participant.capabilities.warmSession ? "Warm session" : "Cold start per turn"}</span>
                 <span>{participant.capabilities.structuredOutput ? "Structured" : "Text result"}</span>
                 <span>{participant.capabilities.streaming ? "Streaming" : "Completion only"}</span>
               </div>

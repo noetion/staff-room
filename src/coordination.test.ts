@@ -17,6 +17,7 @@ const capabilities = {
   approvalBridge: true,
   usageReporting: true,
   repositoryScoping: true,
+  warmSession: false,
   autonomyMode: "isolated-auto" as const,
   autonomyNote: "Test capability.",
   capabilityProof: ["Test proof."],

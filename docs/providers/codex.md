@@ -24,3 +24,7 @@ The `never` approval policy returns denied escalation failures to the model inst
 ## Capability result
 
 `isolated-auto`: complete unattended repository work inside the managed worktree without routine approval prompts.
+
+## Warm-session evaluation
+
+- 2026-07-26, `codex-cli 0.144.4`: `codex app-server --stdio` completed the initialize handshake but did not return a `thread/start` response in the bounded stdio probe. `codex mcp-server` advertised `codex` and `codex-reply`, but was not promoted because no end-to-end thread-resume turn was proven. Codex therefore remains on the verified `codex exec resume <session-id>` per-turn path with `warm_session: false`.

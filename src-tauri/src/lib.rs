@@ -66,6 +66,7 @@ struct ProviderCapabilities {
     approval_bridge: bool,
     usage_reporting: bool,
     repository_scoping: bool,
+    warm_session: bool,
     autonomy_mode: String,
     autonomy_note: String,
     capability_proof: Vec<String>,
@@ -1053,6 +1054,7 @@ fn capabilities_for(
                 approval_bridge: approval,
                 usage_reporting: streaming,
                 repository_scoping: installed,
+                warm_session: false,
                 autonomy_mode: if ready {
                     "isolated-auto"
                 } else if installed {
@@ -1094,6 +1096,7 @@ fn capabilities_for(
                 approval_bridge: approval,
                 usage_reporting: streaming,
                 repository_scoping: installed,
+                warm_session: false,
                 autonomy_mode: if ready {
                     "reviewed-auto"
                 } else if installed {
@@ -1137,6 +1140,7 @@ fn capabilities_for(
                 approval_bridge: false,
                 usage_reporting: false,
                 repository_scoping: sandbox,
+                warm_session: false,
                 autonomy_mode: if ready {
                     "isolated-auto"
                 } else if installed {
@@ -1182,6 +1186,7 @@ fn capabilities_for(
                 approval_bridge: false,
                 usage_reporting: false,
                 repository_scoping: sandbox,
+                warm_session: false,
                 autonomy_mode: if ready {
                     "unattended-bypass"
                 } else if installed {
@@ -1217,6 +1222,7 @@ fn capabilities_for(
             approval_bridge: false,
             usage_reporting: false,
             repository_scoping: false,
+            warm_session: false,
             autonomy_mode: "unavailable".to_owned(),
             autonomy_note: "Unknown provider.".to_owned(),
             capability_proof: vec![],
@@ -7645,6 +7651,18 @@ mod tests {
             provider_chat_fragment("claude", &partial).as_deref(),
             Some("Cl")
         );
+    }
+
+    #[test]
+    fn codex_app_server_handshake_fixture_is_valid_jsonl() {
+        let handshake = include_str!("../tests/fixtures/codex/app-server-handshake.jsonl")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("live handshake JSON"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(handshake.len(), 1);
+        assert_eq!(handshake[0]["id"], 1);
+        assert_eq!(handshake[0]["result"]["platformFamily"], "windows");
     }
 
     #[test]
