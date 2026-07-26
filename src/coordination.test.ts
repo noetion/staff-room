@@ -25,10 +25,10 @@ const capabilities = {
 };
 
 const participants: Participant[] = [
-  { kind: "codex", name: "Codex", installed: true, state: "ready", capabilities },
-  { kind: "claude", name: "Claude", installed: true, state: "ready", capabilities },
-  { kind: "cursor", name: "Cursor", installed: false, state: "unavailable", capabilities },
-  { kind: "antigravity", name: "Antigravity", installed: false, state: "unavailable", capabilities },
+  { kind: "codex", name: "Codex", installed: true, state: "ready", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: false },
+  { kind: "claude", name: "Claude", installed: true, state: "ready", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: false },
+  { kind: "cursor", name: "Cursor", installed: false, state: "unavailable", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: false },
+  { kind: "antigravity", name: "Antigravity", installed: false, state: "unavailable", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true },
 ];
 
 describe("coordination policy", () => {

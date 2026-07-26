@@ -61,6 +61,9 @@ struct Participant {
     installed: bool,
     version: Option<String>,
     executable_path: Option<String>,
+    models: Vec<String>,
+    model_discovery_note: String,
+    supports_effort: bool,
     state: String,
     capabilities: ProviderCapabilities,
 }
@@ -182,6 +185,51 @@ struct StoredRun {
 struct RoomSnapshot {
     messages: Vec<StoredMessage>,
     latest_run: Option<StoredRun>,
+    receipts: Vec<ExecutionReceipt>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct ProviderUsage {
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_cost_usd: Option<f64>,
+    num_turns: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionReceipt {
+    id: String,
+    phase: String,
+    participant: String,
+    provider_version: Option<String>,
+    requested_model: Option<String>,
+    requested_effort: Option<String>,
+    actual_model: Option<String>,
+    session_id: Option<String>,
+    context_bytes: usize,
+    usage: ProviderUsage,
+    usage_note: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct ProviderProfile {
+    participant_kind: String,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderProfileInput {
+    project_id: String,
+    participant_kind: String,
+    model: Option<String>,
+    effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +265,8 @@ struct ProviderRun {
     idle_timed_out: bool,
     stderr: String,
     handoff: Option<AgentHandoff>,
+    actual_model: Option<String>,
+    usage: ProviderUsage,
     stdout_log_path: String,
     stderr_log_path: String,
 }
@@ -328,6 +378,33 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             phase TEXT NOT NULL,
             participant_kind TEXT NOT NULL,
             handoff_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(run_id) REFERENCES runs(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_profiles (
+            project_id TEXT NOT NULL,
+            participant_kind TEXT NOT NULL,
+            model TEXT,
+            effort TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(project_id, participant_kind),
+            FOREIGN KEY(project_id) REFERENCES projects(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS execution_receipts (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            participant_kind TEXT NOT NULL,
+            provider_version TEXT,
+            requested_model TEXT,
+            requested_effort TEXT,
+            actual_model TEXT,
+            session_id TEXT,
+            context_bytes INTEGER NOT NULL DEFAULT 0,
+            usage_json TEXT NOT NULL DEFAULT '{}',
+            usage_note TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(run_id) REFERENCES runs(id)
         );
@@ -498,7 +575,7 @@ fn capabilities_for(
                 cancellation: installed,
                 write_mode: sandbox,
                 approval_bridge: approval,
-                usage_reporting: streaming,
+                usage_reporting: false,
                 repository_scoping: has_help(help, "--cd") || has_help(help, "-c, --cd"),
                 autonomy_mode: if ready {
                     "isolated-auto"
@@ -539,7 +616,7 @@ fn capabilities_for(
                 cancellation: installed,
                 write_mode: approval,
                 approval_bridge: approval,
-                usage_reporting: streaming,
+                usage_reporting: false,
                 repository_scoping: installed,
                 autonomy_mode: if ready {
                     "reviewed-auto"
@@ -663,6 +740,38 @@ fn capabilities_for(
     }
 }
 
+fn model_options(kind: &str, executable: Option<&Path>) -> (Vec<String>, String, bool) {
+    let Some(executable) = executable else {
+        return (
+            vec![],
+            "Install the CLI before choosing a model.".to_owned(),
+            false,
+        );
+    };
+    let supports_effort = kind == "antigravity";
+    let models = matches!(kind, "antigravity" | "cursor")
+        .then(|| command_output(executable, ["models"], None))
+        .flatten()
+        .map(|output| {
+            output
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with("Available"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let note = if !models.is_empty() {
+        "Live model list from this CLI.".to_owned()
+    } else if matches!(kind, "codex" | "claude") {
+        "This CLI accepts an explicit model value but does not expose a dependable account model list here.".to_owned()
+    } else {
+        "This CLI did not return a model list. Use its exact model identifier or provider default."
+            .to_owned()
+    };
+    (models, note, supports_effort)
+}
+
 fn probe_provider(kind: &str) -> Participant {
     let (name, _) = provider_names(kind);
     let path = find_provider_executable(kind);
@@ -684,6 +793,7 @@ fn probe_provider(kind: &str) -> Participant {
     let installed = path.is_some();
     let capabilities =
         capabilities_for(kind, installed, version.as_deref(), &help, &subcommand_help);
+    let (models, model_discovery_note, supports_effort) = model_options(kind, path.as_deref());
     let ready = !matches!(
         capabilities.autonomy_mode.as_str(),
         "manual" | "unavailable"
@@ -696,6 +806,9 @@ fn probe_provider(kind: &str) -> Participant {
         executable_path: path
             .as_ref()
             .map(|value| value.to_string_lossy().into_owned()),
+        models,
+        model_discovery_note,
+        supports_effort,
         state: if ready {
             "ready"
         } else if installed {
@@ -1103,6 +1216,19 @@ fn handoff_status_allowed(handoff: &AgentHandoff, phase: Phase) -> bool {
     }
 }
 
+fn extract_phase_handoff(value: &str, phase: Phase) -> Result<AgentHandoff, String> {
+    let handoff = extract_handoff(value)?;
+    if handoff_status_allowed(&handoff, phase) {
+        Ok(handoff)
+    } else {
+        Err(format!(
+            "Handoff status `{}` is invalid for {}.",
+            handoff.status,
+            phase.as_str()
+        ))
+    }
+}
+
 fn review_handoff_decision(run: &ProviderRun) -> Option<bool> {
     match run.handoff.as_ref()?.status.as_str() {
         "approved" => Some(true),
@@ -1130,6 +1256,40 @@ fn parse_session_id(value: &Value) -> Option<String> {
         Value::Array(values) => values.iter().find_map(parse_session_id),
         _ => None,
     }
+}
+
+fn json_u64(value: &Value, key: &str) -> Option<u64> {
+    value
+        .get(key)
+        .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok()))
+}
+
+fn json_f64(value: &Value, key: &str) -> Option<f64> {
+    value
+        .get(key)
+        .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
+}
+
+fn merge_usage(target: &mut ProviderUsage, value: &Value) {
+    for source in [Some(value), value.get("usage"), value.get("usage_info")]
+        .into_iter()
+        .flatten()
+    {
+        target.input_tokens = json_u64(source, "input_tokens").or(target.input_tokens);
+        target.cached_input_tokens =
+            json_u64(source, "cached_input_tokens").or(target.cached_input_tokens);
+        target.output_tokens = json_u64(source, "output_tokens").or(target.output_tokens);
+        target.total_cost_usd = json_f64(source, "total_cost_usd").or(target.total_cost_usd);
+        target.num_turns = json_u64(source, "num_turns").or(target.num_turns);
+    }
+}
+
+fn reported_model(value: &Value) -> Option<String> {
+    ["model", "model_id", "modelId"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_owned)
 }
 
 fn parse_result_text(value: &Value) -> Option<String> {
@@ -1245,6 +1405,8 @@ async fn invoke_provider(
     prompt: &str,
     repository: &Path,
     session_id: Option<&str>,
+    requested_model: Option<&str>,
+    requested_effort: Option<&str>,
     final_output_path: &Path,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<ProviderRun, String> {
@@ -1286,8 +1448,11 @@ async fn invoke_provider(
                     "read-only"
                 })
                 .arg("-C")
-                .arg(repository)
-                .arg("exec");
+                .arg(repository);
+            if let Some(model) = requested_model {
+                command.arg("--model").arg(model);
+            }
+            command.arg("exec");
             if let Some(id) = session_id {
                 command
                     .arg("resume")
@@ -1313,6 +1478,9 @@ async fn invoke_provider(
                 .arg("stream-json")
                 .arg("--permission-mode")
                 .arg("auto");
+            if let Some(model) = requested_model {
+                command.arg("--model").arg(model);
+            }
             if participant
                 .capabilities
                 .capability_proof
@@ -1332,6 +1500,9 @@ async fn invoke_provider(
                 .arg("--print")
                 .arg("--output-format")
                 .arg("stream-json");
+            if let Some(model) = requested_model {
+                command.arg("--model").arg(model);
+            }
             if phase.writes() {
                 command.arg("--force");
             }
@@ -1342,6 +1513,12 @@ async fn invoke_provider(
         }
         "antigravity" => {
             command.arg("--sandbox");
+            if let Some(model) = requested_model {
+                command.arg("--model").arg(model);
+            }
+            if let Some(effort) = requested_effort {
+                command.arg("--effort").arg(effort);
+            }
             if phase.writes() {
                 command.arg("--dangerously-skip-permissions");
             }
@@ -1393,20 +1570,29 @@ async fn invoke_provider(
     let stdout_phase = phase.as_str().to_owned();
     let stdout_agent = kind.to_owned();
     let (activity_sender, activity_receiver) = watch::channel(0_u64);
+    let (completion_sender, mut completion_receiver) = watch::channel(false);
     let stdout_activity = activity_sender.clone();
+    let completion_phase = phase;
     let stdout_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         let mut session_id = None;
         let mut result_text = String::new();
         let mut raw = String::new();
+        let mut actual_model = None;
+        let mut usage = ProviderUsage::default();
         while let Ok(Some(line)) = lines.next_line().await {
             stdout_activity.send_modify(|value| *value = value.saturating_add(1));
             append_capped(&mut raw, &line);
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
                 session_id = session_id.or_else(|| parse_session_id(&value));
+                actual_model = actual_model.or_else(|| reported_model(&value));
+                merge_usage(&mut usage, &value);
                 if let Some(text) = parse_result_text(&value) {
                     result_text = text;
                 }
+            }
+            if raw.contains(HANDOFF_END) && extract_phase_handoff(&raw, completion_phase).is_ok() {
+                completion_sender.send_replace(true);
             }
             emit_event(
                 &stdout_app,
@@ -1420,7 +1606,7 @@ async fn invoke_provider(
                 None,
             );
         }
-        (session_id, result_text, raw)
+        (session_id, result_text, raw, actual_model, usage)
     });
 
     let stderr_app = app.clone();
@@ -1452,6 +1638,7 @@ async fn invoke_provider(
     let mut stopped = false;
     let mut timed_out = false;
     let mut idle_timed_out = false;
+    let mut completed_handoff = false;
     let status = tokio::select! {
         result = child.wait() => result.map_err(|error| error.to_string())?,
         _ = cancellation.changed() => {
@@ -1468,10 +1655,17 @@ async fn invoke_provider(
             idle_timed_out = true;
             let _ = child.kill().await;
             child.wait().await.map_err(|error| error.to_string())?
+        },
+        changed = completion_receiver.changed() => {
+            if changed.is_ok() && *completion_receiver.borrow() {
+                completed_handoff = true;
+                let _ = child.kill().await;
+            }
+            child.wait().await.map_err(|error| error.to_string())?
         }
     };
 
-    let (parsed_session, parsed_result, raw_stdout) =
+    let (parsed_session, parsed_result, raw_stdout, actual_model, usage) =
         stdout_task.await.map_err(|error| error.to_string())?;
     let raw_stderr = stderr_task.await.map_err(|error| error.to_string())?;
     std::fs::write(&stdout_log_path, &raw_stdout).map_err(|error| error.to_string())?;
@@ -1484,17 +1678,7 @@ async fn invoke_provider(
     } else {
         raw_stdout.trim().to_owned()
     };
-    let handoff_result = extract_handoff(&raw_result).and_then(|handoff| {
-        if handoff_status_allowed(&handoff, phase) {
-            Ok(handoff)
-        } else {
-            Err(format!(
-                "Handoff status `{}` is invalid for {}.",
-                handoff.status,
-                phase.as_str()
-            ))
-        }
-    });
+    let handoff_result = extract_phase_handoff(&raw_result, phase);
     let (handoff, schema_error) = match handoff_result {
         Ok(handoff) => (Some(handoff), None),
         Err(error) => (None, Some(error)),
@@ -1521,12 +1705,18 @@ async fn invoke_provider(
     Ok(ProviderRun {
         summary,
         session_id: parsed_session,
-        success: status.success() && !stopped && !timed_out && !idle_timed_out && logical_success,
+        success: (status.success() || completed_handoff)
+            && !stopped
+            && !timed_out
+            && !idle_timed_out
+            && logical_success,
         stopped,
         timed_out,
         idle_timed_out,
         stderr: diagnostic,
         handoff,
+        actual_model,
+        usage,
         stdout_log_path: stdout_log_path.to_string_lossy().into_owned(),
         stderr_log_path: stderr_log_path.to_string_lossy().into_owned(),
     })
@@ -1691,6 +1881,55 @@ fn persist_handoff(
                 phase.as_str(),
                 participant,
                 serde_json::to_string(handoff).map_err(|error| error.to_string())?
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn usage_note(usage: &ProviderUsage) -> String {
+    if usage.input_tokens.is_some()
+        || usage.cached_input_tokens.is_some()
+        || usage.output_tokens.is_some()
+        || usage.total_cost_usd.is_some()
+    {
+        "Provider-reported usage. Account quota and reset windows were not reported by the provider."
+            .to_owned()
+    } else {
+        "Provider did not report token usage, account quota, or reset windows for this phase."
+            .to_owned()
+    }
+}
+
+fn persist_receipt(
+    database: &Database,
+    run_id: &str,
+    phase: Phase,
+    participant: &Participant,
+    profile: &ProviderProfile,
+    context_bytes: usize,
+    result: &ProviderRun,
+) -> Result<(), String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO execution_receipts
+             (id, run_id, phase, participant_kind, provider_version, requested_model,
+              requested_effort, actual_model, session_id, context_bytes, usage_json, usage_note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                Uuid::new_v4().to_string(),
+                run_id,
+                phase.as_str(),
+                participant.kind,
+                participant.version.as_deref(),
+                profile.model.as_deref(),
+                profile.effort.as_deref(),
+                result.actual_model.as_deref(),
+                result.session_id.as_deref(),
+                context_bytes as i64,
+                serde_json::to_string(&result.usage).map_err(|error| error.to_string())?,
+                usage_note(&result.usage),
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -2101,6 +2340,90 @@ fn save_project(database: State<'_, Database>, project: ProjectInput) -> Result<
 }
 
 #[tauri::command]
+fn load_provider_profiles(
+    database: State<'_, Database>,
+    project_id: String,
+) -> Result<Vec<ProviderProfile>, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT participant_kind, model, effort
+             FROM provider_profiles WHERE project_id = ?1 ORDER BY participant_kind",
+        )
+        .map_err(|error| error.to_string())?;
+    let profiles = statement
+        .query_map([project_id], |row| {
+            Ok(ProviderProfile {
+                participant_kind: row.get(0)?,
+                model: row.get(1)?,
+                effort: row.get(2)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(profiles)
+}
+
+#[tauri::command]
+fn save_provider_profile(
+    database: State<'_, Database>,
+    profile: ProviderProfileInput,
+) -> Result<(), String> {
+    if !matches!(
+        profile.participant_kind.as_str(),
+        "codex" | "claude" | "cursor" | "antigravity"
+    ) {
+        return Err("Unknown provider profile.".to_owned());
+    }
+    let model = profile.model.filter(|value| !value.trim().is_empty());
+    let effort = profile.effort.filter(|value| !value.trim().is_empty());
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO provider_profiles (project_id, participant_kind, model, effort)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(project_id, participant_kind) DO UPDATE SET
+               model = excluded.model,
+               effort = excluded.effort,
+               updated_at = CURRENT_TIMESTAMP",
+            params![profile.project_id, profile.participant_kind, model, effort],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn provider_profile(
+    database: &Database,
+    project_id: &str,
+    participant: &str,
+) -> Result<ProviderProfile, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .query_row(
+            "SELECT participant_kind, model, effort
+             FROM provider_profiles WHERE project_id = ?1 AND participant_kind = ?2",
+            params![project_id, participant],
+            |row| {
+                Ok(ProviderProfile {
+                    participant_kind: row.get(0)?,
+                    model: row.get(1)?,
+                    effort: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+        .map(|profile| {
+            profile.unwrap_or(ProviderProfile {
+                participant_kind: participant.to_owned(),
+                model: None,
+                effort: None,
+            })
+        })
+}
+
+#[tauri::command]
 fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSnapshot, String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
     let mut statement = connection
@@ -2167,9 +2490,46 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
         )
         .optional()
         .map_err(|error| error.to_string())?;
+    let receipts = latest_run
+        .as_ref()
+        .map(|run| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, phase, participant_kind, provider_version, requested_model,
+                            requested_effort, actual_model, session_id, context_bytes, usage_json,
+                            usage_note, created_at
+                     FROM execution_receipts WHERE run_id = ?1 ORDER BY created_at ASC",
+                )
+                .map_err(|error| error.to_string())?;
+            let receipts = statement
+                .query_map([&run.id], |row| {
+                    let usage_json: String = row.get(9)?;
+                    Ok(ExecutionReceipt {
+                        id: row.get(0)?,
+                        phase: row.get(1)?,
+                        participant: row.get(2)?,
+                        provider_version: row.get(3)?,
+                        requested_model: row.get(4)?,
+                        requested_effort: row.get(5)?,
+                        actual_model: row.get(6)?,
+                        session_id: row.get(7)?,
+                        context_bytes: row.get::<_, i64>(8)?.max(0) as usize,
+                        usage: serde_json::from_str(&usage_json).unwrap_or_default(),
+                        usage_note: row.get(10)?,
+                        created_at: row.get(11)?,
+                    })
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            Ok::<Vec<ExecutionReceipt>, String>(receipts)
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok(RoomSnapshot {
         messages,
         latest_run,
+        receipts,
     })
 }
 
@@ -2264,6 +2624,8 @@ async fn start_room_run(
         .copied()
         .unwrap_or(builder);
     let degraded_review = reviewer.kind == builder.kind;
+    let builder_profile = provider_profile(database, &request.project_id, &builder.kind)?;
+    let reviewer_profile = provider_profile(database, &request.project_id, &reviewer.kind)?;
     let (cancel_sender, cancel_receiver) = watch::channel(false);
     runtime
         .cancellations
@@ -2511,6 +2873,8 @@ async fn start_room_run(
         &build_packet,
         &worktree,
         recovery_session.as_deref(),
+        builder_profile.model.as_deref(),
+        builder_profile.effort.as_deref(),
         &build_output_path,
         cancel_receiver.clone(),
     )
@@ -2535,6 +2899,15 @@ async fn start_room_run(
         build_result.session_id.as_deref(),
         build_context_bytes,
         Some(&truncate_utf8(&build_result.summary, 8 * 1024)),
+    )?;
+    persist_receipt(
+        database,
+        &request.run_id,
+        Phase::Build,
+        builder,
+        &builder_profile,
+        build_context_bytes,
+        &build_result,
     )?;
     save_provider_session(
         database,
@@ -2760,6 +3133,8 @@ async fn start_room_run(
         &review_packet,
         &worktree,
         None,
+        reviewer_profile.model.as_deref(),
+        reviewer_profile.effort.as_deref(),
         &review_output_path,
         cancel_receiver.clone(),
     )
@@ -2784,6 +3159,15 @@ async fn start_room_run(
         review_result.session_id.as_deref(),
         review_context_bytes,
         Some(&truncate_utf8(&review_result.summary, 8 * 1024)),
+    )?;
+    persist_receipt(
+        database,
+        &request.run_id,
+        Phase::Review,
+        reviewer,
+        &reviewer_profile,
+        review_context_bytes,
+        &review_result,
     )?;
     save_provider_session(
         database,
@@ -2928,6 +3312,8 @@ async fn start_room_run(
             &revision_packet,
             &worktree,
             build_result.session_id.as_deref(),
+            builder_profile.model.as_deref(),
+            builder_profile.effort.as_deref(),
             &revision_output_path,
             cancel_receiver.clone(),
         )
@@ -2952,6 +3338,15 @@ async fn start_room_run(
             revision_result.session_id.as_deref(),
             revision_context_bytes,
             Some(&truncate_utf8(&revision_result.summary, 8 * 1024)),
+        )?;
+        persist_receipt(
+            database,
+            &request.run_id,
+            Phase::Revise,
+            builder,
+            &builder_profile,
+            revision_context_bytes,
+            &revision_result,
         )?;
         if !revision_result.success {
             let state = if revision_result.stopped {
@@ -3094,6 +3489,8 @@ async fn start_room_run(
             &final_packet,
             &worktree,
             review_result.session_id.as_deref(),
+            reviewer_profile.model.as_deref(),
+            reviewer_profile.effort.as_deref(),
             &final_output_path,
             cancel_receiver.clone(),
         )
@@ -3120,6 +3517,15 @@ async fn start_room_run(
             final_result.session_id.as_deref(),
             final_context_bytes,
             Some(&truncate_utf8(&final_result.summary, 8 * 1024)),
+        )?;
+        persist_receipt(
+            database,
+            &request.run_id,
+            Phase::FinalReview,
+            reviewer,
+            &reviewer_profile,
+            final_context_bytes,
+            &final_result,
         )?;
         persist_message(
             database,
@@ -3397,6 +3803,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_environment,
             save_project,
+            load_provider_profiles,
+            save_provider_profile,
             load_room,
             start_room_run,
             stop_run
@@ -3428,6 +3836,15 @@ mod tests {
     }
 
     #[test]
+    fn phase_handoff_accepts_a_completed_builder_before_process_exit() {
+        let value = format!(
+            "Working output.\n{HANDOFF_START}\n{{\"schemaVersion\":1,\"status\":\"completed\",\"summary\":\"Made the requested change\",\"changedFiles\":[],\"checks\":[],\"findings\":[],\"nextAction\":\"none\"}}\n{HANDOFF_END}"
+        );
+        assert!(extract_phase_handoff(&value, Phase::Build).is_ok());
+        assert!(extract_phase_handoff(&value, Phase::Review).is_err());
+    }
+
+    #[test]
     fn unavailable_providers_do_not_claim_execution_capabilities() {
         let participant = capabilities_for("cursor", false, None, "", "");
         assert!(!participant.non_interactive_turn);
@@ -3447,5 +3864,28 @@ mod tests {
         assert!(terms.contains("frontend-design"));
         assert!(terms.contains("review"));
         assert!(!terms.contains("the"));
+    }
+
+    #[test]
+    fn receipt_usage_uses_only_provider_reported_fields() {
+        let value = serde_json::json!({
+            "model": "example-model",
+            "usage": {
+                "input_tokens": 120,
+                "cached_input_tokens": "30",
+                "output_tokens": 45,
+                "total_cost_usd": 0.0125,
+                "num_turns": 2
+            }
+        });
+        let mut usage = ProviderUsage::default();
+        merge_usage(&mut usage, &value);
+        assert_eq!(reported_model(&value).as_deref(), Some("example-model"));
+        assert_eq!(usage.input_tokens, Some(120));
+        assert_eq!(usage.cached_input_tokens, Some(30));
+        assert_eq!(usage.output_tokens, Some(45));
+        assert_eq!(usage.total_cost_usd, Some(0.0125));
+        assert_eq!(usage.num_turns, Some(2));
+        assert!(usage_note(&ProviderUsage::default()).contains("did not report"));
     }
 }

@@ -13,6 +13,7 @@ import {
   History,
   PanelRight,
   Play,
+  RefreshCw,
   Search,
   Settings,
   ShieldCheck,
@@ -25,8 +26,10 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { createRun, participantIsRunnable, routeForPhase } from "./coordination";
 import type {
   AgentKind,
+  ExecutionReceipt,
   NativeEnvironment,
   Participant,
+  ProviderProfile,
   Project,
   RoomMessage,
   Run,
@@ -38,9 +41,11 @@ import { agentNames } from "./model";
 import {
   getEnvironment,
   isNativeApp,
+  loadProviderProfiles,
   loadRoom,
   onRunEvent,
   saveProject,
+  saveProviderProfile,
   startRoomRun,
   stopRun,
   type RunEvent,
@@ -48,6 +53,7 @@ import {
 import { previewEnvironment, seedMessages, seedProject, seedRun } from "./seed";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
+type PrimaryView = "rooms" | "activity" | "settings";
 
 const activeStates: RunState[] = [
   "selecting",
@@ -92,6 +98,18 @@ function relativeTime(timestamp: string): string {
 function contextLabel(bytes = 0): string {
   if (!bytes) return "Packet not assembled";
   return `${Math.max(1, Math.round(bytes / 1024))} KiB / 48 KiB`;
+}
+
+function usageLabel(receipt: ExecutionReceipt): string {
+  const { inputTokens, cachedInputTokens, outputTokens, totalCostUsd, numTurns } = receipt.usage;
+  const parts = [
+    inputTokens !== undefined ? `${inputTokens.toLocaleString()} in` : undefined,
+    cachedInputTokens !== undefined ? `${cachedInputTokens.toLocaleString()} cached` : undefined,
+    outputTokens !== undefined ? `${outputTokens.toLocaleString()} out` : undefined,
+    totalCostUsd !== undefined ? `$${totalCostUsd.toFixed(4)}` : undefined,
+    numTurns !== undefined ? `${numTurns} turns` : undefined,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "Not reported";
 }
 
 function autonomyLabel(mode: Participant["capabilities"]["autonomyMode"]): string {
@@ -318,30 +336,51 @@ function ProjectRail({
   project,
   run,
   installedCount,
+  activeView,
+  onNavigate,
+  onOpenProject,
 }: {
   project: Project;
   run: Run;
   installedCount: number;
+  activeView: PrimaryView;
+  onNavigate: (view: PrimaryView) => void;
+  onOpenProject: () => void;
 }) {
   return (
     <aside className="project-rail">
       <nav className="primary-nav" aria-label="Primary">
-        <button type="button" className="nav-button active" aria-label="Rooms">
+        <button
+          type="button"
+          className={`nav-button ${activeView === "rooms" ? "active" : ""}`}
+          aria-current={activeView === "rooms" ? "page" : undefined}
+          onClick={() => onNavigate("rooms")}
+        >
           <TerminalSquare size={19} />
           <span>Rooms</span>
         </button>
-        <button type="button" className="nav-button" aria-label="Activity">
+        <button
+          type="button"
+          className={`nav-button ${activeView === "activity" ? "active" : ""}`}
+          aria-current={activeView === "activity" ? "page" : undefined}
+          onClick={() => onNavigate("activity")}
+        >
           <Activity size={19} />
           <span>Activity</span>
         </button>
-        <button type="button" className="nav-button" aria-label="Settings">
+        <button
+          type="button"
+          className={`nav-button ${activeView === "settings" ? "active" : ""}`}
+          aria-current={activeView === "settings" ? "page" : undefined}
+          onClick={() => onNavigate("settings")}
+        >
           <Settings size={19} />
           <span>Settings</span>
         </button>
       </nav>
       <div className="rail-section">
         <span className="rail-label">Project room</span>
-        <button type="button" className="project-row selected">
+        <button type="button" className="project-row selected" onClick={onOpenProject}>
           <span className="project-monogram">AR</span>
           <span>
             <strong>{project.name}</strong>
@@ -370,6 +409,153 @@ function ProjectRail({
   );
 }
 
+function ActivityView({ messages, query }: { messages: RoomMessage[]; query: string }) {
+  return (
+    <section className="utility-screen" aria-labelledby="activity-title">
+      <header className="utility-header">
+        <span className="eyebrow">Room record</span>
+        <h1 id="activity-title">Activity</h1>
+        <p>{query ? `Results for “${query}”` : "A durable timeline of objectives, evidence, and recovery states."}</p>
+      </header>
+      <div className="utility-timeline" role="feed" aria-label="Room activity">
+        {messages.length ? (
+          messages.map((message) => <TimelineEntry key={message.id} message={message} />)
+        ) : (
+          <p className="empty-state">No room activity matches this search.</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ProviderProfileCard({
+  participant,
+  profile,
+  saving,
+  onSave,
+}: {
+  participant: Participant;
+  profile?: ProviderProfile;
+  saving: boolean;
+  onSave: (profile: ProviderProfile) => void;
+}) {
+  const [model, setModel] = useState(profile?.model ?? "");
+  const [effort, setEffort] = useState(profile?.effort ?? "");
+
+  useEffect(() => {
+    setModel(profile?.model ?? "");
+    setEffort(profile?.effort ?? "");
+  }, [profile?.model, profile?.effort]);
+
+  return (
+    <article className="participant-card provider-profile-card">
+      <div className="participant-row">
+        <ParticipantMark participant={participant} />
+        <span className="participant-copy">
+          <strong>{participant.name}</strong>
+          <small>{participant.installed ? participant.version ?? "Installed" : "Not installed"}</small>
+        </span>
+      </div>
+      <p>{participant.capabilities.autonomyNote}</p>
+      <div className="provider-fields">
+        <label htmlFor={`model-${participant.kind}`}>
+          Model
+          <input
+            id={`model-${participant.kind}`}
+            list={`models-${participant.kind}`}
+            value={model}
+            onChange={(event) => setModel(event.target.value)}
+            placeholder="Provider default"
+            disabled={!participant.installed || saving}
+          />
+          <datalist id={`models-${participant.kind}`}>
+            {participant.models.map((option) => <option key={option} value={option} />)}
+          </datalist>
+        </label>
+        {participant.supportsEffort && (
+          <label htmlFor={`effort-${participant.kind}`}>
+            Reasoning effort
+            <select
+              id={`effort-${participant.kind}`}
+              value={effort}
+              onChange={(event) => setEffort(event.target.value)}
+              disabled={!participant.installed || saving}
+            >
+              <option value="">Provider default</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+        )}
+      </div>
+      <small className="model-discovery-note">{participant.modelDiscoveryNote}</small>
+      <button
+        type="button"
+        className="secondary-button save-profile-button"
+        disabled={!participant.installed || saving}
+        onClick={() => onSave({
+          participantKind: participant.kind,
+          model: model.trim() || undefined,
+          effort: effort || undefined,
+        })}
+      >
+        {saving ? "Saving model" : "Save model"}
+      </button>
+    </article>
+  );
+}
+
+function SettingsView({
+  environment,
+  profiles,
+  savingKind,
+  refreshing,
+  native,
+  error,
+  onRefresh,
+  onSaveProfile,
+}: {
+  environment: NativeEnvironment;
+  profiles: ProviderProfile[];
+  savingKind?: AgentKind;
+  refreshing: boolean;
+  native: boolean;
+  error: string;
+  onRefresh: () => void;
+  onSaveProfile: (profile: ProviderProfile) => void;
+}) {
+  return (
+    <section className="utility-screen" aria-labelledby="settings-title">
+      <header className="utility-header utility-header-actions">
+        <div>
+          <span className="eyebrow">Local runtime</span>
+          <h1 id="settings-title">Models and runtime</h1>
+          <p>Choose exact provider models once per project. Agent Room stores the requested choice and records what each CLI reports for every phase.</p>
+        </div>
+        <button type="button" className="secondary-button" onClick={onRefresh} disabled={refreshing}>
+          <RefreshCw size={15} className={refreshing ? "spinning" : undefined} />
+          {refreshing ? "Checking providers" : "Recheck providers"}
+        </button>
+      </header>
+      {!native && <p className="empty-state">Provider checks are available in the Tauri desktop app.</p>}
+      {error && <p className="utility-error" role="alert">{error}</p>}
+      <div className="settings-grid">
+        {environment.participants.map((participant) => (
+          <ProviderProfileCard
+            key={participant.kind}
+            participant={participant}
+            profile={profiles.find((profile) => profile.participantKind === participant.kind)}
+            saving={savingKind === participant.kind}
+            onSave={onSaveProfile}
+          />
+        ))}
+      </div>
+      <p className="settings-disclosure">Token totals appear only when a CLI emits them in its native run output. Provider account quotas and reset windows are not scraped or guessed.</p>
+    </section>
+  );
+}
+
 function Inspector({
   project,
   environment,
@@ -377,6 +563,7 @@ function Inspector({
   setActiveTab,
   run,
   messages,
+  receipts,
 }: {
   project: Project;
   environment: NativeEnvironment;
@@ -384,6 +571,7 @@ function Inspector({
   setActiveTab: (tab: InspectorTab) => void;
   run: Run;
   messages: RoomMessage[];
+  receipts: ExecutionReceipt[];
 }) {
   const tabs: InspectorTab[] = ["Repository", "Participants", "Evidence", "Memory"];
   const latestEvidence = [...messages].reverse().find((message) => message.kind === "evidence");
@@ -527,6 +715,25 @@ function Inspector({
             <span>Handoff contract</span>
             <strong>Schema v1</strong>
           </div>
+          <div className="run-limits">
+            <strong>Agent Room limits</strong>
+            <small>48 KiB packet, 20 minute phase, 5 minute idle timeout, one revision, two recovery attempts.</small>
+          </div>
+          <section className="receipt-list" aria-labelledby="receipt-title">
+            <h2 id="receipt-title">Execution receipts</h2>
+            {receipts.length ? receipts.map((receipt) => (
+              <article className="receipt-card" key={receipt.id}>
+                <div>
+                  <strong>{receipt.phase} · {agentNames[receipt.participant]}</strong>
+                  <small>{receipt.actualModel ?? receipt.requestedModel ?? "Provider default"}{receipt.requestedEffort ? ` · ${receipt.requestedEffort} effort` : ""}</small>
+                </div>
+                <p>{usageLabel(receipt)}</p>
+                <small>{contextLabel(receipt.contextBytes)} sent. {receipt.usageNote}</small>
+              </article>
+            )) : (
+              <p className="empty-state">Receipts appear after the first provider phase. They report run telemetry, not provider account quotas.</p>
+            )}
+          </section>
           <VerificationList verification={verification} />
         </div>
       )}
@@ -568,10 +775,10 @@ function Inspector({
           ) : (
             <p>No repository-local skill matched this objective. Provider-global skills remain provider-owned.</p>
           )}
-          <button type="button" className="secondary-button">
+          <p className="recovery-status">
             <History size={15} />
             {run.recoveryCount ?? 0} of 2 recovery attempts used
-          </button>
+          </p>
         </div>
       )}
     </aside>
@@ -582,15 +789,23 @@ export function App() {
   const [project, setProject] = useState(seedProject);
   const [environment, setEnvironment] = useState(previewEnvironment);
   const [messages, setMessages] = useState<RoomMessage[]>(seedMessages);
+  const [receipts, setReceipts] = useState<ExecutionReceipt[]>([]);
+  const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [run, setRun] = useState<Run>(seedRun);
   const [objective, setObjective] = useState("");
   const [stream, setStream] = useState("");
   const [streamTitle, setStreamTitle] = useState("Provider events");
+  const [activeView, setActiveView] = useState<PrimaryView>("rooms");
   const [activeTab, setActiveTab] = useState<InspectorTab>("Repository");
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [refreshingProviders, setRefreshingProviders] = useState(false);
+  const [savingProfileKind, setSavingProfileKind] = useState<AgentKind>();
   const [uiError, setUiError] = useState("");
   const timelineRef = useRef<HTMLDivElement>(null);
   const runRef = useRef(run);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const native = isNativeApp();
 
   useEffect(() => {
@@ -602,6 +817,7 @@ export function App() {
     const snapshot = await loadRoom(projectId);
     if (snapshot.messages.length) setMessages(snapshot.messages);
     if (snapshot.latestRun) setRun(hydrateRun(snapshot.latestRun));
+    setReceipts(snapshot.receipts);
   }
 
   useEffect(() => {
@@ -620,7 +836,11 @@ export function App() {
         setEnvironment(nextEnvironment);
         setProject(nextProject);
         await saveProject(nextProject);
-        await refreshRoom(nextProject.id);
+        const [_, nextProfiles] = await Promise.all([
+          refreshRoom(nextProject.id),
+          loadProviderProfiles(nextProject.id),
+        ]);
+        if (!disposed) setProfiles(nextProfiles);
       })
       .catch((error) => console.error("Failed to inspect native environment", error));
 
@@ -663,10 +883,80 @@ export function App() {
     });
   }, [messages, stream]);
 
+  useEffect(() => {
+    function handleShortcut(event: KeyboardEvent) {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+        requestAnimationFrame(() => searchInputRef.current?.focus());
+      }
+      if (event.key === "Escape" && searchOpen) {
+        setSearchOpen(false);
+        setSearchQuery("");
+      }
+    }
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [searchOpen]);
+
   const installedCount = useMemo(
     () => environment.participants.filter(participantIsRunnable).length,
     [environment],
   );
+
+  const visibleMessages = useMemo(() => {
+    const query = searchQuery.trim().toLocaleLowerCase();
+    if (!query) return messages;
+    return messages.filter((message) =>
+      [message.body, message.reason, message.sender, message.kind]
+        .filter(Boolean)
+        .some((value) => value?.toLocaleLowerCase().includes(query)),
+    );
+  }, [messages, searchQuery]);
+
+  function openInspector(tab: InspectorTab) {
+    setActiveTab(tab);
+    setInspectorOpen(true);
+  }
+
+  function showView(view: PrimaryView) {
+    setActiveView(view);
+    if (view === "rooms") setSearchQuery("");
+  }
+
+  async function refreshProviders() {
+    if (!native) {
+      setUiError("Provider checks are available in the Tauri desktop app.");
+      return;
+    }
+    setRefreshingProviders(true);
+    setUiError("");
+    try {
+      const nextEnvironment = await getEnvironment();
+      setEnvironment(nextEnvironment);
+      setProject((current) => ({ ...current, branch: nextEnvironment.branch }));
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRefreshingProviders(false);
+    }
+  }
+
+  async function handleSaveProfile(profile: ProviderProfile) {
+    setUiError("");
+    setSavingProfileKind(profile.participantKind);
+    try {
+      if (native) await saveProviderProfile(project.id, profile);
+      setProfiles((current) => [
+        ...current.filter((value) => value.participantKind !== profile.participantKind),
+        profile,
+      ]);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingProfileKind(undefined);
+    }
+  }
 
   async function submitObjective(event: FormEvent) {
     event.preventDefault();
@@ -768,7 +1058,14 @@ export function App() {
   }
 
   async function handleStop() {
-    if (native) await stopRun(runRef.current.id);
+    if (native) {
+      try {
+        await stopRun(runRef.current.id);
+      } catch (error) {
+        setUiError(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
     setRun((current) => ({
       ...current,
       state: "stopped",
@@ -825,7 +1122,15 @@ export function App() {
           </span>
           <strong>Agent Room</strong>
         </div>
-        <button type="button" className="project-switch">
+        <button
+          type="button"
+          className="project-switch"
+          onClick={() => {
+            setActiveView("rooms");
+            openInspector("Repository");
+          }}
+          aria-label={`Open ${project.name} repository details`}
+        >
           <span className="project-monogram small">AR</span>
           <span>
             <strong>{project.name}</strong>
@@ -833,11 +1138,42 @@ export function App() {
           </span>
           <ChevronRight size={15} />
         </button>
-        <button type="button" className="search-button">
-          <Search size={16} />
-          <span>Search rooms and evidence</span>
-          <kbd>Ctrl K</kbd>
-        </button>
+        {searchOpen ? (
+          <div className="search-field" role="search">
+            <Search size={16} aria-hidden="true" />
+            <input
+              ref={searchInputRef}
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search rooms and evidence"
+              aria-label="Search rooms and evidence"
+            />
+            <button
+              type="button"
+              className="search-close"
+              onClick={() => {
+                setSearchOpen(false);
+                setSearchQuery("");
+              }}
+              aria-label="Close search"
+            >
+              <X size={15} />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="search-button"
+            onClick={() => {
+              setSearchOpen(true);
+              requestAnimationFrame(() => searchInputRef.current?.focus());
+            }}
+          >
+            <Search size={16} />
+            <span>Search rooms and evidence</span>
+            <kbd>Ctrl K</kbd>
+          </button>
+        )}
         <div className="topbar-status">
           <span className={native ? "online" : ""} />
           {native ? "Autonomous runtime" : "Read-only preview"}
@@ -850,14 +1186,44 @@ export function App() {
         >
           <PanelRight size={18} />
         </button>
-        <button type="button" className="icon-button" aria-label="Settings">
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Open provider settings"
+          onClick={() => setActiveView("settings")}
+        >
           <Settings size={18} />
         </button>
       </header>
 
-      <ProjectRail project={project} run={run} installedCount={installedCount} />
+      <ProjectRail
+        project={project}
+        run={run}
+        installedCount={installedCount}
+        activeView={activeView}
+        onNavigate={showView}
+        onOpenProject={() => {
+          setActiveView("rooms");
+          openInspector("Repository");
+        }}
+      />
 
       <main className="room" id="room-main" tabIndex={-1}>
+        {activeView === "activity" ? (
+          <ActivityView messages={visibleMessages} query={searchQuery} />
+        ) : activeView === "settings" ? (
+          <SettingsView
+            environment={environment}
+            profiles={profiles}
+            savingKind={savingProfileKind}
+            refreshing={refreshingProviders}
+            native={native}
+            error={uiError}
+            onRefresh={refreshProviders}
+            onSaveProfile={handleSaveProfile}
+          />
+        ) : (
+          <>
         <div className="room-header">
           <div>
             <span className="eyebrow">Autonomous project room</span>
@@ -887,9 +1253,12 @@ export function App() {
           <div className="timeline-date">
             <span>Durable room</span>
           </div>
-          {messages.map((message) => (
+          {visibleMessages.map((message) => (
             <TimelineEntry key={message.id} message={message} />
           ))}
+          {searchQuery && !visibleMessages.length && (
+            <p className="empty-state">No room activity matches this search.</p>
+          )}
           {stream && activeStates.includes(run.state) && (
             <article
               className="stream-block"
@@ -973,6 +1342,8 @@ export function App() {
             </p>
           )}
         </form>
+          </>
+        )}
       </main>
 
       <div className={`inspector-wrap ${inspectorOpen ? "open" : ""}`}>
@@ -991,6 +1362,7 @@ export function App() {
           setActiveTab={setActiveTab}
           run={run}
           messages={messages}
+          receipts={receipts}
         />
       </div>
     </div>

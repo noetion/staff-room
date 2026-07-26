@@ -51,6 +51,9 @@ export interface Participant {
   executablePath?: string;
   state: "ready" | "running" | "reviewing" | "manual" | "unavailable";
   capabilities: ProviderCapabilities;
+  models: string[];
+  modelDiscoveryNote: string;
+  supportsEffort: boolean;
 }
 
 export interface Project {
@@ -160,9 +163,39 @@ export interface StoredRun {
   recoveryCount: number;
 }
 
+export interface ProviderUsage {
+  inputTokens?: number;
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  totalCostUsd?: number;
+  numTurns?: number;
+}
+
+export interface ExecutionReceipt {
+  id: string;
+  phase: string;
+  participant: AgentKind;
+  providerVersion?: string;
+  requestedModel?: string;
+  requestedEffort?: string;
+  actualModel?: string;
+  sessionId?: string;
+  contextBytes: number;
+  usage: ProviderUsage;
+  usageNote: string;
+  createdAt: string;
+}
+
+export interface ProviderProfile {
+  participantKind: AgentKind;
+  model?: string;
+  effort?: string;
+}
+
 export interface RoomSnapshot {
   messages: RoomMessage[];
   latestRun?: StoredRun;
+  receipts: ExecutionReceipt[];
 }
 
 export const agentNames: Record<AgentKind, string> = {

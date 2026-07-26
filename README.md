@@ -8,6 +8,8 @@ The working v1 provides:
 - explicit `@agent` selection with a deterministic fallback;
 - a managed Git branch and worktree for every objective;
 - provider-native streaming, cancellation, session capture, and revision resume where supported;
+- per-project model profiles, including a live Antigravity model list when `agy models` is available, applied to build, review, revision, and final review;
+- durable per-phase execution receipts with requested model, provider-reported model and token/cost telemetry when emitted, plus an explicit “not reported” state for provider quota and reset-window data;
 - automatic project verification detected from `package.json` and Cargo manifests;
 - independent cross-provider review when a second CLI is installed;
 - a visible fresh-session same-provider review fallback when only one CLI is available;

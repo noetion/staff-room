@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentKind,
   NativeEnvironment,
+  ProviderProfile,
   Project,
   RoomSnapshot,
   StartRunResult,
@@ -33,6 +34,19 @@ export async function saveProject(project: Project): Promise<void> {
 
 export async function loadRoom(projectId: string): Promise<RoomSnapshot> {
   return invoke<RoomSnapshot>("load_room", { projectId });
+}
+
+export async function loadProviderProfiles(
+  projectId: string,
+): Promise<ProviderProfile[]> {
+  return invoke<ProviderProfile[]>("load_provider_profiles", { projectId });
+}
+
+export async function saveProviderProfile(
+  projectId: string,
+  profile: ProviderProfile,
+): Promise<void> {
+  return invoke("save_provider_profile", { profile: { ...profile, projectId } });
 }
 
 export async function startRoomRun(
