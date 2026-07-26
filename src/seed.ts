@@ -10,6 +10,7 @@ export const seedProject: Project = {
 
 export const previewEnvironment: NativeEnvironment = {
   native: false,
+  attached: true,
   repositoryPath: seedProject.repositoryPath,
   branch: "main",
   participants: [

@@ -117,6 +117,7 @@ export interface Run {
 
 export interface NativeEnvironment {
   native: boolean;
+  attached: boolean;
   repositoryPath: string;
   branch: string;
   participants: Participant[];

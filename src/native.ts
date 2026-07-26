@@ -32,8 +32,24 @@ export async function getEnvironment(forceRefresh = false): Promise<NativeEnviro
   return invoke<NativeEnvironment>("get_environment", { forceRefresh });
 }
 
-export async function saveProject(project: Project): Promise<void> {
-  return invoke("save_project", { project });
+export async function projectPick(): Promise<string | undefined> {
+  return invoke<string | undefined>("project_pick");
+}
+
+export async function projectAttach(path: string): Promise<Project> {
+  return invoke<Project>("project_attach", { path });
+}
+
+export async function projectList(): Promise<Project[]> {
+  return invoke<Project[]>("project_list");
+}
+
+export async function projectSelect(id: string): Promise<Project> {
+  return invoke<Project>("project_select", { id });
+}
+
+export async function projectActive(): Promise<Project | undefined> {
+  return invoke<Project | undefined>("project_active");
 }
 
 export async function loadRoom(projectId: string): Promise<RoomSnapshot> {

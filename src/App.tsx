@@ -56,7 +56,11 @@ import {
   loadProjectSettings,
   loadRoom,
   onRunEvent,
-  saveProject,
+  projectActive,
+  projectAttach,
+  projectList,
+  projectPick,
+  projectSelect,
   saveProviderProfile,
   saveProjectSettings,
   startRoomChat,
@@ -65,10 +69,35 @@ import {
   testProviderConnection,
   type RunEvent,
 } from "./native";
-import { previewEnvironment, seedMessages, seedProject, seedRun } from "./seed";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 type PrimaryView = "rooms" | "activity" | "settings";
+
+const detachedProject: Project = {
+  id: "",
+  name: "No repository selected",
+  goal: "",
+  repositoryPath: "",
+  branch: "",
+};
+
+const detachedEnvironment: NativeEnvironment = {
+  native: false,
+  attached: false,
+  repositoryPath: "",
+  branch: "",
+  participants: [],
+};
+
+const emptyRun: Run = {
+  id: "",
+  objective: "",
+  state: "ready",
+  route: [],
+  reviewCount: 0,
+  revisionCount: 0,
+  startedAt: "",
+};
 type ComposerMode = "chat" | "ship";
 type LiveActivityItem = { title: string; detail: string };
 
@@ -490,9 +519,17 @@ function WindowControls({ native }: { native: boolean }) {
 function ProjectRail({
   activeView,
   onNavigate,
+  projects,
+  activeProjectId,
+  onSelectProject,
+  onAttachProject,
 }: {
   activeView: PrimaryView;
   onNavigate: (view: PrimaryView) => void;
+  projects: Project[];
+  activeProjectId: string;
+  onSelectProject: (id: string) => void;
+  onAttachProject: () => void;
 }) {
   return (
     <aside className="project-rail">
@@ -525,11 +562,68 @@ function ProjectRail({
           <span>Settings</span>
         </button>
       </nav>
+      <div className="rail-projects" aria-label="Projects">
+        {projects.map((project) => (
+          <button
+            key={project.id}
+            type="button"
+            className={`rail-project ${project.id === activeProjectId ? "active" : ""}`}
+            onClick={() => onSelectProject(project.id)}
+            title={project.repositoryPath}
+          >
+            {project.name.slice(0, 2).toUpperCase()}
+          </button>
+        ))}
+        <button type="button" className="rail-project rail-project-add" onClick={onAttachProject} aria-label="Attach repository">
+          +
+        </button>
+      </div>
       <div className="rail-foot">
         <span className="local-indicator" />
         <span>Local</span>
       </div>
     </aside>
+  );
+}
+
+function AttachProjectView({
+  projects,
+  native,
+  onAttach,
+  onSelect,
+}: {
+  projects: Project[];
+  native: boolean;
+  onAttach: () => void;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <section className="utility-screen attach-project" aria-labelledby="attach-project-title">
+      <header className="utility-header">
+        <span className="eyebrow">Local workspace</span>
+        <h1 id="attach-project-title">Choose a repository</h1>
+        <p>Attach a Git repository to create an independently scoped Agent Room.</p>
+        <button type="button" className="primary-button" onClick={onAttach} disabled={!native}>
+          Choose a repository
+        </button>
+        {!native && <p className="empty-state">Repository attachment is available in the Tauri desktop app.</p>}
+      </header>
+      {projects.length > 0 && (
+        <div className="recent-projects">
+          <span className="eyebrow">Recent projects</span>
+          {projects.map((recentProject) => (
+            <button key={recentProject.id} type="button" className="project-switch" onClick={() => onSelect(recentProject.id)}>
+              <span className="project-monogram small">{recentProject.name.slice(0, 2).toUpperCase()}</span>
+              <span>
+                <strong>{recentProject.name}</strong>
+                <small>{recentProject.repositoryPath}</small>
+              </span>
+              <ChevronRight size={15} />
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1048,9 +1142,10 @@ function Inspector({
 }
 
 export function App() {
-  const [project, setProject] = useState(seedProject);
-  const [environment, setEnvironment] = useState(previewEnvironment);
-  const [messages, setMessages] = useState<RoomMessage[]>(seedMessages);
+  const [project, setProject] = useState<Project>(detachedProject);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [environment, setEnvironment] = useState(detachedEnvironment);
+  const [messages, setMessages] = useState<RoomMessage[]>([]);
   const [receipts, setReceipts] = useState<ExecutionReceipt[]>([]);
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [projectSettings, setProjectSettings] = useState<ProjectSettings>({
@@ -1060,7 +1155,7 @@ export function App() {
   const [modelCatalog, setModelCatalog] = useState<Partial<Record<AgentKind, string[]>>>({});
   const [modelDiscoveryDetails, setModelDiscoveryDetails] = useState<Partial<Record<AgentKind, string>>>({});
   const [discoveringModelsKind, setDiscoveringModelsKind] = useState<AgentKind>();
-  const [run, setRun] = useState<Run>(seedRun);
+  const [run, setRun] = useState<Run>(emptyRun);
   const [objective, setObjective] = useState("");
   const [composerMode, setComposerMode] = useState<ComposerMode>("chat");
   const [chatSending, setChatSending] = useState(false);
@@ -1089,36 +1184,58 @@ export function App() {
   async function refreshRoom(projectId = project.id) {
     if (!native) return;
     const snapshot = await loadRoom(projectId);
-    if (snapshot.messages.length) setMessages(snapshot.messages);
-    if (snapshot.latestRun) setRun(hydrateRun(snapshot.latestRun));
+    setMessages(snapshot.messages);
+    setRun(snapshot.latestRun ? hydrateRun(snapshot.latestRun) : emptyRun);
     setReceipts(snapshot.receipts);
   }
 
+  async function activateProject(nextProject: Project, knownEnvironment?: NativeEnvironment) {
+    const nextEnvironment = knownEnvironment ?? await getEnvironment();
+    const [snapshot, nextProfiles, nextSettings, nextProjects] = await Promise.all([
+      loadRoom(nextProject.id),
+      loadProviderProfiles(nextProject.id),
+      loadProjectSettings(nextProject.id),
+      projectList(),
+    ]);
+    setProject(nextProject);
+    setProjects(nextProjects);
+    setEnvironment(nextEnvironment);
+    setMessages(snapshot.messages);
+    setRun(snapshot.latestRun ? hydrateRun(snapshot.latestRun) : emptyRun);
+    setReceipts(snapshot.receipts);
+    setProfiles(nextProfiles);
+    setProjectSettings(nextSettings);
+    setActiveView("rooms");
+    setUiError("");
+  }
+
   useEffect(() => {
-    if (!native) return;
+    if (!native) {
+      if (import.meta.env.DEV) {
+        void import("./seed").then(({ previewEnvironment, seedMessages, seedProject, seedRun }) => {
+          setProject(seedProject);
+          setProjects([seedProject]);
+          setEnvironment(previewEnvironment);
+          setMessages(seedMessages);
+          setRun(seedRun);
+        });
+      }
+      return;
+    }
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
     getEnvironment()
       .then(async (nextEnvironment) => {
         if (disposed) return;
-        const nextProject = {
-          ...seedProject,
-          repositoryPath: nextEnvironment.repositoryPath,
-          branch: nextEnvironment.branch,
-        };
-        setEnvironment(nextEnvironment);
-        setProject(nextProject);
-        await saveProject(nextProject);
-        const [_, nextProfiles, nextSettings] = await Promise.all([
-          refreshRoom(nextProject.id),
-          loadProviderProfiles(nextProject.id),
-          loadProjectSettings(nextProject.id),
-        ]);
-        if (!disposed) {
-          setProfiles(nextProfiles);
-          setProjectSettings(nextSettings);
+        const [nextProject, nextProjects] = await Promise.all([projectActive(), projectList()]);
+        if (disposed) return;
+        if (!nextEnvironment.attached || !nextProject) {
+          setEnvironment(nextEnvironment);
+          setProjects(nextProjects);
+          return;
         }
+        await activateProject(nextProject, nextEnvironment);
       })
       .catch((error) => console.error("Failed to inspect native environment", error));
 
@@ -1291,6 +1408,30 @@ export function App() {
   function showView(view: PrimaryView) {
     setActiveView(view);
     if (view === "rooms") setSearchQuery("");
+  }
+
+  async function handleAttachProject() {
+    if (!native) {
+      setUiError("Repository attachment is available in the Tauri desktop app.");
+      return;
+    }
+    try {
+      const path = await projectPick();
+      if (!path) return;
+      const nextProject = await projectAttach(path);
+      await activateProject(nextProject);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handleSelectProject(id: string) {
+    if (!native || id === project.id) return;
+    try {
+      await activateProject(await projectSelect(id));
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function refreshProviders() {
@@ -1773,10 +1914,21 @@ export function App() {
       <ProjectRail
         activeView={activeView}
         onNavigate={showView}
+        projects={projects}
+        activeProjectId={project.id}
+        onSelectProject={handleSelectProject}
+        onAttachProject={handleAttachProject}
       />
 
       <main className="room" id="room-main" tabIndex={-1}>
-        {activeView === "activity" ? (
+        {!environment.attached ? (
+          <AttachProjectView
+            projects={projects}
+            native={native}
+            onAttach={handleAttachProject}
+            onSelect={handleSelectProject}
+          />
+        ) : activeView === "activity" ? (
           <ActivityView messages={visibleMessages} query={searchQuery} />
         ) : activeView === "settings" ? (
           <SettingsView

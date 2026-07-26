@@ -133,6 +133,10 @@ kbd { border: 1px solid rgba(255,255,255,.1); border-bottom-color: rgba(255,255,
   backdrop-filter: blur(26px) saturate(138%);
 }
 .primary-nav { display: grid; gap: 7px; }
+.rail-projects { display: grid; gap: 6px; margin-top: 18px; padding-top: 13px; border-top: 1px solid var(--border); }
+.rail-project { display: grid; place-items: center; width: 32px; height: 32px; margin: 0 auto; border: 1px solid transparent; border-radius: 9px; background: rgba(255,255,255,.04); color: var(--muted); font: 600 9px "IBM Plex Mono"; cursor: pointer; }
+.rail-project:hover, .rail-project.active { border-color: var(--border-strong); color: var(--text); background: rgba(255,255,255,.1); }
+.rail-project-add { border-style: dashed; font-size: 17px; font-weight: 400; }
 .nav-button { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 4px; width: 56px; min-height: 52px; padding: 6px 2px; border: 0; border-radius: 14px; background: transparent; color: var(--muted); cursor: pointer; }
 .nav-button span { font-size: 9px; font-weight: 560; }
 .nav-button:hover { color: var(--text); background: rgba(255,255,255,.055); }
@@ -151,6 +155,10 @@ kbd { border: 1px solid rgba(255,255,255,.1); border-bottom-color: rgba(255,255,
 .room-meta span { display: flex; align-items: center; gap: 6px; }
 
 .utility-screen { grid-row: 1 / -1; display: flex; min-height: 0; overflow: auto; flex-direction: column; padding: 20px 22px 24px; }
+.attach-project .utility-header { border-bottom: 0; }
+.attach-project .primary-button { width: fit-content; margin-top: 16px; }
+.recent-projects { display: grid; gap: 8px; max-width: 540px; margin-top: 22px; }
+.recent-projects .project-switch { width: 100%; height: auto; min-height: 42px; }
 .utility-header { max-width: 780px; padding-bottom: 15px; border-bottom: 1px solid var(--border); }
 .utility-header h1 { margin: 3px 0 4px; font: 660 23px/1.15 "Onest Variable"; letter-spacing: -.03em; }
 .utility-header p { max-width: 680px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }

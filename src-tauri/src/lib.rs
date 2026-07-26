@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -109,6 +110,7 @@ struct ModelDiscoveryRequest {
 #[serde(rename_all = "camelCase")]
 struct NativeEnvironment {
     native: bool,
+    attached: bool,
     repository_path: String,
     branch: String,
     participants: Vec<Participant>,
@@ -232,13 +234,14 @@ struct ConnectionTestRequest {
     participant_kind: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct ProjectInput {
+struct Project {
     id: String,
     name: String,
     goal: String,
     repository_path: String,
+    branch: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -434,6 +437,7 @@ struct SelectedSkill {
 }
 
 fn migrate(connection: &Connection) -> rusqlite::Result<()> {
+    backup_v1_database_before_migration(connection)?;
     connection.execute_batch(
         "
         PRAGMA journal_mode = WAL;
@@ -446,6 +450,11 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             repository_path TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS app_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS messages (
@@ -655,6 +664,8 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     ] {
         let _ = connection.execute(statement, []);
     }
+    migrate_v1_to_v2(connection)?;
+
     connection.execute_batch(
         "
         INSERT OR IGNORE INTO provider_route_profiles
@@ -670,6 +681,191 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         ",
     )?;
     Ok(())
+}
+
+const PROJECT_SCOPED_TABLES: &[&str] = &[
+    "projects",
+    "messages",
+    "runs",
+    "chat_sessions",
+    "provider_sessions",
+    "provider_profiles",
+    "provider_route_profiles",
+    "project_settings",
+    "provider_connections",
+    "chat_receipts",
+];
+
+fn project_id_for_root(repository: &Path) -> String {
+    let digest = Sha256::digest(repository.to_string_lossy().as_bytes());
+    digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn canonical_repository_root(path: &Path) -> Result<PathBuf, String> {
+    let canonical_path = std::fs::canonicalize(path)
+        .map_err(|error| format!("Cannot read repository path: {error}"))?;
+    if !canonical_path.is_dir() {
+        return Err("The attached path is not a directory.".to_owned());
+    }
+    let root = git_static(&canonical_path, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
+    std::fs::canonicalize(root)
+        .map_err(|error| format!("Cannot read Git repository root: {error}"))
+}
+
+fn project_from_parts(id: String, name: String, goal: String, repository_path: String) -> Project {
+    let branch = git_static(Path::new(&repository_path), &["branch", "--show-current"])
+        .unwrap_or_default();
+    Project {
+        id,
+        name,
+        goal,
+        repository_path,
+        branch,
+    }
+}
+
+fn active_project(connection: &Connection) -> Result<Option<Project>, String> {
+    connection
+        .query_row(
+            "SELECT projects.id, projects.name, projects.goal, projects.repository_path
+             FROM app_state JOIN projects ON projects.id = app_state.value
+             WHERE app_state.key = 'active_project_id'",
+            [],
+            |row| Ok(project_from_parts(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn attach_project(database: &Database, path: &str) -> Result<Project, String> {
+    let root = canonical_repository_root(Path::new(path))?;
+    let repository_path = root.to_string_lossy().into_owned();
+    let id = project_id_for_root(&root);
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Repository")
+        .to_owned();
+    let project = project_from_parts(id.clone(), name, String::new(), repository_path);
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO projects (id, name, goal, repository_path) VALUES (?1, ?2, ?3, ?4)",
+            params![project.id, project.name, project.goal, project.repository_path],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO app_state (key, value) VALUES ('active_project_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [&id],
+        )
+        .map_err(|error| error.to_string())?;
+    active_project(&connection)?.ok_or_else(|| "Attached project could not be loaded.".to_owned())
+}
+
+fn project_row_counts(connection: &Connection) -> Result<Vec<(&'static str, i64)>, rusqlite::Error> {
+    PROJECT_SCOPED_TABLES
+        .iter()
+        .map(|table| {
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .map(|count| (*table, count))
+        })
+        .collect()
+}
+
+fn backup_v1_database(connection: &Connection) -> Result<(), String> {
+    let Some(path) = connection
+        .path()
+        .filter(|path| *path != ":memory:")
+        .map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    let backup = PathBuf::from(format!("{}.v1.bak", path.to_string_lossy()));
+    if !path.is_file() {
+        return Ok(());
+    }
+    if !backup.exists() {
+        std::fs::copy(&path, &backup)
+            .map_err(|error| format!("Failed to back up v1 database: {error}"))?;
+    }
+    Ok(())
+}
+
+fn backup_v1_database_before_migration(connection: &Connection) -> rusqlite::Result<()> {
+    let has_projects_table: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'projects')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_projects_table {
+        return Ok(());
+    }
+    let legacy_path = connection
+        .query_row(
+            "SELECT repository_path FROM projects WHERE id = 'agent-room'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if legacy_path
+        .as_deref()
+        .and_then(|path| canonical_repository_root(Path::new(path)).ok())
+        .is_none()
+    {
+        return Ok(());
+    }
+    backup_v1_database(connection)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+}
+
+fn migrate_v1_to_v2(connection: &Connection) -> rusqlite::Result<()> {
+    let legacy_path = connection
+        .query_row(
+            "SELECT repository_path FROM projects WHERE id = 'agent-room'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(legacy_path) = legacy_path else {
+        return Ok(());
+    };
+    let root = match canonical_repository_root(Path::new(&legacy_path)) {
+        Ok(root) => root,
+        Err(_) => return Ok(()),
+    };
+    let project_id = project_id_for_root(&root);
+    let row_counts = project_row_counts(connection)?;
+    connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let result = (|| {
+        let transaction = connection.unchecked_transaction()?;
+        for table in PROJECT_SCOPED_TABLES {
+            let column = if *table == "projects" { "id" } else { "project_id" };
+            transaction.execute(
+                &format!("UPDATE {table} SET {column} = ?1 WHERE {column} = 'agent-room'"),
+                [&project_id],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO app_state (key, value) VALUES ('active_project_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [&project_id],
+        )?;
+        if project_row_counts(&transaction)? != row_counts {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        transaction.commit()
+    })();
+    let _ = connection.execute_batch("PRAGMA foreign_keys = ON;");
+    result
 }
 
 fn reconcile_interrupted_runs(connection: &Connection) -> rusqlite::Result<usize> {
@@ -3756,55 +3952,86 @@ async fn get_environment(
     runtime: State<'_, RuntimeState>,
     force_refresh: Option<bool>,
 ) -> Result<NativeEnvironment, String> {
-    let current_directory = std::env::current_dir().map_err(|error| error.to_string())?;
-    let repository = find_executable(&["git"])
-        .and_then(|git_executable| {
-            command_output(
-                &git_executable,
-                ["-c", "safe.directory=*", "rev-parse", "--show-toplevel"],
-                Some(&current_directory),
-            )
-        })
-        .map(PathBuf::from)
-        .filter(|path| path.is_dir())
-        .unwrap_or(current_directory);
-    let branch = git_static(&repository, &["branch", "--show-current"]).unwrap_or_default();
+    let project = {
+        let connection = database.0.lock().map_err(|error| error.to_string())?;
+        active_project(&connection)?
+    };
+    let Some(project) = project else {
+        return Ok(NativeEnvironment {
+            native: true,
+            attached: false,
+            repository_path: String::new(),
+            branch: String::new(),
+            participants: Vec::new(),
+        });
+    };
     Ok(NativeEnvironment {
         native: true,
-        repository_path: repository.to_string_lossy().into_owned(),
-        branch,
+        attached: true,
+        repository_path: project.repository_path,
+        branch: project.branch,
         participants: participants_with_connections(
             database.inner(),
-            "agent-room",
+            &project.id,
             cached_participants(runtime.inner(), force_refresh.unwrap_or(false)).await?,
         )?,
     })
 }
 
 #[tauri::command]
-fn save_project(database: State<'_, Database>, project: ProjectInput) -> Result<(), String> {
-    let repository = PathBuf::from(&project.repository_path);
-    git_static(&repository, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
+async fn project_pick(app: AppHandle) -> Result<Option<String>, String> {
+    Ok(app
+        .dialog()
+        .file()
+        .blocking_pick_folder()
+        .map(|path| path.to_string()))
+}
+
+#[tauri::command]
+fn project_attach(database: State<'_, Database>, path: String) -> Result<Project, String> {
+    attach_project(database.inner(), &path)
+}
+
+#[tauri::command]
+fn project_list(database: State<'_, Database>) -> Result<Vec<Project>, String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("SELECT id, name, goal, repository_path FROM projects ORDER BY updated_at DESC, name")
+        .map_err(|error| error.to_string())?;
+    let projects = statement
+        .query_map([], |row| Ok(project_from_parts(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(projects)
+}
+
+#[tauri::command]
+fn project_select(database: State<'_, Database>, id: String) -> Result<Project, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    let project = connection
+        .query_row(
+            "SELECT id, name, goal, repository_path FROM projects WHERE id = ?1",
+            [&id],
+            |row| Ok(project_from_parts(row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Project not found.".to_owned())?;
     connection
         .execute(
-            "INSERT INTO projects (id, name, goal, repository_path)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET
-               name = excluded.name,
-               goal = excluded.goal,
-               repository_path = excluded.repository_path,
-               updated_at = CURRENT_TIMESTAMP",
-            params![
-                project.id,
-                project.name,
-                project.goal,
-                project.repository_path
-            ],
+            "INSERT INTO app_state (key, value) VALUES ('active_project_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [&id],
         )
         .map_err(|error| error.to_string())?;
-    Ok(())
+    Ok(project)
+}
+
+#[tauri::command]
+fn project_active(database: State<'_, Database>) -> Result<Option<Project>, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    active_project(&connection)
 }
 
 #[tauri::command]
@@ -6206,6 +6433,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_directory)?;
@@ -6218,7 +6446,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_environment,
-            save_project,
+            project_pick,
+            project_attach,
+            project_list,
+            project_select,
+            project_active,
             load_project_settings,
             save_project_settings,
             load_provider_profiles,
@@ -6265,6 +6497,79 @@ mod tests {
         git_static(&repository, &["add", "plan.md"]).expect("stage tracked file");
         git_static(&repository, &["commit", "-m", "Initial"]).expect("commit tracked file");
         (root, repository)
+    }
+
+    #[test]
+    fn attached_projects_keep_room_messages_scoped() {
+        let (first_root, first_repository) = test_repository();
+        let (second_root, second_repository) = test_repository();
+        let connection = Connection::open_in_memory().expect("open test database");
+        migrate(&connection).expect("migrate test database");
+        let database = Database(Mutex::new(connection));
+        let first = attach_project(&database, &first_repository.to_string_lossy())
+            .expect("attach first repository");
+        let second = attach_project(&database, &second_repository.to_string_lossy())
+            .expect("attach second repository");
+
+        {
+            let connection = database.0.lock().expect("lock database");
+            connection
+                .execute(
+                    "INSERT INTO messages (id, project_id, sender_kind, message_kind, body)
+                     VALUES ('first-message', ?1, 'human', 'human', 'first room')",
+                    [&first.id],
+                )
+                .expect("write first message");
+            connection
+                .execute(
+                    "INSERT INTO messages (id, project_id, sender_kind, message_kind, body)
+                     VALUES ('second-message', ?1, 'human', 'human', 'second room')",
+                    [&second.id],
+                )
+                .expect("write second message");
+        }
+
+        let first_room = load_room_snapshot(&database, &first.id).expect("load first room");
+        let second_room = load_room_snapshot(&database, &second.id).expect("load second room");
+        assert_eq!(first_room.messages.len(), 1);
+        assert_eq!(first_room.messages[0].body, "first room");
+        assert_eq!(second_room.messages.len(), 1);
+        assert_eq!(second_room.messages[0].body, "second room");
+
+        std::fs::remove_dir_all(first_root).expect("remove first test repository");
+        std::fs::remove_dir_all(second_root).expect("remove second test repository");
+    }
+
+    #[test]
+    fn v1_project_migration_preserves_project_scoped_row_counts() {
+        let (root, repository) = test_repository();
+        let connection = Connection::open_in_memory().expect("open fixture database");
+        migrate(&connection).expect("create v1 fixture schema");
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, goal, repository_path)
+                 VALUES ('agent-room', 'Agent Room', 'legacy', ?1)",
+                [repository.to_string_lossy().into_owned()],
+            )
+            .expect("insert legacy project");
+        connection
+            .execute(
+                "INSERT INTO messages (id, project_id, sender_kind, message_kind, body)
+                 VALUES ('legacy-message', 'agent-room', 'human', 'human', 'preserve me')",
+                [],
+            )
+            .expect("insert legacy message");
+        let before = project_row_counts(&connection).expect("count legacy rows");
+
+        migrate(&connection).expect("migrate v1 fixture");
+
+        assert_eq!(project_row_counts(&connection).expect("count migrated rows"), before);
+        let project_id = project_id_for_root(&std::fs::canonicalize(&repository).expect("canonical repository"));
+        let message_project_id: String = connection
+            .query_row("SELECT project_id FROM messages WHERE id = 'legacy-message'", [], |row| row.get(0))
+            .expect("load migrated message");
+        assert_eq!(message_project_id, project_id);
+        std::fs::remove_dir_all(root).expect("remove fixture repository");
     }
 
     fn remove_test_repository(root: &Path) {
