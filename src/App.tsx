@@ -22,8 +22,14 @@ import {
   Workflow,
   X,
 } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { createRun, participantIsRunnable, routeForPhase } from "./coordination";
+import {
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createRun, participantCanChat, participantIsRunnable, routeForPhase, selectChatParticipant, selectParticipant } from "./coordination";
 import type {
   AgentKind,
   ExecutionReceipt,
@@ -31,6 +37,7 @@ import type {
   Participant,
   ProviderProfile,
   Project,
+  ProjectSettings,
   RoomMessage,
   Run,
   RunState,
@@ -40,20 +47,26 @@ import type {
 import { agentNames } from "./model";
 import {
   getEnvironment,
+  discoverProviderModels,
   isNativeApp,
   loadProviderProfiles,
+  loadProjectSettings,
   loadRoom,
   onRunEvent,
   saveProject,
   saveProviderProfile,
+  saveProjectSettings,
+  startRoomChat,
   startRoomRun,
   stopRun,
+  testProviderConnection,
   type RunEvent,
 } from "./native";
 import { previewEnvironment, seedMessages, seedProject, seedRun } from "./seed";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 type PrimaryView = "rooms" | "activity" | "settings";
+type ComposerMode = "chat" | "ship";
 
 const activeStates: RunState[] = [
   "selecting",
@@ -112,6 +125,18 @@ function usageLabel(receipt: ExecutionReceipt): string {
   return parts.length ? parts.join(" · ") : "Not reported";
 }
 
+function latencyLabel(receipt: ExecutionReceipt): string | undefined {
+  if (receipt.totalMs === undefined) return undefined;
+  const total = (receipt.totalMs / 1000).toFixed(2);
+  const first = receipt.firstOutputMs === undefined
+    ? "first output unavailable"
+    : `${(receipt.firstOutputMs / 1000).toFixed(2)}s to first output`;
+  const preflight = receipt.preflightMs === undefined
+    ? undefined
+    : `${(receipt.preflightMs / 1000).toFixed(2)}s preflight`;
+  return [`${total}s total`, first, preflight].filter(Boolean).join(" Â· ");
+}
+
 function autonomyLabel(mode: Participant["capabilities"]["autonomyMode"]): string {
   return {
     "isolated-auto": "Isolated auto",
@@ -120,6 +145,16 @@ function autonomyLabel(mode: Participant["capabilities"]["autonomyMode"]): strin
     manual: "Manual",
     unavailable: "Unavailable",
   }[mode];
+}
+
+function connectionLabel(status: Participant["connectionStatus"]): string {
+  return {
+    connected: "Connected",
+    "sign-in-required": "Sign in required",
+    unverified: "Test connection",
+    "not-installed": "Not installed",
+    failed: "Connection failed",
+  }[status];
 }
 
 function phaseFromStoredRun(run: StoredRun): string {
@@ -430,22 +465,46 @@ function ActivityView({ messages, query }: { messages: RoomMessage[]; query: str
 
 function ProviderProfileCard({
   participant,
-  profile,
+  profiles,
   saving,
   onSave,
+  testing,
+  onTest,
+  models,
+  discoveringModels,
+  modelDiscoveryDetail,
+  onRefreshModels,
 }: {
   participant: Participant;
-  profile?: ProviderProfile;
+  profiles: ProviderProfile[];
   saving: boolean;
-  onSave: (profile: ProviderProfile) => void;
+  onSave: (profiles: ProviderProfile[]) => Promise<void>;
+  testing: boolean;
+  onTest: (kind: AgentKind) => void;
+  models: string[];
+  discoveringModels: boolean;
+  modelDiscoveryDetail?: string;
+  onRefreshModels: (kind: AgentKind) => void;
 }) {
-  const [model, setModel] = useState(profile?.model ?? "");
-  const [effort, setEffort] = useState(profile?.effort ?? "");
+  const routes = ["chat", "build", "review"] as const;
+  const [drafts, setDrafts] = useState<Record<(typeof routes)[number], {
+    model: string;
+    effort: string;
+  }>>({
+    chat: { model: "", effort: "" },
+    build: { model: "", effort: "" },
+    review: { model: "", effort: "" },
+  });
 
   useEffect(() => {
-    setModel(profile?.model ?? "");
-    setEffort(profile?.effort ?? "");
-  }, [profile?.model, profile?.effort]);
+    setDrafts(Object.fromEntries(routes.map((route) => {
+      const profile = profiles.find((value) => value.route === route);
+      return [route, {
+        model: profile?.model ?? "",
+        effort: profile?.effort ?? "",
+      }];
+    })) as typeof drafts);
+  }, [profiles]);
 
   return (
     <article className="participant-card provider-profile-card">
@@ -455,53 +514,107 @@ function ProviderProfileCard({
           <strong>{participant.name}</strong>
           <small>{participant.installed ? participant.version ?? "Installed" : "Not installed"}</small>
         </span>
+        <span className={`status-chip connection-${participant.connectionStatus}`}>
+          {connectionLabel(participant.connectionStatus)}
+        </span>
       </div>
-      <p>{participant.capabilities.autonomyNote}</p>
-      <div className="provider-fields">
-        <label htmlFor={`model-${participant.kind}`}>
-          Model
-          <input
-            id={`model-${participant.kind}`}
-            list={`models-${participant.kind}`}
-            value={model}
-            onChange={(event) => setModel(event.target.value)}
-            placeholder="Provider default"
-            disabled={!participant.installed || saving}
-          />
-          <datalist id={`models-${participant.kind}`}>
-            {participant.models.map((option) => <option key={option} value={option} />)}
-          </datalist>
-        </label>
-        {participant.supportsEffort && (
-          <label htmlFor={`effort-${participant.kind}`}>
-            Reasoning effort
-            <select
-              id={`effort-${participant.kind}`}
-              value={effort}
-              onChange={(event) => setEffort(event.target.value)}
-              disabled={!participant.installed || saving}
-            >
-              <option value="">Provider default</option>
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-            </select>
-          </label>
-        )}
+      <p className="connection-detail" role={participant.connectionStatus === "connected" ? undefined : "status"}>
+        {participant.connectionDetail}
+      </p>
+      <div className="route-profile-list">
+        {routes.map((route) => (
+          <div className="route-profile-row" key={route}>
+            <strong>{route === "chat" ? "Chat" : route === "build" ? "Builder" : "Reviewer"}</strong>
+            <label htmlFor={`model-${participant.kind}-${route}`}>
+              <span>Model</span>
+              <select
+                id={`model-${participant.kind}-${route}`}
+                value={drafts[route].model}
+                onChange={(event) => setDrafts((current) => ({
+                  ...current,
+                  [route]: { ...current[route], model: event.target.value },
+                }))}
+                disabled={!participant.installed || saving}
+              >
+                <option value="">Default</option>
+                {drafts[route].model && !models.includes(drafts[route].model) && (
+                  <option value={drafts[route].model}>{drafts[route].model}</option>
+                )}
+                {models.map((option) => <option key={option} value={option}>{option}</option>)}
+              </select>
+            </label>
+            <label htmlFor={`effort-${participant.kind}-${route}`}>
+              <span>Effort</span>
+              <select
+                id={`effort-${participant.kind}-${route}`}
+                value={drafts[route].effort}
+                onChange={(event) => setDrafts((current) => ({
+                  ...current,
+                  [route]: { ...current[route], effort: event.target.value },
+                }))}
+                disabled={
+                  !participant.installed
+                  || saving
+                  || !participant.supportsEffort
+                  || (participant.kind === "cursor" && !drafts[route].model)
+                }
+                title={
+                  participant.kind === "cursor" && !drafts[route].model
+                    ? "Choose a Cursor model before setting effort."
+                    : undefined
+                }
+              >
+                <option value="">Default</option>
+                {participant.effortOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option[0].toUpperCase() + option.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ))}
       </div>
-      <small className="model-discovery-note">{participant.modelDiscoveryNote}</small>
-      <button
-        type="button"
-        className="secondary-button save-profile-button"
-        disabled={!participant.installed || saving}
-        onClick={() => onSave({
-          participantKind: participant.kind,
-          model: model.trim() || undefined,
-          effort: effort || undefined,
-        })}
-      >
-        {saving ? "Saving model" : "Save model"}
-      </button>
+      <small className="model-discovery-note" title={modelDiscoveryDetail ?? participant.modelDiscoveryNote}>
+        {modelDiscoveryDetail ?? participant.modelDiscoveryNote}
+      </small>
+      <details className="provider-details">
+        <summary>Runtime capability</summary>
+        <p>{participant.capabilities.autonomyNote}</p>
+      </details>
+      <div className="profile-actions">
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={!participant.installed || discoveringModels}
+          onClick={() => onRefreshModels(participant.kind)}
+        >
+          <RefreshCw size={14} className={discoveringModels ? "spinning" : undefined} />
+          {discoveringModels ? "Refreshing" : "Models"}
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={!participant.installed || saving}
+          onClick={() => onSave(routes.map((route) => ({
+            participantKind: participant.kind,
+            route,
+            model: drafts[route].model.trim() || undefined,
+            effort: drafts[route].effort || undefined,
+          })))}
+        >
+          {saving ? "Saving" : "Save"}
+        </button>
+        <button
+          type="button"
+          className="secondary-button"
+          aria-label={`Test ${participant.name} connection`}
+          disabled={!participant.installed || testing}
+          onClick={() => onTest(participant.kind)}
+        >
+          {testing ? "Testing" : "Test"}
+        </button>
+      </div>
     </article>
   );
 }
@@ -509,21 +622,39 @@ function ProviderProfileCard({
 function SettingsView({
   environment,
   profiles,
+  projectSettings,
+  savingProjectSettings,
   savingKind,
   refreshing,
   native,
   error,
   onRefresh,
   onSaveProfile,
+  testingKind,
+  onTestConnection,
+  modelCatalog,
+  discoveringModelsKind,
+  modelDiscoveryDetails,
+  onRefreshModels,
+  onAutonomousShipChange,
 }: {
   environment: NativeEnvironment;
   profiles: ProviderProfile[];
+  projectSettings: ProjectSettings;
+  savingProjectSettings: boolean;
   savingKind?: AgentKind;
   refreshing: boolean;
   native: boolean;
   error: string;
   onRefresh: () => void;
-  onSaveProfile: (profile: ProviderProfile) => void;
+  onSaveProfile: (profiles: ProviderProfile[]) => Promise<void>;
+  testingKind?: AgentKind;
+  onTestConnection: (kind: AgentKind) => void;
+  modelCatalog: Partial<Record<AgentKind, string[]>>;
+  discoveringModelsKind?: AgentKind;
+  modelDiscoveryDetails: Partial<Record<AgentKind, string>>;
+  onRefreshModels: (kind: AgentKind) => void;
+  onAutonomousShipChange: (enabled: boolean) => void;
 }) {
   return (
     <section className="utility-screen" aria-labelledby="settings-title">
@@ -540,14 +671,35 @@ function SettingsView({
       </header>
       {!native && <p className="empty-state">Provider checks are available in the Tauri desktop app.</p>}
       {error && <p className="utility-error" role="alert">{error}</p>}
+      <div className="autonomy-setting">
+        <div>
+          <strong>Hands-free autonomous Ship</strong>
+          <p>When armed, an agent can apply the autonomous-ship skill and start the isolated Ship workflow without another approval. Verification, review, bounded recovery, and promotion gates remain coordinator-owned.</p>
+        </div>
+        <label className="switch-control">
+          <input
+            type="checkbox"
+            checked={projectSettings.autonomousShipEnabled}
+            disabled={!native || savingProjectSettings}
+            onChange={(event) => onAutonomousShipChange(event.target.checked)}
+          />
+          <span>{projectSettings.autonomousShipEnabled ? "Armed" : "Off"}</span>
+        </label>
+      </div>
       <div className="settings-grid">
         {environment.participants.map((participant) => (
           <ProviderProfileCard
             key={participant.kind}
             participant={participant}
-            profile={profiles.find((profile) => profile.participantKind === participant.kind)}
+            profiles={profiles.filter((profile) => profile.participantKind === participant.kind)}
             saving={savingKind === participant.kind}
             onSave={onSaveProfile}
+            testing={testingKind === participant.kind}
+            onTest={onTestConnection}
+            models={modelCatalog[participant.kind] ?? participant.models}
+            discoveringModels={discoveringModelsKind === participant.kind}
+            modelDiscoveryDetail={modelDiscoveryDetails[participant.kind]}
+            onRefreshModels={onRefreshModels}
           />
         ))}
       </div>
@@ -728,7 +880,15 @@ function Inspector({
                   <small>{receipt.actualModel ?? receipt.requestedModel ?? "Provider default"}{receipt.requestedEffort ? ` · ${receipt.requestedEffort} effort` : ""}</small>
                 </div>
                 <p>{usageLabel(receipt)}</p>
+                {latencyLabel(receipt) && <small>{latencyLabel(receipt)}</small>}
                 <small>{contextLabel(receipt.contextBytes)} sent. {receipt.usageNote}</small>
+                {(receipt.stdoutLogPath || receipt.stderrLogPath) && (
+                  <details className="receipt-diagnostics">
+                    <summary>Diagnostics</summary>
+                    {receipt.stdoutLogPath && <code>{receipt.stdoutLogPath}</code>}
+                    {receipt.stderrLogPath && <code>{receipt.stderrLogPath}</code>}
+                  </details>
+                )}
               </article>
             )) : (
               <p className="empty-state">Receipts appear after the first provider phase. They report run telemetry, not provider account quotas.</p>
@@ -791,8 +951,17 @@ export function App() {
   const [messages, setMessages] = useState<RoomMessage[]>(seedMessages);
   const [receipts, setReceipts] = useState<ExecutionReceipt[]>([]);
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
+  const [projectSettings, setProjectSettings] = useState<ProjectSettings>({
+    autonomousShipEnabled: false,
+  });
+  const [savingProjectSettings, setSavingProjectSettings] = useState(false);
+  const [modelCatalog, setModelCatalog] = useState<Partial<Record<AgentKind, string[]>>>({});
+  const [modelDiscoveryDetails, setModelDiscoveryDetails] = useState<Partial<Record<AgentKind, string>>>({});
+  const [discoveringModelsKind, setDiscoveringModelsKind] = useState<AgentKind>();
   const [run, setRun] = useState<Run>(seedRun);
   const [objective, setObjective] = useState("");
+  const [composerMode, setComposerMode] = useState<ComposerMode>("chat");
+  const [chatSending, setChatSending] = useState(false);
   const [stream, setStream] = useState("");
   const [streamTitle, setStreamTitle] = useState("Provider events");
   const [activeView, setActiveView] = useState<PrimaryView>("rooms");
@@ -802,9 +971,11 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [refreshingProviders, setRefreshingProviders] = useState(false);
   const [savingProfileKind, setSavingProfileKind] = useState<AgentKind>();
+  const [testingConnectionKind, setTestingConnectionKind] = useState<AgentKind>();
   const [uiError, setUiError] = useState("");
   const timelineRef = useRef<HTMLDivElement>(null);
   const runRef = useRef(run);
+  const chatRunRef = useRef<string | undefined>(undefined);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const native = isNativeApp();
 
@@ -836,18 +1007,88 @@ export function App() {
         setEnvironment(nextEnvironment);
         setProject(nextProject);
         await saveProject(nextProject);
-        const [_, nextProfiles] = await Promise.all([
+        const [_, nextProfiles, nextSettings] = await Promise.all([
           refreshRoom(nextProject.id),
           loadProviderProfiles(nextProject.id),
+          loadProjectSettings(nextProject.id),
         ]);
-        if (!disposed) setProfiles(nextProfiles);
+        if (!disposed) {
+          setProfiles(nextProfiles);
+          setProjectSettings(nextSettings);
+        }
       })
       .catch((error) => console.error("Failed to inspect native environment", error));
 
     onRunEvent((event: RunEvent) => {
       if (event.eventType === "stream") {
+        if (
+          (event.phase === "chat" && event.runId !== chatRunRef.current) ||
+          (event.phase !== "chat" && event.runId !== runRef.current.id)
+        ) {
+          return;
+        }
         setStreamTitle(event.agent ? `${agentNames[event.agent]} / ${event.phase}` : event.title);
-        setStream((current) => `${current}${event.detail}\n`.slice(-12_000));
+        if (
+          (event.title === "Chat response" ||
+            event.title === "Chat activity" ||
+            event.title === "Native chat response" ||
+            event.title === "Native chat activity") &&
+          event.agent
+        ) {
+          const agent = event.agent;
+          setStream("");
+          setMessages((current) => {
+            const existingIndex = current.findIndex(
+              (message) =>
+                message.runId === event.runId &&
+                message.kind === "agent" &&
+                message.sender === agent,
+            );
+            const message: RoomMessage = {
+              id: existingIndex >= 0 ? current[existingIndex].id : `live-${event.runId}`,
+              kind: "agent",
+              sender: agent,
+              body: event.detail,
+              createdAt:
+                existingIndex >= 0
+                  ? current[existingIndex].createdAt
+                  : new Date().toISOString(),
+              runId: event.runId,
+            };
+            if (existingIndex < 0) return [...current, message];
+            return current.map((currentMessage, index) =>
+              index === existingIndex ? message : currentMessage,
+            );
+          });
+        } else {
+          setStream((current) =>
+            event.title.startsWith("Native terminal")
+              ? event.detail
+              : `${current}${event.detail}\n`.slice(-12_000),
+          );
+        }
+        return;
+      }
+      if (event.runId === chatRunRef.current) {
+        setStreamTitle(event.agent ? `${agentNames[event.agent]} / chat` : event.title);
+        if (event.eventType === "attention") {
+          setMessages((current) => [
+            ...current,
+            {
+              id: crypto.randomUUID(),
+              kind: "error",
+              sender: "system",
+              body: event.title,
+              reason: event.detail,
+              createdAt: new Date().toISOString(),
+              runId: event.runId,
+            },
+          ]);
+          chatRunRef.current = undefined;
+          setChatSending(false);
+        } else if (event.eventType === "complete") {
+          setChatSending(false);
+        }
         return;
       }
       setRun((current) => {
@@ -867,7 +1108,8 @@ export function App() {
         };
       });
     }).then((dispose) => {
-      unlisten = dispose;
+      if (disposed) dispose();
+      else unlisten = dispose;
     });
 
     return () => {
@@ -932,7 +1174,7 @@ export function App() {
     setRefreshingProviders(true);
     setUiError("");
     try {
-      const nextEnvironment = await getEnvironment();
+      const nextEnvironment = await getEnvironment(true);
       setEnvironment(nextEnvironment);
       setProject((current) => ({ ...current, branch: nextEnvironment.branch }));
     } catch (error) {
@@ -942,14 +1184,20 @@ export function App() {
     }
   }
 
-  async function handleSaveProfile(profile: ProviderProfile) {
+  async function handleSaveProfiles(nextProfiles: ProviderProfile[]) {
     setUiError("");
-    setSavingProfileKind(profile.participantKind);
+    const participantKind = nextProfiles[0]?.participantKind;
+    if (!participantKind) return;
+    setSavingProfileKind(participantKind);
     try {
-      if (native) await saveProviderProfile(project.id, profile);
+      if (native) {
+        for (const profile of nextProfiles) {
+          await saveProviderProfile(project.id, profile);
+        }
+      }
       setProfiles((current) => [
-        ...current.filter((value) => value.participantKind !== profile.participantKind),
-        profile,
+        ...current.filter((value) => value.participantKind !== participantKind),
+        ...nextProfiles,
       ]);
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
@@ -958,36 +1206,101 @@ export function App() {
     }
   }
 
-  async function submitObjective(event: FormEvent) {
-    event.preventDefault();
-    const text = objective.trim();
-    if (!text || activeStates.includes(run.state)) return;
+  async function handleAutonomousShipChange(enabled: boolean) {
+    const nextSettings = { autonomousShipEnabled: enabled };
+    setSavingProjectSettings(true);
+    setUiError("");
+    try {
+      if (native) await saveProjectSettings(project.id, nextSettings);
+      setProjectSettings(nextSettings);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSavingProjectSettings(false);
+    }
+  }
+
+  async function handleTestConnection(kind: AgentKind) {
+    if (!native) {
+      setUiError("Connection tests are available in the Tauri desktop app.");
+      return;
+    }
+    setTestingConnectionKind(kind);
+    setUiError("");
+    try {
+      const participant = await testProviderConnection({
+        projectId: project.id,
+        repositoryPath: project.repositoryPath,
+        participantKind: kind,
+      });
+      setEnvironment((current) => ({
+        ...current,
+        participants: current.participants.map((value) => value.kind === kind ? participant : value),
+      }));
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+      await refreshProviders();
+    } finally {
+      setTestingConnectionKind(undefined);
+    }
+  }
+
+  async function handleRefreshModels(kind: AgentKind) {
+    if (!native) {
+      setUiError("Model discovery is available in the Tauri desktop app.");
+      return;
+    }
+    setDiscoveringModelsKind(kind);
+    setUiError("");
+    try {
+      const result = await discoverProviderModels(kind);
+      setModelCatalog((current) => ({ ...current, [kind]: result.models }));
+      setModelDiscoveryDetails((current) => ({ ...current, [kind]: result.detail }));
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDiscoveringModelsKind(undefined);
+    }
+  }
+
+  async function runShipObjective(
+    text: string,
+    requestedWriter?: AgentKind,
+    recordHumanMessage = true,
+  ) {
     setUiError("");
 
     const nextRun = createRun(text, environment.participants);
-    const writer = nextRun.currentOwner;
+    const requestedParticipant = environment.participants.find(
+      (participant) =>
+        participant.kind === requestedWriter && participantIsRunnable(participant),
+    );
+    const writer = requestedParticipant?.kind ?? nextRun.currentOwner;
     const reviewer =
       environment.participants.find(
         (participant) => participantIsRunnable(participant) && participant.kind !== writer,
       )?.kind ?? writer;
     nextRun.writer = writer;
+    nextRun.currentOwner = writer;
     nextRun.reviewer = reviewer;
     nextRun.degradedReview = Boolean(writer && reviewer === writer);
     nextRun.route = routeForPhase("build", writer, reviewer);
     setRun(nextRun);
     setObjective("");
     setStream("");
-    setMessages((current) => [
-      ...current,
-      {
-        id: crypto.randomUUID(),
-        kind: "human",
-        sender: "human",
-        body: text,
-        createdAt: new Date().toISOString(),
-        runId: nextRun.id,
-      },
-    ]);
+    if (recordHumanMessage) {
+      setMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          kind: "human",
+          sender: "human",
+          body: text,
+          createdAt: new Date().toISOString(),
+          runId: nextRun.id,
+        },
+      ]);
+    }
 
     if (!writer) {
       setMessages((current) => [
@@ -1054,6 +1367,114 @@ export function App() {
         },
       ]);
       await refreshRoom(project.id).catch(() => undefined);
+    }
+  }
+
+  async function submitObjective() {
+    const text = objective.trim();
+    if (!text || activeStates.includes(run.state)) return;
+    await runShipObjective(text);
+  }
+
+  async function submitChat() {
+    const text = objective.trim();
+    if (!text || chatSending) return;
+    const priorAgent = [...messages].reverse().find(
+      (message) => message.kind === "agent" && message.sender !== "system" && message.sender !== "human",
+    )?.sender as AgentKind | undefined;
+    const participant = selectChatParticipant(text, environment.participants, priorAgent);
+    const chatRunId = crypto.randomUUID();
+    setUiError("");
+    setObjective("");
+    setStream("");
+    setStreamTitle(participant ? `${agentNames[participant]} / chat` : "Project chat");
+    setMessages((current) => [
+      ...current,
+      {
+        id: crypto.randomUUID(),
+        kind: "human",
+        sender: "human",
+        body: text,
+        createdAt: new Date().toISOString(),
+        runId: chatRunId,
+      },
+    ]);
+    if (!participant) {
+      setMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          kind: "error",
+          sender: "system",
+          body: "No installed participant can answer this chat.",
+          createdAt: new Date().toISOString(),
+          runId: chatRunId,
+        },
+      ]);
+      return;
+    }
+    if (!native) {
+      setMessages((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          kind: "status",
+          sender: "system",
+          body: "Project chat is available in the Tauri desktop app.",
+          reason: "The browser preview never starts provider CLIs.",
+          createdAt: new Date().toISOString(),
+          runId: chatRunId,
+        },
+      ]);
+      return;
+    }
+    chatRunRef.current = chatRunId;
+    setChatSending(true);
+    try {
+      const result = await startRoomChat({
+        runId: chatRunId,
+        projectId: project.id,
+        message: text,
+        repositoryPath: project.repositoryPath,
+        requestedAgent: participant,
+      });
+      if (result.shipIntent) {
+        setChatSending(false);
+        chatRunRef.current = undefined;
+        setComposerMode("ship");
+        await runShipObjective(
+          result.shipIntent.objective,
+          participant,
+          false,
+        );
+      } else {
+        await refreshRoom(project.id);
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setUiError(detail);
+      await refreshRoom(project.id).catch(() => undefined);
+    } finally {
+      setChatSending(false);
+      chatRunRef.current = undefined;
+    }
+  }
+
+  async function submitComposer(event: FormEvent) {
+    event.preventDefault();
+    if (composerMode === "chat") await submitChat();
+    else await submitObjective();
+  }
+
+  async function handleStopChat() {
+    const chatRunId = chatRunRef.current;
+    if (!chatRunId) return;
+    try {
+      await stopRun(chatRunId);
+      setChatSending(false);
+      chatRunRef.current = undefined;
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -1176,7 +1597,11 @@ export function App() {
         )}
         <div className="topbar-status">
           <span className={native ? "online" : ""} />
-          {native ? "Autonomous runtime" : "Read-only preview"}
+          {native
+            ? projectSettings.autonomousShipEnabled
+              ? "Autonomy armed"
+              : "Local runtime"
+            : "Read-only preview"}
         </div>
         <button
           type="button"
@@ -1215,12 +1640,21 @@ export function App() {
           <SettingsView
             environment={environment}
             profiles={profiles}
+            projectSettings={projectSettings}
+            savingProjectSettings={savingProjectSettings}
             savingKind={savingProfileKind}
             refreshing={refreshingProviders}
             native={native}
             error={uiError}
             onRefresh={refreshProviders}
-            onSaveProfile={handleSaveProfile}
+            onSaveProfile={handleSaveProfiles}
+            testingKind={testingConnectionKind}
+            onTestConnection={handleTestConnection}
+            modelCatalog={modelCatalog}
+            discoveringModelsKind={discoveringModelsKind}
+            modelDiscoveryDetails={modelDiscoveryDetails}
+            onRefreshModels={handleRefreshModels}
+            onAutonomousShipChange={handleAutonomousShipChange}
           />
         ) : (
           <>
@@ -1259,7 +1693,7 @@ export function App() {
           {searchQuery && !visibleMessages.length && (
             <p className="empty-state">No room activity matches this search.</p>
           )}
-          {stream && activeStates.includes(run.state) && (
+          {stream && (
             <article
               className="stream-block"
               role="log"
@@ -1276,29 +1710,46 @@ export function App() {
           )}
         </div>
 
-        <form className="composer" onSubmit={submitObjective}>
+        <form className="composer" onSubmit={submitComposer}>
           <div className="composer-context">
             <span>
               <TerminalSquare size={14} />
               {project.name}
             </span>
-            <span>
-              <ShieldCheck size={14} />
-              Isolate, verify, review, promote
-            </span>
+            <div className="composer-mode" role="group" aria-label="Message route">
+              <button
+                type="button"
+                className={composerMode === "chat" ? "active" : ""}
+                onClick={() => setComposerMode("chat")}
+                aria-pressed={composerMode === "chat"}
+              >
+                Chat
+              </button>
+              <button
+                type="button"
+                className={composerMode === "ship" ? "active" : ""}
+                onClick={() => setComposerMode("ship")}
+                aria-pressed={composerMode === "ship"}
+              >
+                Ship
+              </button>
+            </div>
           </div>
           <label className="composer-label" htmlFor="room-objective">
-            Engineering objective
-            <span>State it once. Agent Room carries the handoffs.</span>
+            {composerMode === "chat" ? "Project chat" : "Engineering objective"}
+            <span>{composerMode === "chat" ? "Enter sends. Shift+Enter adds a new line." : "Create an isolated build, verification, review, and promotion route."}</span>
           </label>
           <textarea
             id="room-objective"
             value={objective}
             onChange={(event) => setObjective(event.target.value)}
             onKeyDown={(event) => {
-              if (event.ctrlKey && event.key === "Enter") event.currentTarget.form?.requestSubmit();
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
             }}
-            placeholder="@codex State the objective once..."
+            placeholder={composerMode === "chat" ? "Ask about this project..." : "@codex State the objective once..."}
             aria-describedby={uiError ? "composer-error" : undefined}
             rows={2}
           />
@@ -1308,14 +1759,14 @@ export function App() {
                 <button
                   type="button"
                   key={participant.kind}
-                  disabled={!participantIsRunnable(participant)}
+                  disabled={composerMode === "chat" ? !participantCanChat(participant) : !participantIsRunnable(participant)}
                   onClick={() =>
                     setObjective(
                       (current) => `@${participant.kind} ${current.replace(/^@\w+\s*/, "")}`,
                     )
                   }
                   title={
-                    participantIsRunnable(participant)
+                    (composerMode === "chat" ? participantCanChat(participant) : participantIsRunnable(participant))
                       ? `${autonomyLabel(participant.capabilities.autonomyMode)}: ${participant.capabilities.autonomyNote}`
                       : participant.capabilities.autonomyNote
                   }
@@ -1325,16 +1776,23 @@ export function App() {
                 </button>
               ))}
             </div>
-            <button
-              type="submit"
-              className="send-button"
-              disabled={!objective.trim() || activeStates.includes(run.state)}
-              aria-busy={activeStates.includes(run.state)}
-            >
-              <Play size={15} fill="currentColor" />
-              Run autonomously
-              <kbd>Ctrl Enter</kbd>
-            </button>
+            {composerMode === "chat" && chatSending ? (
+              <button type="button" className="danger-button chat-stop" onClick={handleStopChat}>
+                <CircleStop size={15} />
+                Stop response
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="send-button"
+                disabled={!objective.trim() || (composerMode === "ship" && activeStates.includes(run.state))}
+                aria-busy={composerMode === "chat" ? chatSending : activeStates.includes(run.state)}
+              >
+                {composerMode === "chat" ? <Sparkles size={15} /> : <Play size={15} fill="currentColor" />}
+                {composerMode === "chat" ? "Send" : "Run autonomously"}
+                <kbd>Enter</kbd>
+              </button>
+            )}
           </div>
           {uiError && (
             <p className="composer-error" id="composer-error" role="alert">

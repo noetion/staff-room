@@ -52,6 +52,8 @@ The normal flow has no per-command human approval. User attention is reserved fo
 - failed or inconclusive final review;
 - exhausted process, review, or revision limits.
 
+The room also has an optional project-scoped autonomous Ship setting. When armed, a repository skill teaches the selected Chat agent to emit a small structured Ship intent only for an explicit implementation request. Agent Room validates that intent and starts the normal isolated route without another approval click. The provider never gains authority to skip verification, review, bounded recovery, or promotion policy.
+
 ## Autonomy policy
 
 Every participant reports one truthful mode:
@@ -68,7 +70,7 @@ Provider policy:
 
 - Codex: `--ask-for-approval never` with `workspace-write` for build/revision and `read-only` for review.
 - Claude Code: `--permission-mode auto` when its live help proves that choice. Unsupported historical flags are not passed.
-- Cursor Agent: print mode with project permission rules; `--force` is used only inside the managed worktree boundary.
+- Cursor Agent: read-only Chat uses proved ask mode, sandboxing, and partial output; `--force` is used only for unattended writes inside the managed worktree boundary.
 - Antigravity: installed `agy 1.1.7` proves sandboxed print mode, permission bypass, and exact conversation resume. Text-only output and unavailable usage reporting remain explicit downgrades.
 
 The probe executes `--version` and `--help`, plus provider subcommand help where needed. An executable being present is not sufficient for a ready state. Every flag required for the claimed autonomy mode must be present in current help output. Known Windows installer locations are checked after `PATH`, without substituting a desktop editor executable for its automation CLI.
@@ -209,6 +211,8 @@ SQLite remains operational truth. The v1 persists:
 
 Provider transcripts remain provider-owned. Agent Room stores session identifiers and compact handoffs, not duplicate full transcripts.
 
+Chat follows the same principle. A resumed native provider session receives only the new user turn. When the user switches providers, Agent Room sends only the most recent useful exchange, capped at 4 KiB, so the next agent can continue without replaying the room.
+
 ## Explicit non-goals
 
 - full code editor or terminal multiplexer;
@@ -216,7 +220,7 @@ Provider transcripts remain provider-owned. Agent Room stores session identifier
 - generic plugins or public adapter SDK;
 - issue tracker, task DAG, backlog dispatcher, or agent organisation chart;
 - multiple simultaneous writers in one repository;
-- LLM-selected routing for every phase;
+- unconstrained LLM-selected routing for every phase;
 - semantic vector memory;
 - automatic push, pull request creation, deployment, or external side effects;
 - unbounded repair or review loops.
@@ -238,6 +242,9 @@ The v1 is complete when:
 11. restart restores the room, latest run, evidence, and recovery path;
 12. instruction and selected-skill paths are persisted and visible;
 13. every provider phase produces a valid schema-v1 handoff or preserves the run as failed;
-14. raw bounded logs and final responses remain available after restart;
-15. a preserved run can resume at most twice without creating a new worktree;
-16. frontend tests, frontend build, Rust tests/check/lint, and the packaged desktop development flow pass.
+14. an armed autonomous Ship skill can hand an explicit implementation request into the isolated route without a second approval click;
+15. provider probes are cached on the Chat path and Chat receipts expose preflight, first-output, and total latency;
+16. Chat, Build, and Review model choices are stored independently per provider and project;
+17. raw bounded logs and final responses remain available after restart;
+18. a preserved run can resume at most twice without creating a new worktree;
+19. frontend tests, frontend build, Rust tests/check/lint, and the packaged desktop development flow pass.

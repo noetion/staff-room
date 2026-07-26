@@ -1,13 +1,19 @@
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     ffi::OsStr,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command as StdCommand,
-    sync::Mutex,
-    time::Duration,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_notification::NotificationExt;
@@ -15,7 +21,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
     sync::{watch, Mutex as AsyncMutex},
-    time::sleep,
+    time::{sleep, timeout},
 };
 use uuid::Uuid;
 
@@ -24,16 +30,34 @@ const SOURCE_BUDGET_BYTES: usize = 16 * 1024;
 const PROCESS_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const PROCESS_TIMEOUT_SECONDS: u64 = 20 * 60;
 const PROCESS_IDLE_TIMEOUT_SECONDS: u64 = 5 * 60;
+const CHAT_IDLE_TIMEOUT_SECONDS: u64 = 75;
 const MAX_RECOVERY_ATTEMPTS: u32 = 2;
 const MAX_SELECTED_SKILLS: usize = 3;
+const CHAT_HANDOFF_BUDGET_BYTES: usize = 4 * 1024;
 const HANDOFF_START: &str = "AGENT_ROOM_RESULT_START";
 const HANDOFF_END: &str = "AGENT_ROOM_RESULT_END";
+const SHIP_INTENT_START: &str = "AGENT_ROOM_SHIP_INTENT_START";
+const SHIP_INTENT_END: &str = "AGENT_ROOM_SHIP_INTENT_END";
+const AUTONOMOUS_SHIP_SKILL_PATH: &str = ".agents/skills/autonomous-ship/SKILL.md";
+const AUTONOMOUS_SHIP_SKILL: &str = include_str!("../../.agents/skills/autonomous-ship/SKILL.md");
+const EMBEDDED_TUI_CHAT_ENABLED: bool = false;
 
 struct Database(Mutex<Connection>);
 
 #[derive(Default)]
 struct RuntimeState {
     cancellations: AsyncMutex<HashMap<String, watch::Sender<bool>>>,
+    interactive_sessions: AsyncMutex<HashMap<String, InteractiveSession>>,
+    interactive_runs: AsyncMutex<HashMap<String, String>>,
+    provider_cache: AsyncMutex<HashMap<String, Participant>>,
+}
+
+struct InteractiveSession {
+    _master: Box<dyn portable_pty::MasterPty + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
+    active_run_id: Arc<Mutex<String>>,
+    closed_by_owner: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -64,8 +88,32 @@ struct Participant {
     models: Vec<String>,
     model_discovery_note: String,
     supports_effort: bool,
+    effort_options: Vec<String>,
     state: String,
+    connection_status: String,
+    connection_detail: String,
+    last_verified_at: Option<String>,
     capabilities: ProviderCapabilities,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderConnection {
+    status: String,
+    detail: String,
+    last_verified_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelDiscoveryResult {
+    models: Vec<String>,
+    detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelDiscoveryRequest {
+    participant_kind: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,11 +183,70 @@ struct StartRunRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ChatRequest {
+    run_id: String,
+    project_id: String,
+    message: String,
+    repository_path: String,
+    requested_agent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalInputRequest {
+    project_id: String,
+    participant_kind: String,
+    key: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatResult {
+    run_id: String,
+    participant: String,
+    summary: String,
+    session_id: Option<String>,
+    actual_model: Option<String>,
+    stopped: bool,
+    ship_intent: Option<ShipIntent>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ShipIntent {
+    schema_version: u32,
+    objective: String,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionTestRequest {
+    project_id: String,
+    repository_path: String,
+    participant_kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ProjectInput {
     id: String,
     name: String,
     goal: String,
     repository_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct ProjectSettings {
+    autonomous_ship_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectSettingsInput {
+    project_id: String,
+    autonomous_ship_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -213,12 +320,18 @@ struct ExecutionReceipt {
     usage: ProviderUsage,
     usage_note: String,
     created_at: String,
+    preflight_ms: Option<u64>,
+    first_output_ms: Option<u64>,
+    total_ms: Option<u64>,
+    stdout_log_path: Option<String>,
+    stderr_log_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct ProviderProfile {
     participant_kind: String,
+    route: String,
     model: Option<String>,
     effort: Option<String>,
 }
@@ -228,12 +341,14 @@ struct ProviderProfile {
 struct ProviderProfileInput {
     project_id: String,
     participant_kind: String,
+    route: String,
     model: Option<String>,
     effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
+    Chat,
     Build,
     Review,
     Revise,
@@ -243,6 +358,7 @@ enum Phase {
 impl Phase {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Chat => "chat",
             Self::Build => "build",
             Self::Review => "review",
             Self::Revise => "revise",
@@ -252,6 +368,14 @@ impl Phase {
 
     fn writes(self) -> bool {
         matches!(self, Self::Build | Self::Revise)
+    }
+}
+
+fn idle_timeout_seconds(phase: Phase) -> u64 {
+    if phase == Phase::Chat {
+        CHAT_IDLE_TIMEOUT_SECONDS
+    } else {
+        PROCESS_IDLE_TIMEOUT_SECONDS
     }
 }
 
@@ -269,6 +393,13 @@ struct ProviderRun {
     usage: ProviderUsage,
     stdout_log_path: String,
     stderr_log_path: String,
+    first_output_ms: Option<u64>,
+}
+
+struct ChatReceiptMetrics {
+    context_bytes: usize,
+    preflight_ms: u64,
+    total_ms: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -358,6 +489,15 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(project_id) REFERENCES projects(id)
         );
 
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            project_id TEXT NOT NULL,
+            participant_kind TEXT NOT NULL,
+            provider_session_id TEXT NOT NULL,
+            last_used_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(project_id, participant_kind),
+            FOREIGN KEY(project_id) REFERENCES projects(id)
+        );
+
         CREATE TABLE IF NOT EXISTS activations (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
@@ -392,6 +532,34 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(project_id) REFERENCES projects(id)
         );
 
+        CREATE TABLE IF NOT EXISTS provider_route_profiles (
+            project_id TEXT NOT NULL,
+            participant_kind TEXT NOT NULL,
+            route TEXT NOT NULL,
+            model TEXT,
+            effort TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(project_id, participant_kind, route),
+            FOREIGN KEY(project_id) REFERENCES projects(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS project_settings (
+            project_id TEXT PRIMARY KEY,
+            autonomous_ship_enabled INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(project_id) REFERENCES projects(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS provider_connections (
+            project_id TEXT NOT NULL,
+            participant_kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            detail TEXT NOT NULL,
+            last_verified_at TEXT,
+            PRIMARY KEY(project_id, participant_kind),
+            FOREIGN KEY(project_id) REFERENCES projects(id)
+        );
+
         CREATE TABLE IF NOT EXISTS execution_receipts (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
@@ -407,6 +575,29 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             usage_note TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(run_id) REFERENCES runs(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS chat_receipts (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            phase TEXT NOT NULL,
+            participant_kind TEXT NOT NULL,
+            provider_version TEXT,
+            requested_model TEXT,
+            requested_effort TEXT,
+            actual_model TEXT,
+            session_id TEXT,
+            context_bytes INTEGER NOT NULL DEFAULT 0,
+            usage_json TEXT NOT NULL DEFAULT '{}',
+            usage_note TEXT NOT NULL,
+            preflight_ms INTEGER,
+            first_output_ms INTEGER,
+            total_ms INTEGER,
+            stdout_log_path TEXT,
+            stderr_log_path TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(project_id) REFERENCES projects(id)
         );
         ",
     )?;
@@ -429,9 +620,28 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE runs ADD COLUMN instruction_files_json TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE runs ADD COLUMN skill_files_json TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE runs ADD COLUMN recovery_count INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE chat_receipts ADD COLUMN preflight_ms INTEGER",
+        "ALTER TABLE chat_receipts ADD COLUMN first_output_ms INTEGER",
+        "ALTER TABLE chat_receipts ADD COLUMN total_ms INTEGER",
+        "ALTER TABLE chat_receipts ADD COLUMN stdout_log_path TEXT",
+        "ALTER TABLE chat_receipts ADD COLUMN stderr_log_path TEXT",
     ] {
         let _ = connection.execute(statement, []);
     }
+    connection.execute_batch(
+        "
+        INSERT OR IGNORE INTO provider_route_profiles
+            (project_id, participant_kind, route, model, effort)
+        SELECT profile.project_id, profile.participant_kind, route.name,
+               profile.model, profile.effort
+        FROM provider_profiles AS profile
+        CROSS JOIN (
+            SELECT 'chat' AS name
+            UNION ALL SELECT 'build'
+            UNION ALL SELECT 'review'
+        ) AS route;
+        ",
+    )?;
     Ok(())
 }
 
@@ -575,7 +785,7 @@ fn capabilities_for(
                 cancellation: installed,
                 write_mode: sandbox,
                 approval_bridge: approval,
-                usage_reporting: false,
+                usage_reporting: streaming,
                 repository_scoping: has_help(help, "--cd") || has_help(help, "-c, --cd"),
                 autonomy_mode: if ready {
                     "isolated-auto"
@@ -616,7 +826,7 @@ fn capabilities_for(
                 cancellation: installed,
                 write_mode: approval,
                 approval_bridge: approval,
-                usage_reporting: false,
+                usage_reporting: streaming,
                 repository_scoping: installed,
                 autonomy_mode: if ready {
                     "reviewed-auto"
@@ -648,7 +858,9 @@ fn capabilities_for(
             let write_mode = has_help(help, "--force") || has_help(help, "--yolo");
             let exact_resume = has_help(help, "--resume");
             let sandbox = has_help(help, "--sandbox");
-            let ready = non_interactive && streaming && write_mode && exact_resume;
+            let ask_mode = has_help(help, "--mode") && has_help(help, "ask");
+            let partial_stream = has_help(help, "--stream-partial-output");
+            let ready = non_interactive && streaming && write_mode && exact_resume && sandbox;
             ProviderCapabilities {
                 non_interactive_turn: non_interactive,
                 streaming,
@@ -678,6 +890,10 @@ fn capabilities_for(
                 capability_proof: vec![
                     format!("Version: {version_text}"),
                     format!("print + stream JSON: {}", non_interactive && streaming),
+                    format!(
+                        "read-only Chat + partial stream: {}",
+                        ask_mode && sandbox && partial_stream
+                    ),
                     format!("force write: {write_mode}"),
                     format!("resume + sandbox: {}", exact_resume && sandbox),
                 ],
@@ -687,8 +903,9 @@ fn capabilities_for(
             let non_interactive = installed && has_help(help, "--print");
             let sandbox = has_help(help, "--sandbox");
             let write_mode = has_help(help, "--dangerously-skip-permissions");
+            let workspace = has_help(help, "--add-dir");
             let exact_resume = has_help(help, "--conversation");
-            let ready = non_interactive && sandbox && write_mode;
+            let ready = non_interactive && sandbox && write_mode && workspace;
             ProviderCapabilities {
                 non_interactive_turn: non_interactive,
                 streaming: false,
@@ -708,7 +925,7 @@ fn capabilities_for(
                 }
                 .to_owned(),
                 autonomy_note: if ready {
-                    "Live help proves print mode and sandboxed unattended writes. Permission bypass remains a visible downgrade."
+                    "Live help proves print mode, explicit managed-worktree attachment, and sandboxed unattended execution. Permission bypass remains a visible downgrade."
                 } else if antigravity_desktop_present() {
                     "Antigravity Desktop is installed, but the agy automation CLI is not present. The desktop executable is never substituted for the CLI."
                 } else {
@@ -719,6 +936,7 @@ fn capabilities_for(
                     format!("Version: {version_text}"),
                     format!("agy automation executable: {installed}"),
                     format!("print + sandbox: {}", non_interactive && sandbox),
+                    format!("explicit workspace attachment: {workspace}"),
                     format!("conversation resume: {exact_resume}"),
                 ],
             }
@@ -740,36 +958,164 @@ fn capabilities_for(
     }
 }
 
-fn model_options(kind: &str, executable: Option<&Path>) -> (Vec<String>, String, bool) {
-    let Some(executable) = executable else {
+fn provider_effort_options(kind: &str) -> Vec<String> {
+    match kind {
+        "codex" => vec!["low", "medium", "high", "xhigh"],
+        "claude" | "cursor" => vec!["low", "medium", "high", "xhigh", "max"],
+        "antigravity" => vec!["low", "medium", "high"],
+        _ => vec![],
+    }
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn model_options(kind: &str, executable: Option<&Path>) -> (Vec<String>, String, Vec<String>) {
+    if executable.is_none() {
         return (
             vec![],
             "Install the CLI before choosing a model.".to_owned(),
-            false,
+            vec![],
         );
     };
-    let supports_effort = kind == "antigravity";
-    let models = matches!(kind, "antigravity" | "cursor")
-        .then(|| command_output(executable, ["models"], None))
-        .flatten()
-        .map(|output| {
-            output
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty() && !line.starts_with("Available"))
+    let effort_options = provider_effort_options(kind);
+    let (models, note) = match kind {
+        "codex" => (
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"]
+                .into_iter()
                 .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let note = if !models.is_empty() {
-        "Live model list from this CLI.".to_owned()
-    } else if matches!(kind, "codex" | "claude") {
-        "This CLI accepts an explicit model value but does not expose a dependable account model list here.".to_owned()
-    } else {
-        "This CLI did not return a model list. Use its exact model identifier or provider default."
-            .to_owned()
+                .collect(),
+            "Exact maintained Codex model IDs. Refresh keeps this local catalogue current without spending tokens.".to_owned(),
+        ),
+        "claude" => (
+            [
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-sonnet-5",
+                "claude-fable-5",
+            ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            "Exact Claude model IDs, including the model generation and version.".to_owned(),
+        ),
+        "cursor" => (
+            [
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.5",
+                "gpt-5.3-codex",
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-sonnet-5",
+                "claude-fable-5",
+                "composer-2.5",
+                "cursor-grok-4.5",
+            ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            "Base model IDs only. Refresh after signing in; Agent Room groups Cursor's effort and speed presets under each model."
+                .to_owned(),
+        ),
+        "antigravity" => (
+            [
+                "Gemini 3.1 Pro (high)",
+                "Gemini 3.1 Pro (low)",
+                "Gemini 3 Flash",
+                "Claude Sonnet 4.6 (thinking)",
+                "Claude Opus 4.6 (thinking)",
+                "GPT-OSS-120b",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            "Documented model names. Refresh models after signing in to load the account catalogue."
+                .to_owned(),
+        ),
+        _ => (
+            vec![],
+            "Enter an exact model identifier or leave blank for the provider default. Agent Room does not run account model discovery during startup."
+                .to_owned(),
+        ),
     };
-    (models, note, supports_effort)
+    (models, note, effort_options)
+}
+
+fn parse_provider_model_list(output: &str) -> Vec<String> {
+    let mut models = BTreeSet::new();
+    for line in output.lines() {
+        let raw_value = line
+            .trim()
+            .trim_start_matches(|character: char| {
+                character.is_ascii_digit() || matches!(character, '.' | ')' | '-' | '*' | ' ')
+            })
+            .trim();
+        let value = raw_value
+            .split_once(" - ")
+            .map(|(identifier, _)| identifier.trim())
+            .unwrap_or(raw_value);
+        if value.is_empty()
+            || value.ends_with(':')
+            || value.eq_ignore_ascii_case("models")
+            || value.eq_ignore_ascii_case("available models")
+            || value.starts_with("Use ")
+            || value.starts_with("Run ")
+        {
+            continue;
+        }
+        if value.len() <= 160
+            && value
+                .chars()
+                .any(|character| character.is_ascii_alphanumeric())
+        {
+            models.insert(value.to_owned());
+        }
+    }
+    models.into_iter().collect()
+}
+
+fn normalize_cursor_model_id(model: &str) -> Option<String> {
+    if model.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    let mut segments = model.split('-').collect::<Vec<_>>();
+    let mut removed_effort = false;
+    loop {
+        let last = segments.last().copied()?;
+        match last {
+            "fast" => {
+                segments.pop();
+            }
+            "thinking"
+                if removed_effort
+                    || matches!(
+                        segments.get(segments.len().saturating_sub(2)).copied(),
+                        Some("none" | "low" | "medium" | "high" | "xhigh" | "max")
+                    ) =>
+            {
+                segments.pop();
+            }
+            "none" | "low" | "medium" | "high" | "xhigh" | "max" => {
+                segments.pop();
+                if last == "high" && segments.last() == Some(&"extra") {
+                    segments.pop();
+                }
+                removed_effort = true;
+            }
+            _ => break,
+        }
+    }
+    (!segments.is_empty()).then(|| segments.join("-"))
+}
+
+fn parse_cursor_model_list(output: &str) -> Vec<String> {
+    parse_provider_model_list(output)
+        .into_iter()
+        .filter_map(|model| normalize_cursor_model_id(&model))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn probe_provider(kind: &str) -> Participant {
@@ -793,7 +1139,8 @@ fn probe_provider(kind: &str) -> Participant {
     let installed = path.is_some();
     let capabilities =
         capabilities_for(kind, installed, version.as_deref(), &help, &subcommand_help);
-    let (models, model_discovery_note, supports_effort) = model_options(kind, path.as_deref());
+    let (models, model_discovery_note, effort_options) = model_options(kind, path.as_deref());
+    let supports_effort = !effort_options.is_empty();
     let ready = !matches!(
         capabilities.autonomy_mode.as_str(),
         "manual" | "unavailable"
@@ -809,6 +1156,7 @@ fn probe_provider(kind: &str) -> Participant {
         models,
         model_discovery_note,
         supports_effort,
+        effort_options,
         state: if ready {
             "ready"
         } else if installed {
@@ -817,14 +1165,207 @@ fn probe_provider(kind: &str) -> Participant {
             "unavailable"
         }
         .to_owned(),
+        connection_status: if installed {
+            "unverified"
+        } else {
+            "not-installed"
+        }
+        .to_owned(),
+        connection_detail: if installed {
+            "Connection has not been tested in Agent Room.".to_owned()
+        } else {
+            "CLI executable was not found.".to_owned()
+        },
+        last_verified_at: None,
         capabilities,
     }
 }
 
-fn all_participants() -> Vec<Participant> {
-    ["codex", "claude", "cursor", "antigravity"]
-        .iter()
-        .map(|kind| probe_provider(kind))
+async fn cached_provider(
+    runtime: &RuntimeState,
+    kind: &str,
+    force_refresh: bool,
+) -> Result<Participant, String> {
+    if !force_refresh {
+        if let Some(participant) = runtime.provider_cache.lock().await.get(kind).cloned() {
+            return Ok(participant);
+        }
+    }
+    let kind_owned = kind.to_owned();
+    let participant = tokio::task::spawn_blocking(move || probe_provider(&kind_owned))
+        .await
+        .map_err(|error| error.to_string())?;
+    runtime
+        .provider_cache
+        .lock()
+        .await
+        .insert(kind.to_owned(), participant.clone());
+    Ok(participant)
+}
+
+async fn cached_participants(
+    runtime: &RuntimeState,
+    force_refresh: bool,
+) -> Result<Vec<Participant>, String> {
+    let kinds = ["codex", "claude", "cursor", "antigravity"];
+    if !force_refresh {
+        let cache = runtime.provider_cache.lock().await;
+        if kinds.iter().all(|kind| cache.contains_key(*kind)) {
+            return kinds
+                .iter()
+                .map(|kind| {
+                    cache
+                        .get(*kind)
+                        .cloned()
+                        .ok_or_else(|| format!("Provider cache lost {kind}."))
+                })
+                .collect();
+        }
+    }
+    let handles = kinds.map(|kind| {
+        let kind = kind.to_owned();
+        tokio::task::spawn_blocking(move || probe_provider(&kind))
+    });
+    let mut participants = Vec::new();
+    for handle in handles {
+        participants.push(handle.await.map_err(|error| error.to_string())?);
+    }
+    let mut cache = runtime.provider_cache.lock().await;
+    for participant in &participants {
+        cache.insert(participant.kind.clone(), participant.clone());
+    }
+    Ok(participants)
+}
+
+fn detected_connection(participant: &Participant) -> ProviderConnection {
+    if !participant.installed {
+        return ProviderConnection {
+            status: "not-installed".to_owned(),
+            detail: "CLI executable was not found.".to_owned(),
+            last_verified_at: None,
+        };
+    }
+    let status_output = match participant.kind.as_str() {
+        "codex" => participant
+            .executable_path
+            .as_deref()
+            .and_then(|path| command_output(Path::new(path), ["login", "status"], None)),
+        "claude" => participant
+            .executable_path
+            .as_deref()
+            .and_then(|path| command_output(Path::new(path), ["auth", "status"], None)),
+        _ => None,
+    }
+    .unwrap_or_default();
+    let connected = match participant.kind.as_str() {
+        "codex" => status_output.to_ascii_lowercase().contains("logged in"),
+        "claude" => status_output.contains("\"loggedIn\": true"),
+        _ => false,
+    };
+    if connected {
+        ProviderConnection {
+            status: "unverified".to_owned(),
+            detail: "Native sign-in detected. Run Test connection before using this CLI."
+                .to_owned(),
+            last_verified_at: None,
+        }
+    } else if matches!(participant.kind.as_str(), "codex" | "claude") {
+        ProviderConnection {
+            status: "sign-in-required".to_owned(),
+            detail: "Native CLI is installed but not signed in for this desktop user.".to_owned(),
+            last_verified_at: None,
+        }
+    } else {
+        ProviderConnection {
+            status: "unverified".to_owned(),
+            detail: "Run Test connection before using this CLI.".to_owned(),
+            last_verified_at: None,
+        }
+    }
+}
+
+fn saved_connection(
+    database: &Database,
+    project_id: &str,
+    participant: &str,
+) -> Result<Option<ProviderConnection>, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .query_row(
+            "SELECT status, detail, last_verified_at FROM provider_connections
+             WHERE project_id = ?1 AND participant_kind = ?2",
+            params![project_id, participant],
+            |row| {
+                Ok(ProviderConnection {
+                    status: row.get(0)?,
+                    detail: row.get(1)?,
+                    last_verified_at: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn save_connection(
+    database: &Database,
+    project_id: &str,
+    participant: &str,
+    connection_state: &ProviderConnection,
+) -> Result<(), String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO provider_connections
+             (project_id, participant_kind, status, detail, last_verified_at)
+             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?3 = 'connected' THEN CURRENT_TIMESTAMP ELSE NULL END)
+             ON CONFLICT(project_id, participant_kind) DO UPDATE SET
+               status = excluded.status,
+               detail = excluded.detail,
+               last_verified_at = excluded.last_verified_at",
+            params![project_id, participant, connection_state.status, connection_state.detail],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn participant_for_project(
+    database: &Database,
+    project_id: &str,
+    mut participant: Participant,
+) -> Result<Participant, String> {
+    let saved = saved_connection(database, project_id, &participant.kind)?;
+    let connection = if !participant.installed {
+        detected_connection(&participant)
+    } else {
+        saved.unwrap_or_else(|| detected_connection(&participant))
+    };
+    participant.connection_status = connection.status.clone();
+    participant.connection_detail = connection.detail;
+    participant.last_verified_at = connection.last_verified_at;
+    participant.state = if participant.connection_status == "connected"
+        && !matches!(
+            participant.capabilities.autonomy_mode.as_str(),
+            "manual" | "unavailable"
+        ) {
+        "ready"
+    } else if participant.installed {
+        "manual"
+    } else {
+        "unavailable"
+    }
+    .to_owned();
+    Ok(participant)
+}
+
+fn participants_with_connections(
+    database: &Database,
+    project_id: &str,
+    participants: Vec<Participant>,
+) -> Result<Vec<Participant>, String> {
+    participants
+        .into_iter()
+        .map(|participant| participant_for_project(database, project_id, participant))
         .collect()
 }
 
@@ -1207,6 +1748,7 @@ fn extract_handoff(value: &str) -> Result<AgentHandoff, String> {
 
 fn handoff_status_allowed(handoff: &AgentHandoff, phase: Phase) -> bool {
     match phase {
+        Phase::Chat => false,
         Phase::Build | Phase::Revise => {
             matches!(handoff.status.as_str(), "completed" | "blocked" | "failed")
         }
@@ -1217,6 +1759,9 @@ fn handoff_status_allowed(handoff: &AgentHandoff, phase: Phase) -> bool {
 }
 
 fn extract_phase_handoff(value: &str, phase: Phase) -> Result<AgentHandoff, String> {
+    if phase == Phase::Chat {
+        return Err("Chat responses do not require an Agent Room handoff.".to_owned());
+    }
     let handoff = extract_handoff(value)?;
     if handoff_status_allowed(&handoff, phase) {
         Ok(handoff)
@@ -1227,6 +1772,80 @@ fn extract_phase_handoff(value: &str, phase: Phase) -> Result<AgentHandoff, Stri
             phase.as_str()
         ))
     }
+}
+
+fn extract_ship_intent(value: &str) -> Result<Option<ShipIntent>, String> {
+    let Some(start) = value.find(SHIP_INTENT_START) else {
+        return Ok(None);
+    };
+    let json_start = start + SHIP_INTENT_START.len();
+    let end = value[json_start..]
+        .find(SHIP_INTENT_END)
+        .map(|offset| json_start + offset)
+        .ok_or_else(|| "Autonomous Ship intent is missing its closing marker.".to_owned())?;
+    let intent = serde_json::from_str::<ShipIntent>(value[json_start..end].trim())
+        .map_err(|error| format!("Invalid autonomous Ship intent: {error}"))?;
+    if intent.schema_version != 1 {
+        return Err(format!(
+            "Unsupported autonomous Ship intent schema version {}.",
+            intent.schema_version
+        ));
+    }
+    if intent.objective.trim().is_empty() || intent.reason.trim().is_empty() {
+        return Err("Autonomous Ship intent requires an objective and reason.".to_owned());
+    }
+    Ok(Some(intent))
+}
+
+fn visible_chat_response(value: &str) -> String {
+    let Some(start) = value.find(SHIP_INTENT_START) else {
+        return value.trim().to_owned();
+    };
+    let json_start = start + SHIP_INTENT_START.len();
+    let Some(end_offset) = value[json_start..].find(SHIP_INTENT_END) else {
+        let before = value[..start].trim();
+        return if before.is_empty() {
+            "The provider returned an invalid autonomous Ship intent, so no repository work was started."
+                .to_owned()
+        } else {
+            before.to_owned()
+        };
+    };
+    let end = json_start + end_offset + SHIP_INTENT_END.len();
+    let visible = format!("{}\n{}", value[..start].trim(), value[end..].trim())
+        .trim()
+        .to_owned();
+    if visible.is_empty() {
+        "This request is ready for the autonomous Ship workflow.".to_owned()
+    } else {
+        visible
+    }
+}
+
+fn authentication_attention(summary: &str, stderr: &str) -> Option<String> {
+    let summary = summary.to_ascii_lowercase();
+    let stderr = stderr.to_ascii_lowercase();
+    let onboarding = [
+        "you are currently not signed in",
+        "signing in...",
+        "terms of service & data use",
+        "welcome to antigravity cli!",
+    ];
+    let provider_error = ["authentication required", "not logged in", "oauth"];
+    if onboarding.iter().any(|signal| summary.contains(signal))
+        || onboarding.iter().any(|signal| stderr.contains(signal))
+        || provider_error.iter().any(|signal| stderr.contains(signal))
+    {
+        Some("The provider requires sign-in or onboarding before Agent Room can use it.".to_owned())
+    } else {
+        None
+    }
+}
+
+fn connection_test_ready(result: &ProviderRun) -> bool {
+    result.success
+        && authentication_attention(&result.summary, &result.stderr).is_none()
+        && result.summary.trim().eq_ignore_ascii_case("READY")
 }
 
 fn review_handoff_decision(run: &ProviderRun) -> Option<bool> {
@@ -1270,17 +1889,43 @@ fn json_f64(value: &Value, key: &str) -> Option<f64> {
         .and_then(|value| value.as_f64().or_else(|| value.as_str()?.parse().ok()))
 }
 
+fn first_u64(value: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| json_u64(value, key))
+}
+
+fn first_f64(value: &Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| json_f64(value, key))
+}
+
 fn merge_usage(target: &mut ProviderUsage, value: &Value) {
-    for source in [Some(value), value.get("usage"), value.get("usage_info")]
-        .into_iter()
-        .flatten()
+    for source in [
+        Some(value),
+        value.get("usage"),
+        value.get("usage_info"),
+        value.get("usageInfo"),
+        value
+            .get("message")
+            .and_then(|message| message.get("usage")),
+    ]
+    .into_iter()
+    .flatten()
     {
-        target.input_tokens = json_u64(source, "input_tokens").or(target.input_tokens);
-        target.cached_input_tokens =
-            json_u64(source, "cached_input_tokens").or(target.cached_input_tokens);
-        target.output_tokens = json_u64(source, "output_tokens").or(target.output_tokens);
-        target.total_cost_usd = json_f64(source, "total_cost_usd").or(target.total_cost_usd);
-        target.num_turns = json_u64(source, "num_turns").or(target.num_turns);
+        target.input_tokens =
+            first_u64(source, &["input_tokens", "inputTokens"]).or(target.input_tokens);
+        target.cached_input_tokens = first_u64(
+            source,
+            &[
+                "cached_input_tokens",
+                "cachedInputTokens",
+                "cache_read_input_tokens",
+            ],
+        )
+        .or(target.cached_input_tokens);
+        target.output_tokens =
+            first_u64(source, &["output_tokens", "outputTokens"]).or(target.output_tokens);
+        target.total_cost_usd =
+            first_f64(source, &["total_cost_usd", "totalCostUsd"]).or(target.total_cost_usd);
+        target.num_turns = first_u64(source, &["num_turns", "numTurns"]).or(target.num_turns);
     }
 }
 
@@ -1290,6 +1935,10 @@ fn reported_model(value: &Value) -> Option<String> {
         .find_map(|key| value.get(*key).and_then(Value::as_str))
         .filter(|model| !model.trim().is_empty())
         .map(str::to_owned)
+}
+
+fn chat_response_is_complete(value: &str) -> bool {
+    !value.trim().is_empty()
 }
 
 fn parse_result_text(value: &Value) -> Option<String> {
@@ -1313,46 +1962,95 @@ fn parse_result_text(value: &Value) -> Option<String> {
     None
 }
 
-fn apply_provider_environment(command: &mut Command) {
-    const EXACT: &[&str] = &[
-        "PATH",
-        "Path",
-        "PATHEXT",
-        "USERPROFILE",
-        "HOME",
-        "APPDATA",
-        "LOCALAPPDATA",
-        "PROGRAMDATA",
-        "SYSTEMROOT",
-        "SystemRoot",
-        "TEMP",
-        "TMP",
-        "COMSPEC",
-        "CARGO_HOME",
-        "RUSTUP_HOME",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-    ];
-    const PREFIXES: &[&str] = &[
-        "CODEX_",
-        "OPENAI_",
-        "ANTHROPIC_",
-        "CLAUDE_",
-        "CURSOR_",
-        "GOOGLE_",
-        "GEMINI_",
-        "AGY_",
-    ];
-    command.env_clear();
-    for (key, value) in std::env::vars_os() {
-        let name = key.to_string_lossy();
-        if EXACT.iter().any(|candidate| *candidate == name)
-            || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
-        {
-            command.env(key, value);
+fn text_blocks(value: &Value) -> Option<String> {
+    let blocks = value.as_array()?;
+    let text = blocks
+        .iter()
+        .filter_map(|block| {
+            let block_type = block.get("type").and_then(Value::as_str);
+            if block_type.is_some_and(|kind| !matches!(kind, "text" | "output_text")) {
+                return None;
+            }
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .or_else(|| block.get("content").and_then(Value::as_str))
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn provider_chat_text(kind: &str, value: &Value) -> Option<String> {
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match kind {
+        "codex" => {
+            let item = value.get("item")?;
+            (item.get("type").and_then(Value::as_str) == Some("agent_message"))
+                .then(|| item.get("text").and_then(Value::as_str).map(str::to_owned))
+                .flatten()
         }
+        "claude" => match event_type {
+            "assistant" => value
+                .get("message")
+                .and_then(|message| message.get("content"))
+                .and_then(text_blocks),
+            "result" => value
+                .get("result")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        },
+        "cursor" => match event_type {
+            "result" => value
+                .get("result")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        },
+        _ => None,
     }
+    .filter(|text| !text.trim().is_empty())
+}
+
+fn provider_chat_fragment(kind: &str, value: &Value) -> Option<String> {
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind == "cursor" && event_type == "assistant" {
+        return value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(text_blocks);
+    }
+    let text = match kind {
+        "claude" if event_type == "stream_event" => value
+            .get("event")
+            .and_then(|event| event.get("delta"))
+            .and_then(|delta| delta.get("text"))
+            .and_then(Value::as_str),
+        "cursor" if event_type == "text" => {
+            value.get("text").and_then(Value::as_str).or_else(|| {
+                value
+                    .get("part")
+                    .and_then(|part| part.get("text"))
+                    .and_then(Value::as_str)
+            })
+        }
+        _ => None,
+    }?;
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+fn apply_provider_environment(command: &mut Command) {
+    command.env("NO_COLOR", "1");
+}
+
+fn apply_interactive_provider_environment(command: &mut CommandBuilder) {
     command.env("NO_COLOR", "1");
 }
 
@@ -1383,7 +2081,37 @@ fn emit_event(
     );
 }
 
-async fn wait_for_idle(mut activity: watch::Receiver<u64>) {
+fn cursor_chat_arguments() -> [&'static str; 5] {
+    [
+        "--mode",
+        "ask",
+        "--sandbox",
+        "enabled",
+        "--stream-partial-output",
+    ]
+}
+
+fn cursor_model_with_effort(model: &str, effort: Option<&str>) -> String {
+    let Some(effort) = effort else {
+        return model.to_owned();
+    };
+    if let Some(open) = model.find('[') {
+        if model.ends_with(']') {
+            let base = &model[..open];
+            let mut parameters = model[open + 1..model.len() - 1]
+                .split(',')
+                .map(str::trim)
+                .filter(|parameter| !parameter.is_empty() && !parameter.starts_with("effort="))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            parameters.push(format!("effort={effort}"));
+            return format!("{base}[{}]", parameters.join(","));
+        }
+    }
+    format!("{model}[effort={effort}]")
+}
+
+async fn wait_for_idle(mut activity: watch::Receiver<u64>, timeout_seconds: u64) {
     loop {
         tokio::select! {
             changed = activity.changed() => {
@@ -1391,7 +2119,7 @@ async fn wait_for_idle(mut activity: watch::Receiver<u64>) {
                     return;
                 }
             }
-            _ = sleep(Duration::from_secs(PROCESS_IDLE_TIMEOUT_SECONDS)) => return,
+            _ = sleep(Duration::from_secs(timeout_seconds)) => return,
         }
     }
 }
@@ -1400,7 +2128,7 @@ async fn wait_for_idle(mut activity: watch::Receiver<u64>) {
 async fn invoke_provider(
     app: &AppHandle,
     run_id: &str,
-    kind: &str,
+    participant: &Participant,
     phase: Phase,
     prompt: &str,
     repository: &Path,
@@ -1410,13 +2138,16 @@ async fn invoke_provider(
     final_output_path: &Path,
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<ProviderRun, String> {
+    let kind = participant.kind.as_str();
     let executable = find_provider_executable(kind)
         .ok_or_else(|| format!("{} CLI is not installed.", provider_names(kind).0))?;
-    let participant = probe_provider(kind);
-    if matches!(
-        participant.capabilities.autonomy_mode.as_str(),
-        "manual" | "unavailable"
-    ) {
+    let structured_chat = phase != Phase::Chat || participant.capabilities.structured_output;
+    if phase != Phase::Chat
+        && matches!(
+            participant.capabilities.autonomy_mode.as_str(),
+            "manual" | "unavailable"
+        )
+    {
         return Err(format!(
             "{} cannot prove a safe unattended mode: {}",
             participant.name, participant.capabilities.autonomy_note
@@ -1452,6 +2183,11 @@ async fn invoke_provider(
             if let Some(model) = requested_model {
                 command.arg("--model").arg(model);
             }
+            if let Some(effort) = requested_effort {
+                command
+                    .arg("-c")
+                    .arg(format!("model_reasoning_effort=\"{effort}\""));
+            }
             command.arg("exec");
             if let Some(id) = session_id {
                 command
@@ -1473,13 +2209,22 @@ async fn invoke_provider(
         "claude" => {
             command
                 .arg("--print")
-                .arg("--verbose")
-                .arg("--output-format")
-                .arg("stream-json")
                 .arg("--permission-mode")
-                .arg("auto");
+                .arg(if phase == Phase::Chat { "plan" } else { "auto" });
+            if structured_chat {
+                command
+                    .arg("--verbose")
+                    .arg("--output-format")
+                    .arg("stream-json");
+                if phase == Phase::Chat {
+                    command.arg("--include-partial-messages");
+                }
+            }
             if let Some(model) = requested_model {
                 command.arg("--model").arg(model);
+            }
+            if let Some(effort) = requested_effort {
+                command.arg("--effort").arg(effort);
             }
             if participant
                 .capabilities
@@ -1489,41 +2234,58 @@ async fn invoke_provider(
             {
                 command.arg("--max-turns").arg("30");
             }
-            if let Some(id) = session_id {
-                command.arg("--resume").arg(id);
+            if participant.capabilities.exact_resume {
+                if let Some(id) = session_id {
+                    command.arg("--resume").arg(id);
+                }
             }
-            command.arg("-p").arg("-");
             stdin_prompt = Some(prompt.to_owned());
         }
         "cursor" => {
-            command
-                .arg("--print")
-                .arg("--output-format")
-                .arg("stream-json");
+            command.arg("--print");
+            if structured_chat {
+                command.arg("--output-format").arg("stream-json");
+            }
+            if phase == Phase::Chat {
+                command.args(cursor_chat_arguments());
+            }
             if let Some(model) = requested_model {
-                command.arg("--model").arg(model);
+                command
+                    .arg("--model")
+                    .arg(cursor_model_with_effort(model, requested_effort));
             }
             if phase.writes() {
                 command.arg("--force");
             }
-            if let Some(id) = session_id {
-                command.arg("--resume").arg(id);
+            if participant.capabilities.exact_resume {
+                if let Some(id) = session_id {
+                    command.arg("--resume").arg(id);
+                }
             }
             command.arg(prompt);
         }
         "antigravity" => {
-            command.arg("--sandbox");
+            command.arg("--sandbox").arg("--add-dir").arg(repository);
+            if phase.writes() {
+                command.arg("--dangerously-skip-permissions");
+            }
+            if phase == Phase::Chat {
+                command
+                    .arg("--mode")
+                    .arg("plan")
+                    .arg("--print-timeout")
+                    .arg(format!("{CHAT_IDLE_TIMEOUT_SECONDS}s"));
+            }
             if let Some(model) = requested_model {
                 command.arg("--model").arg(model);
             }
             if let Some(effort) = requested_effort {
                 command.arg("--effort").arg(effort);
             }
-            if phase.writes() {
-                command.arg("--dangerously-skip-permissions");
-            }
-            if let Some(id) = session_id {
-                command.arg("--conversation").arg(id);
+            if participant.capabilities.exact_resume {
+                if let Some(id) = session_id {
+                    command.arg("--conversation").arg(id);
+                }
             }
             command.arg("--print").arg(prompt);
         }
@@ -1542,6 +2304,7 @@ async fn invoke_provider(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
+    let provider_started = Instant::now();
     let mut child = command
         .spawn()
         .map_err(|error| format!("Failed to start {}: {error}", provider_names(kind).0))?;
@@ -1573,6 +2336,7 @@ async fn invoke_provider(
     let (completion_sender, mut completion_receiver) = watch::channel(false);
     let stdout_activity = activity_sender.clone();
     let completion_phase = phase;
+    let stdout_started = provider_started;
     let stdout_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         let mut session_id = None;
@@ -1580,33 +2344,87 @@ async fn invoke_provider(
         let mut raw = String::new();
         let mut actual_model = None;
         let mut usage = ProviderUsage::default();
+        let mut activity_emitted = false;
+        let mut first_output_ms = None;
         while let Ok(Some(line)) = lines.next_line().await {
+            first_output_ms.get_or_insert_with(|| stdout_started.elapsed().as_millis() as u64);
             stdout_activity.send_modify(|value| *value = value.saturating_add(1));
             append_capped(&mut raw, &line);
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
                 session_id = session_id.or_else(|| parse_session_id(&value));
                 actual_model = actual_model.or_else(|| reported_model(&value));
                 merge_usage(&mut usage, &value);
-                if let Some(text) = parse_result_text(&value) {
+                if completion_phase == Phase::Chat {
+                    if let Some(fragment) = provider_chat_fragment(&stdout_agent, &value) {
+                        result_text.push_str(&fragment);
+                    } else if let Some(text) = provider_chat_text(&stdout_agent, &value) {
+                        result_text = text;
+                    } else if let Some(text) = parse_result_text(&value) {
+                        result_text = text;
+                    }
+                } else if let Some(text) = parse_result_text(&value) {
                     result_text = text;
                 }
+            } else if completion_phase == Phase::Chat && !structured_chat {
+                append_capped(&mut result_text, &line);
             }
             if raw.contains(HANDOFF_END) && extract_phase_handoff(&raw, completion_phase).is_ok() {
                 completion_sender.send_replace(true);
             }
-            emit_event(
-                &stdout_app,
-                &stdout_run,
-                "stream",
-                &stdout_phase,
-                "running",
-                Some(&stdout_agent),
-                "Provider event",
-                &truncate_utf8(&line, 4 * 1024),
-                None,
-            );
+            if completion_phase == Phase::Chat {
+                if result_text.trim().is_empty() {
+                    if !activity_emitted {
+                        emit_event(
+                            &stdout_app,
+                            &stdout_run,
+                            "stream",
+                            &stdout_phase,
+                            "running",
+                            Some(&stdout_agent),
+                            "Chat activity",
+                            &format!(
+                                "{} is working in the attached repository.",
+                                provider_names(&stdout_agent).0
+                            ),
+                            None,
+                        );
+                        activity_emitted = true;
+                    }
+                } else {
+                    emit_event(
+                        &stdout_app,
+                        &stdout_run,
+                        "stream",
+                        &stdout_phase,
+                        "running",
+                        Some(&stdout_agent),
+                        "Chat response",
+                        &truncate_utf8(result_text.trim(), SOURCE_BUDGET_BYTES),
+                        None,
+                    );
+                }
+            } else {
+                emit_event(
+                    &stdout_app,
+                    &stdout_run,
+                    "stream",
+                    &stdout_phase,
+                    "running",
+                    Some(&stdout_agent),
+                    "Provider event",
+                    &truncate_utf8(&line, 4 * 1024),
+                    None,
+                );
+            }
         }
-        (session_id, result_text, raw, actual_model, usage)
+        (
+            session_id,
+            result_text,
+            raw,
+            actual_model,
+            usage,
+            first_output_ms,
+        )
     });
 
     let stderr_app = app.clone();
@@ -1620,17 +2438,19 @@ async fn invoke_provider(
         while let Ok(Some(line)) = lines.next_line().await {
             stderr_activity.send_modify(|value| *value = value.saturating_add(1));
             append_capped(&mut raw, &line);
-            emit_event(
-                &stderr_app,
-                &stderr_run,
-                "stream",
-                &stderr_phase,
-                "running",
-                Some(&stderr_agent),
-                "Provider diagnostic",
-                &truncate_utf8(&line, 4 * 1024),
-                None,
-            );
+            if completion_phase != Phase::Chat {
+                emit_event(
+                    &stderr_app,
+                    &stderr_run,
+                    "stream",
+                    &stderr_phase,
+                    "running",
+                    Some(&stderr_agent),
+                    "Provider diagnostic",
+                    &truncate_utf8(&line, 4 * 1024),
+                    None,
+                );
+            }
         }
         raw
     });
@@ -1651,7 +2471,7 @@ async fn invoke_provider(
             let _ = child.kill().await;
             child.wait().await.map_err(|error| error.to_string())?
         },
-        _ = wait_for_idle(activity_receiver) => {
+        _ = wait_for_idle(activity_receiver, idle_timeout_seconds(phase)) => {
             idle_timed_out = true;
             let _ = child.kill().await;
             child.wait().await.map_err(|error| error.to_string())?
@@ -1665,7 +2485,7 @@ async fn invoke_provider(
         }
     };
 
-    let (parsed_session, parsed_result, raw_stdout, actual_model, usage) =
+    let (parsed_session, parsed_result, raw_stdout, actual_model, usage, first_output_ms) =
         stdout_task.await.map_err(|error| error.to_string())?;
     let raw_stderr = stderr_task.await.map_err(|error| error.to_string())?;
     std::fs::write(&stdout_log_path, &raw_stdout).map_err(|error| error.to_string())?;
@@ -1675,24 +2495,34 @@ async fn invoke_provider(
         file_result.trim().to_owned()
     } else if !parsed_result.trim().is_empty() {
         parsed_result.trim().to_owned()
-    } else {
+    } else if phase != Phase::Chat || !structured_chat {
         raw_stdout.trim().to_owned()
+    } else {
+        String::new()
     };
-    let handoff_result = extract_phase_handoff(&raw_result, phase);
-    let (handoff, schema_error) = match handoff_result {
-        Ok(handoff) => (Some(handoff), None),
-        Err(error) => (None, Some(error)),
+    let (handoff, schema_error) = if phase == Phase::Chat {
+        (None, None)
+    } else {
+        match extract_phase_handoff(&raw_result, phase) {
+            Ok(handoff) => (Some(handoff), None),
+            Err(error) => (None, Some(error)),
+        }
     };
     let summary = handoff
         .as_ref()
         .map(|value| value.summary.clone())
         .unwrap_or_else(|| truncate_utf8(&raw_result, SOURCE_BUDGET_BYTES));
-    let logical_success = handoff.as_ref().is_some_and(|value| match phase {
-        Phase::Build | Phase::Revise => value.status == "completed",
-        Phase::Review | Phase::FinalReview => {
-            matches!(value.status.as_str(), "approved" | "changes_required")
-        }
-    });
+    let logical_success = if phase == Phase::Chat {
+        chat_response_is_complete(&raw_result)
+    } else {
+        handoff.as_ref().is_some_and(|value| match phase {
+            Phase::Build | Phase::Revise => value.status == "completed",
+            Phase::Review | Phase::FinalReview => {
+                matches!(value.status.as_str(), "approved" | "changes_required")
+            }
+            Phase::Chat => false,
+        })
+    };
     let diagnostic = [
         raw_stderr.trim(),
         schema_error.as_deref().unwrap_or_default(),
@@ -1705,10 +2535,12 @@ async fn invoke_provider(
     Ok(ProviderRun {
         summary,
         session_id: parsed_session,
-        success: (status.success() || completed_handoff)
+        success: (status.success()
+            || completed_handoff
+            || (phase == Phase::Chat && idle_timed_out && logical_success))
             && !stopped
             && !timed_out
-            && !idle_timed_out
+            && (!idle_timed_out || (phase == Phase::Chat && logical_success))
             && logical_success,
         stopped,
         timed_out,
@@ -1719,6 +2551,7 @@ async fn invoke_provider(
         usage,
         stdout_log_path: stdout_log_path.to_string_lossy().into_owned(),
         stderr_log_path: stderr_log_path.to_string_lossy().into_owned(),
+        first_output_ms,
     })
 }
 
@@ -1727,6 +2560,410 @@ fn provider_log_note(run: &ProviderRun) -> String {
         "Durable logs:\nstdout: {}\nstderr: {}",
         run.stdout_log_path, run.stderr_log_path
     )
+}
+
+fn terminal_session_key(project_id: &str, participant: &str) -> String {
+    format!("{project_id}:{participant}")
+}
+
+fn antigravity_chat_response(screen: &str) -> Option<String> {
+    let lines = screen.lines().collect::<Vec<_>>();
+    let prompt_index = lines.iter().rposition(|line| {
+        let line = line.trim_start();
+        line.starts_with("> /plan ") || line.starts_with("> /accept-edits ")
+    })?;
+    let response_lines = lines
+        .iter()
+        .skip(prompt_index + 1)
+        .take_while(|line| {
+            let line = line.trim();
+            !(line.chars().count() >= 20
+                && line
+                    .chars()
+                    .all(|character| matches!(character, '─' | '-' | '━')))
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let first_content = response_lines
+        .iter()
+        .position(|line| !line.trim().is_empty())?;
+    let last_content = response_lines
+        .iter()
+        .rposition(|line| !line.trim().is_empty())?;
+    let response_lines = &response_lines[first_content..=last_content];
+    let common_indent = response_lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches(' ').len())
+        .min()
+        .unwrap_or(0);
+    let response = response_lines
+        .iter()
+        .map(|line| line.get(common_indent..).unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!response.trim().is_empty()).then(|| response.trim().to_owned())
+}
+
+fn terminal_screen_needs_input(screen: &str) -> bool {
+    screen.contains("Choose your color scheme:")
+        || screen.contains("Terms of Service & Data Use")
+        || screen.contains("Navigate · enter")
+        || (screen.contains("[Previous]") && screen.contains("[Done]"))
+}
+
+fn antigravity_response_is_complete(screen: &str) -> bool {
+    screen.contains("for shortcuts")
+        && (screen.contains("Plan mode:") || screen.contains("Accept edits mode:"))
+}
+
+fn interactive_command(
+    kind: &str,
+    executable: &Path,
+    repository: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> Result<CommandBuilder, String> {
+    let mut command = CommandBuilder::new(executable);
+    command.cwd(repository);
+    match kind {
+        "antigravity" => {
+            command.arg("--sandbox");
+            command.arg("--add-dir");
+            command.arg(repository);
+            command.arg("--dangerously-skip-permissions");
+            command.arg("--mode");
+            command.arg("plan");
+            command.arg("--prompt-interactive");
+            let initial_prompt = initial_prompt.ok_or_else(|| {
+                "Antigravity interactive mode requires an initial user message.".to_owned()
+            })?;
+            command.arg(initial_prompt);
+            if let Some(model) = model {
+                command.arg("--model");
+                command.arg(model);
+            }
+            if let Some(effort) = effort {
+                command.arg("--effort");
+                command.arg(effort);
+            }
+        }
+        "codex" => {
+            command.arg("-C");
+            command.arg(repository);
+            if let Some(model) = model {
+                command.arg("--model");
+                command.arg(model);
+            }
+            if let Some(effort) = effort {
+                command.arg("-c");
+                command.arg(format!("model_reasoning_effort=\"{effort}\""));
+            }
+        }
+        "claude" => {
+            command.arg("--permission-mode");
+            command.arg("plan");
+            if let Some(model) = model {
+                command.arg("--model");
+                command.arg(model);
+            }
+            if let Some(effort) = effort {
+                command.arg("--effort");
+                command.arg(effort);
+            }
+        }
+        "cursor" => {
+            if let Some(model) = model {
+                command.arg("--model");
+                command.arg(cursor_model_with_effort(model, effort));
+            }
+        }
+        _ => return Err(format!("Unsupported provider: {kind}")),
+    }
+    Ok(command)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_interactive_session(
+    app: &AppHandle,
+    run_id: &str,
+    project_id: &str,
+    kind: &str,
+    executable: &Path,
+    repository: &Path,
+    model: Option<&str>,
+    effort: Option<&str>,
+    initial_prompt: Option<&str>,
+) -> Result<InteractiveSession, String> {
+    let system = native_pty_system();
+    let pair = system
+        .openpty(PtySize {
+            rows: 36,
+            cols: 132,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| format!("Failed to open native terminal: {error}"))?;
+    let master = pair.master;
+    let slave = pair.slave;
+    let command = interactive_command(kind, executable, repository, model, effort, initial_prompt)?;
+    let mut command = command;
+    apply_interactive_provider_environment(&mut command);
+    let mut child = slave.spawn_command(command).map_err(|error| {
+        format!(
+            "Failed to start interactive {} session: {error}",
+            provider_names(kind).0
+        )
+    })?;
+    drop(slave);
+    let mut reader = master
+        .try_clone_reader()
+        .map_err(|error| error.to_string())?;
+    let writer = Arc::new(Mutex::new(
+        master.take_writer().map_err(|error| error.to_string())?,
+    ));
+    #[cfg(windows)]
+    {
+        // portable-pty enables ConPTY cursor inheritance. Windows waits for the
+        // terminal host to answer its cursor-position query before starting the child.
+        let mut startup_writer = writer.lock().map_err(|error| error.to_string())?;
+        startup_writer
+            .write_all(b"\x1b[1;1R")
+            .and_then(|_| startup_writer.flush())
+            .map_err(|error| format!("Failed to initialize the Windows terminal: {error}"))?;
+    }
+    let event_app = app.clone();
+    let event_project_id = project_id.to_owned();
+    let active_run_id = Arc::new(Mutex::new(run_id.to_owned()));
+    let event_run = active_run_id.clone();
+    let event_agent = kind.to_owned();
+    let terminal_writer = writer.clone();
+    let closed_by_owner = Arc::new(AtomicBool::new(false));
+    let event_closed_by_owner = closed_by_owner.clone();
+    let (readiness_sender, readiness_receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        let mut terminal = vt100::Parser::new(36, 132, 200);
+        let mut last_screen = String::new();
+        let mut last_completed_run_id = String::new();
+        let mut readiness_sent = false;
+        let mut accepted_antigravity_theme = false;
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 {
+                break;
+            }
+            terminal.process(&buffer[..count]);
+            let output = terminal.screen().contents().trim_end().to_owned();
+            if !output.trim().is_empty() {
+                if event_agent == "antigravity"
+                    && !accepted_antigravity_theme
+                    && output.contains("Choose your color scheme:")
+                    && output.contains("[Next]")
+                {
+                    if let Ok(mut writer) = terminal_writer.lock() {
+                        let _ = writer.write_all(b"\r").and_then(|_| writer.flush());
+                    }
+                    accepted_antigravity_theme = true;
+                }
+                if !readiness_sent {
+                    let _ = readiness_sender.send(());
+                    readiness_sent = true;
+                }
+                if output != last_screen {
+                    let current_run_id =
+                        event_run.lock().map(|run| run.clone()).unwrap_or_default();
+                    let response = (event_agent == "antigravity")
+                        .then(|| antigravity_chat_response(&output))
+                        .flatten();
+                    let needs_input = terminal_screen_needs_input(&output);
+                    if needs_input {
+                        emit_event(
+                            &event_app,
+                            &current_run_id,
+                            "stream",
+                            "chat",
+                            "working",
+                            Some(&event_agent),
+                            "Native terminal input",
+                            &output,
+                            None,
+                        );
+                    } else if let Some(response) = response.as_deref() {
+                        emit_event(
+                            &event_app,
+                            &current_run_id,
+                            "stream",
+                            "chat",
+                            "working",
+                            Some(&event_agent),
+                            "Native chat response",
+                            response,
+                            None,
+                        );
+                        if antigravity_response_is_complete(&output)
+                            && current_run_id != last_completed_run_id
+                        {
+                            let database = event_app.state::<Database>();
+                            match persist_message(
+                                database.inner(),
+                                &event_project_id,
+                                &current_run_id,
+                                &event_agent,
+                                "agent",
+                                response,
+                                &[],
+                                &[],
+                                None,
+                            ) {
+                                Ok(()) => {
+                                    emit_event(
+                                        &event_app,
+                                        &current_run_id,
+                                        "complete",
+                                        "chat",
+                                        "complete",
+                                        Some(&event_agent),
+                                        "Chat response complete",
+                                        "The provider returned to its prompt.",
+                                        None,
+                                    );
+                                    last_completed_run_id = current_run_id;
+                                }
+                                Err(error) => emit_event(
+                                    &event_app,
+                                    &current_run_id,
+                                    "attention",
+                                    "chat",
+                                    "attention",
+                                    Some(&event_agent),
+                                    "Could not save the chat response",
+                                    &error,
+                                    None,
+                                ),
+                            }
+                        }
+                    } else {
+                        let (title, detail) = if event_agent == "antigravity" {
+                            (
+                                "Native chat activity",
+                                "Antigravity is working in the retained project session.",
+                            )
+                        } else {
+                            ("Native terminal", output.as_str())
+                        };
+                        emit_event(
+                            &event_app,
+                            &current_run_id,
+                            "stream",
+                            "chat",
+                            "working",
+                            Some(&event_agent),
+                            title,
+                            detail,
+                            None,
+                        );
+                    }
+                    last_screen = output;
+                }
+            }
+        }
+        if !event_closed_by_owner.load(Ordering::Acquire) {
+            emit_event(
+                &event_app,
+                &event_run.lock().map(|run| run.clone()).unwrap_or_default(),
+                "attention",
+                "chat",
+                "attention",
+                Some(&event_agent),
+                "Native terminal ended",
+                "The provider's interactive terminal exited unexpectedly. The next message will create a fresh session.",
+                None,
+            );
+        }
+    });
+    if readiness_receiver
+        .recv_timeout(Duration::from_secs(3))
+        .is_err()
+    {
+        closed_by_owner.store(true, Ordering::Release);
+        let status = child
+            .try_wait()
+            .map_err(|error| format!("Failed to inspect native terminal startup: {error}"))?;
+        if status.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        return Err(match status {
+            Some(status) => format!(
+                "{} interactive terminal exited before readiness: {status:?}",
+                provider_names(kind).0
+            ),
+            None => format!(
+                "{} interactive terminal did not become ready within 3 seconds.",
+                provider_names(kind).0
+            ),
+        });
+    }
+    Ok(InteractiveSession {
+        _master: master,
+        writer,
+        child: Arc::new(Mutex::new(child)),
+        active_run_id,
+        closed_by_owner,
+    })
+}
+
+fn interactive_session_has_ended(session: &InteractiveSession) -> bool {
+    session
+        .child
+        .lock()
+        .ok()
+        .and_then(|mut child| child.try_wait().ok())
+        .is_none_or(|status| status.is_some())
+}
+
+fn close_interactive_session(session: &InteractiveSession) -> Result<(), String> {
+    session.closed_by_owner.store(true, Ordering::Release);
+    let mut child = session.child.lock().map_err(|error| error.to_string())?;
+    if child
+        .try_wait()
+        .map_err(|error| format!("Failed to inspect the native terminal: {error}"))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    child
+        .kill()
+        .map_err(|error| format!("Failed to stop the native terminal: {error}"))?;
+    child
+        .wait()
+        .map(|_| ())
+        .map_err(|error| format!("Failed to wait for the native terminal to stop: {error}"))
+}
+
+fn terminal_key_sequence(key: &str) -> Result<Vec<u8>, String> {
+    let sequence = match key {
+        "up" => b"\x1b[A".to_vec(),
+        "down" => b"\x1b[B".to_vec(),
+        "right" => b"\x1b[C".to_vec(),
+        "left" => b"\x1b[D".to_vec(),
+        "enter" => b"\r".to_vec(),
+        "space" => b" ".to_vec(),
+        "tab" => b"\t".to_vec(),
+        "escape" => b"\x1b".to_vec(),
+        "backspace" => b"\x7f".to_vec(),
+        _ => {
+            let Some(character) = key.strip_prefix("text:") else {
+                return Err(format!("Unsupported terminal key: {key}"));
+            };
+            if character.chars().count() != 1 {
+                return Err("Terminal text input must contain exactly one character.".to_owned());
+            }
+            character.as_bytes().to_vec()
+        }
+    };
+    Ok(sequence)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1860,6 +3097,46 @@ fn save_provider_session(
     Ok(())
 }
 
+fn save_chat_session(
+    database: &Database,
+    project_id: &str,
+    participant: &str,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(session_id) = session_id else {
+        return Ok(());
+    };
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO chat_sessions (project_id, participant_kind, provider_session_id)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_id, participant_kind) DO UPDATE SET
+               provider_session_id = excluded.provider_session_id,
+               last_used_at = CURRENT_TIMESTAMP",
+            params![project_id, participant, session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn load_chat_session(
+    database: &Database,
+    project_id: &str,
+    participant: &str,
+) -> Result<Option<String>, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .query_row(
+            "SELECT provider_session_id FROM chat_sessions
+             WHERE project_id = ?1 AND participant_kind = ?2",
+            params![project_id, participant],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
 fn persist_handoff(
     database: &Database,
     run_id: &str,
@@ -1930,6 +3207,52 @@ fn persist_receipt(
                 context_bytes as i64,
                 serde_json::to_string(&result.usage).map_err(|error| error.to_string())?,
                 usage_note(&result.usage),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn persist_chat_receipt(
+    database: &Database,
+    project_id: &str,
+    chat_id: &str,
+    participant: &Participant,
+    profile: &ProviderProfile,
+    metrics: ChatReceiptMetrics,
+    result: &ProviderRun,
+) -> Result<(), String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO chat_receipts
+             (id, project_id, chat_id, phase, participant_kind, provider_version,
+              requested_model, requested_effort, actual_model, session_id, context_bytes,
+              usage_json, usage_note, preflight_ms, first_output_ms, total_ms,
+              stdout_log_path, stderr_log_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                     ?14, ?15, ?16, ?17, ?18)",
+            params![
+                Uuid::new_v4().to_string(),
+                project_id,
+                chat_id,
+                Phase::Chat.as_str(),
+                participant.kind,
+                participant.version.as_deref(),
+                profile.model.as_deref(),
+                profile.effort.as_deref(),
+                result.actual_model.as_deref(),
+                result.session_id.as_deref(),
+                metrics.context_bytes as i64,
+                serde_json::to_string(&result.usage).map_err(|error| error.to_string())?,
+                usage_note(&result.usage),
+                metrics.preflight_ms as i64,
+                result
+                    .first_output_ms
+                    .map(|milliseconds| (metrics.preflight_ms + milliseconds) as i64),
+                metrics.total_ms as i64,
+                result.stdout_log_path,
+                result.stderr_log_path,
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -2291,7 +3614,11 @@ fn final_failure(
 }
 
 #[tauri::command]
-fn get_environment() -> Result<NativeEnvironment, String> {
+async fn get_environment(
+    database: State<'_, Database>,
+    runtime: State<'_, RuntimeState>,
+    force_refresh: Option<bool>,
+) -> Result<NativeEnvironment, String> {
     let current_directory = std::env::current_dir().map_err(|error| error.to_string())?;
     let repository = find_executable(&["git"])
         .and_then(|git_executable| {
@@ -2309,7 +3636,11 @@ fn get_environment() -> Result<NativeEnvironment, String> {
         native: true,
         repository_path: repository.to_string_lossy().into_owned(),
         branch,
-        participants: all_participants(),
+        participants: participants_with_connections(
+            database.inner(),
+            "agent-room",
+            cached_participants(runtime.inner(), force_refresh.unwrap_or(false)).await?,
+        )?,
     })
 }
 
@@ -2340,6 +3671,53 @@ fn save_project(database: State<'_, Database>, project: ProjectInput) -> Result<
 }
 
 #[tauri::command]
+fn load_project_settings(
+    database: State<'_, Database>,
+    project_id: String,
+) -> Result<ProjectSettings, String> {
+    project_settings(database.inner(), &project_id)
+}
+
+fn project_settings(database: &Database, project_id: &str) -> Result<ProjectSettings, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .query_row(
+            "SELECT autonomous_ship_enabled FROM project_settings WHERE project_id = ?1",
+            [project_id],
+            |row| {
+                Ok(ProjectSettings {
+                    autonomous_ship_enabled: row.get::<_, i64>(0)? != 0,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+        .map(|settings| settings.unwrap_or_default())
+}
+
+#[tauri::command]
+fn save_project_settings(
+    database: State<'_, Database>,
+    settings: ProjectSettingsInput,
+) -> Result<(), String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT INTO project_settings (project_id, autonomous_ship_enabled)
+             VALUES (?1, ?2)
+             ON CONFLICT(project_id) DO UPDATE SET
+               autonomous_ship_enabled = excluded.autonomous_ship_enabled,
+               updated_at = CURRENT_TIMESTAMP",
+            params![
+                settings.project_id,
+                i64::from(settings.autonomous_ship_enabled)
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 fn load_provider_profiles(
     database: State<'_, Database>,
     project_id: String,
@@ -2347,16 +3725,18 @@ fn load_provider_profiles(
     let connection = database.0.lock().map_err(|error| error.to_string())?;
     let mut statement = connection
         .prepare(
-            "SELECT participant_kind, model, effort
-             FROM provider_profiles WHERE project_id = ?1 ORDER BY participant_kind",
+            "SELECT participant_kind, route, model, effort
+             FROM provider_route_profiles
+             WHERE project_id = ?1 ORDER BY participant_kind, route",
         )
         .map_err(|error| error.to_string())?;
     let profiles = statement
         .query_map([project_id], |row| {
             Ok(ProviderProfile {
                 participant_kind: row.get(0)?,
-                model: row.get(1)?,
-                effort: row.get(2)?,
+                route: row.get(1)?,
+                model: row.get(2)?,
+                effort: row.get(3)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -2366,30 +3746,67 @@ fn load_provider_profiles(
 }
 
 #[tauri::command]
-fn save_provider_profile(
+async fn save_provider_profile(
     database: State<'_, Database>,
+    runtime: State<'_, RuntimeState>,
     profile: ProviderProfileInput,
 ) -> Result<(), String> {
     if !matches!(
         profile.participant_kind.as_str(),
         "codex" | "claude" | "cursor" | "antigravity"
-    ) {
+    ) || !matches!(profile.route.as_str(), "chat" | "build" | "review")
+    {
         return Err("Unknown provider profile.".to_owned());
     }
     let model = profile.model.filter(|value| !value.trim().is_empty());
     let effort = profile.effort.filter(|value| !value.trim().is_empty());
-    let connection = database.0.lock().map_err(|error| error.to_string())?;
-    connection
-        .execute(
-            "INSERT INTO provider_profiles (project_id, participant_kind, model, effort)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(project_id, participant_kind) DO UPDATE SET
-               model = excluded.model,
-               effort = excluded.effort,
-               updated_at = CURRENT_TIMESTAMP",
-            params![profile.project_id, profile.participant_kind, model, effort],
-        )
-        .map_err(|error| error.to_string())?;
+    if let Some(value) = effort.as_deref() {
+        let allowed = provider_effort_options(&profile.participant_kind);
+        if !allowed.iter().any(|option| option == value) {
+            return Err(format!(
+                "{} does not support the `{value}` effort level.",
+                provider_names(&profile.participant_kind).0
+            ));
+        }
+        if profile.participant_kind == "cursor" && model.is_none() {
+            return Err("Cursor requires an explicit model before effort can be set.".to_owned());
+        }
+    }
+    {
+        let connection = database.0.lock().map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "INSERT INTO provider_route_profiles
+                 (project_id, participant_kind, route, model, effort)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(project_id, participant_kind, route) DO UPDATE SET
+                   model = excluded.model,
+                   effort = excluded.effort,
+                   updated_at = CURRENT_TIMESTAMP",
+                params![
+                    profile.project_id,
+                    profile.participant_kind,
+                    profile.route,
+                    model,
+                    effort
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    let session_key = terminal_session_key(&profile.project_id, &profile.participant_kind);
+    let session = runtime
+        .interactive_sessions
+        .lock()
+        .await
+        .remove(&session_key);
+    if let Some(session) = session {
+        close_interactive_session(&session)?;
+    }
+    runtime
+        .interactive_runs
+        .lock()
+        .await
+        .retain(|_, active_session| active_session != &session_key);
     Ok(())
 }
 
@@ -2397,18 +3814,21 @@ fn provider_profile(
     database: &Database,
     project_id: &str,
     participant: &str,
+    route: &str,
 ) -> Result<ProviderProfile, String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
     connection
         .query_row(
-            "SELECT participant_kind, model, effort
-             FROM provider_profiles WHERE project_id = ?1 AND participant_kind = ?2",
-            params![project_id, participant],
+            "SELECT participant_kind, route, model, effort
+             FROM provider_route_profiles
+             WHERE project_id = ?1 AND participant_kind = ?2 AND route = ?3",
+            params![project_id, participant, route],
             |row| {
                 Ok(ProviderProfile {
                     participant_kind: row.get(0)?,
-                    model: row.get(1)?,
-                    effort: row.get(2)?,
+                    route: row.get(1)?,
+                    model: row.get(2)?,
+                    effort: row.get(3)?,
                 })
             },
         )
@@ -2417,10 +3837,67 @@ fn provider_profile(
         .map(|profile| {
             profile.unwrap_or(ProviderProfile {
                 participant_kind: participant.to_owned(),
+                route: route.to_owned(),
                 model: None,
                 effort: None,
             })
         })
+}
+
+fn recent_chat_handoff(
+    database: &Database,
+    project_id: &str,
+    target_participant: &str,
+    resumed_target_session: bool,
+) -> Result<Option<String>, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT sender_kind, message_kind, body
+             FROM messages
+             WHERE project_id = ?1 AND message_kind IN ('human', 'agent')
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT 8",
+        )
+        .map_err(|error| error.to_string())?;
+    let messages = statement
+        .query_map([project_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let Some(agent_index) = messages.iter().position(|(_, kind, _)| kind == "agent") else {
+        return Ok(None);
+    };
+    let (agent, _, answer) = &messages[agent_index];
+    if resumed_target_session && agent == target_participant {
+        return Ok(None);
+    }
+    let prior_user = messages
+        .iter()
+        .skip(agent_index + 1)
+        .find(|(_, kind, _)| kind == "human")
+        .map(|(_, _, body)| body.as_str());
+    let agent_name = provider_names(agent).0;
+    let handoff = match prior_user {
+        Some(user) => format!(
+            "Recent room handoff from another provider or a non-resumable session:\nUser: {}\n{}: {}",
+            truncate_utf8(user, CHAT_HANDOFF_BUDGET_BYTES / 3),
+            agent_name,
+            truncate_utf8(answer, CHAT_HANDOFF_BUDGET_BYTES * 2 / 3),
+        ),
+        None => format!(
+            "Recent room handoff from another provider or a non-resumable session:\n{}: {}",
+            agent_name,
+            truncate_utf8(answer, CHAT_HANDOFF_BUDGET_BYTES),
+        ),
+    };
+    Ok(Some(truncate_utf8(&handoff, CHAT_HANDOFF_BUDGET_BYTES)))
 }
 
 #[tauri::command]
@@ -2490,7 +3967,7 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let receipts = latest_run
+    let mut receipts = latest_run
         .as_ref()
         .map(|run| {
             let mut statement = connection
@@ -2517,6 +3994,11 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
                         usage: serde_json::from_str(&usage_json).unwrap_or_default(),
                         usage_note: row.get(10)?,
                         created_at: row.get(11)?,
+                        preflight_ms: None,
+                        first_output_ms: None,
+                        total_ms: None,
+                        stdout_log_path: None,
+                        stderr_log_path: None,
                     })
                 })
                 .map_err(|error| error.to_string())?
@@ -2526,6 +4008,50 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
         })
         .transpose()?
         .unwrap_or_default();
+    let mut statement = connection
+        .prepare(
+            "SELECT id, phase, participant_kind, provider_version, requested_model,
+                    requested_effort, actual_model, session_id, context_bytes, usage_json,
+                    usage_note, created_at, preflight_ms, first_output_ms, total_ms,
+                    stdout_log_path, stderr_log_path
+             FROM chat_receipts WHERE project_id = ?1
+             ORDER BY created_at DESC LIMIT 50",
+        )
+        .map_err(|error| error.to_string())?;
+    let chat_receipts = statement
+        .query_map([&project_id], |row| {
+            let usage_json: String = row.get(9)?;
+            Ok(ExecutionReceipt {
+                id: row.get(0)?,
+                phase: row.get(1)?,
+                participant: row.get(2)?,
+                provider_version: row.get(3)?,
+                requested_model: row.get(4)?,
+                requested_effort: row.get(5)?,
+                actual_model: row.get(6)?,
+                session_id: row.get(7)?,
+                context_bytes: row.get::<_, i64>(8)?.max(0) as usize,
+                usage: serde_json::from_str(&usage_json).unwrap_or_default(),
+                usage_note: row.get(10)?,
+                created_at: row.get(11)?,
+                preflight_ms: row
+                    .get::<_, Option<i64>>(12)?
+                    .map(|value| value.max(0) as u64),
+                first_output_ms: row
+                    .get::<_, Option<i64>>(13)?
+                    .map(|value| value.max(0) as u64),
+                total_ms: row
+                    .get::<_, Option<i64>>(14)?
+                    .map(|value| value.max(0) as u64),
+                stdout_log_path: row.get(15)?,
+                stderr_log_path: row.get(16)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    receipts.extend(chat_receipts);
+    receipts.sort_by(|left, right| left.created_at.cmp(&right.created_at));
     Ok(RoomSnapshot {
         messages,
         latest_run,
@@ -2536,9 +4062,626 @@ fn load_room(database: State<'_, Database>, project_id: String) -> Result<RoomSn
 #[tauri::command]
 async fn stop_run(runtime: State<'_, RuntimeState>, run_id: String) -> Result<bool, String> {
     let sender = runtime.cancellations.lock().await.get(&run_id).cloned();
-    Ok(sender
+    let cancelled = sender
         .map(|value| value.send(true).is_ok())
-        .unwrap_or(false))
+        .unwrap_or(false);
+    let session_key = runtime.interactive_runs.lock().await.remove(&run_id);
+    let stopped_session = if let Some(session_key) = session_key {
+        let session = runtime
+            .interactive_sessions
+            .lock()
+            .await
+            .remove(&session_key);
+        if let Some(session) = session {
+            close_interactive_session(&session)?;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    Ok(cancelled || stopped_session)
+}
+
+#[tauri::command]
+async fn send_terminal_key(
+    runtime: State<'_, RuntimeState>,
+    request: TerminalInputRequest,
+) -> Result<(), String> {
+    let session_key = terminal_session_key(&request.project_id, &request.participant_kind);
+    let writer = runtime
+        .interactive_sessions
+        .lock()
+        .await
+        .get(&session_key)
+        .map(|session| session.writer.clone())
+        .ok_or_else(|| {
+            format!(
+                "No live {} terminal session is available.",
+                provider_names(&request.participant_kind).0
+            )
+        })?;
+    let sequence = terminal_key_sequence(&request.key)?;
+    let mut writer = writer.lock().map_err(|error| error.to_string())?;
+    writer
+        .write_all(&sequence)
+        .and_then(|_| writer.flush())
+        .map_err(|error| format!("Failed to send terminal input: {error}"))
+}
+
+#[tauri::command]
+async fn test_provider_connection(
+    app: AppHandle,
+    database: State<'_, Database>,
+    runtime: State<'_, RuntimeState>,
+    request: ConnectionTestRequest,
+) -> Result<Participant, String> {
+    let database = database.inner();
+    let repository = PathBuf::from(&request.repository_path);
+    git_static(&repository, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
+    let participant = probe_provider(&request.participant_kind);
+    runtime
+        .provider_cache
+        .lock()
+        .await
+        .insert(participant.kind.clone(), participant.clone());
+    if !participant.installed {
+        return Err(format!("{} CLI is not installed.", participant.name));
+    }
+    let profile = provider_profile(database, &request.project_id, &participant.kind, "chat")?;
+    let run_id = format!("connection-{}", Uuid::new_v4());
+    let output_path = run_artifact_directory(&app, &run_id)?.join("connection-test.final.txt");
+    let (_, cancellation) = watch::channel(false);
+    let result = invoke_provider(
+        &app,
+        &run_id,
+        &participant,
+        Phase::Chat,
+        "This is an Agent Room connection test. Reply with exactly READY. Do not inspect or modify files.",
+        &repository,
+        None,
+        profile.model.as_deref(),
+        profile.effort.as_deref(),
+        &output_path,
+        cancellation,
+    )
+    .await?;
+    let ready = connection_test_ready(&result);
+    let authentication_detail = authentication_attention(&result.summary, &result.stderr);
+    let connection = if ready {
+        ProviderConnection {
+            status: "connected".to_owned(),
+            detail: "Native connection test passed.".to_owned(),
+            last_verified_at: None,
+        }
+    } else {
+        let status = if authentication_detail.is_some() {
+            "sign-in-required"
+        } else {
+            "failed"
+        };
+        ProviderConnection {
+            status: status.to_owned(),
+            detail: if let Some(detail) = authentication_detail {
+                detail
+            } else if result.idle_timed_out {
+                format!("No provider output within {CHAT_IDLE_TIMEOUT_SECONDS} seconds.")
+            } else if !result.summary.trim().is_empty() {
+                format!(
+                    "Connection test expected READY but received: {}",
+                    truncate_utf8(result.summary.trim(), 320)
+                )
+            } else if !result.stderr.trim().is_empty() {
+                truncate_utf8(&result.stderr, 512)
+            } else {
+                "Connection test did not return a response.".to_owned()
+            },
+            last_verified_at: None,
+        }
+    };
+    save_connection(
+        database,
+        &request.project_id,
+        &participant.kind,
+        &connection,
+    )?;
+    if connection.status != "connected" {
+        return Err(connection.detail);
+    }
+    participant_for_project(database, &request.project_id, participant)
+}
+
+#[tauri::command]
+async fn discover_provider_models(
+    request: ModelDiscoveryRequest,
+) -> Result<ModelDiscoveryResult, String> {
+    let executable = find_provider_executable(&request.participant_kind)
+        .ok_or_else(|| "Install this CLI before refreshing its models.".to_owned())?;
+    match request.participant_kind.as_str() {
+        "antigravity" | "cursor" => {
+            let output = timeout(
+                Duration::from_secs(15),
+                Command::new(executable).arg("models").output(),
+            )
+            .await
+            .map_err(|_| "Model discovery timed out after 15 seconds.".to_owned())?
+            .map_err(|error| format!("Could not start model discovery: {error}"))?;
+            let text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !output.status.success() {
+                return Err(truncate_utf8(&text, 500));
+            }
+            let models = if request.participant_kind == "cursor" {
+                parse_cursor_model_list(&text)
+            } else {
+                parse_provider_model_list(&text)
+            };
+            if models.is_empty() {
+                return Err("The CLI returned no selectable models for this account.".to_owned());
+            }
+            Ok(ModelDiscoveryResult {
+                models,
+                detail: if request.participant_kind == "cursor" {
+                    "Fetched from the signed-in CLI. Effort, thinking, context, and speed variants are grouped under each base model.".to_owned()
+                } else {
+                    "Fetched from the signed-in CLI account just now.".to_owned()
+                },
+            })
+        }
+        "codex" | "claude" => {
+            let (models, detail, _) =
+                model_options(&request.participant_kind, Some(executable.as_path()));
+            Ok(ModelDiscoveryResult { models, detail })
+        }
+        _ => Err("Unknown provider.".to_owned()),
+    }
+}
+
+#[tauri::command]
+async fn start_room_chat(
+    app: AppHandle,
+    database: State<'_, Database>,
+    runtime: State<'_, RuntimeState>,
+    request: ChatRequest,
+) -> Result<ChatResult, String> {
+    let chat_started = Instant::now();
+    let database = database.inner();
+    let repository = PathBuf::from(&request.repository_path);
+    git_static(&repository, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
+    let message = request.message.trim();
+    if message.is_empty() {
+        return Err("Enter a message before sending.".to_owned());
+    }
+    let participant = if let Some(requested) = request.requested_agent.as_deref() {
+        let participant = participant_for_project(
+            database,
+            &request.project_id,
+            cached_provider(runtime.inner(), requested, false).await?,
+        )?;
+        if !participant.installed {
+            return Err(format!("The requested {requested} CLI is not installed."));
+        }
+        participant
+    } else {
+        participants_with_connections(
+            database,
+            &request.project_id,
+            cached_participants(runtime.inner(), false).await?,
+        )?
+        .into_iter()
+        .find(|participant| participant.installed)
+        .ok_or_else(|| "No installed coding-agent CLI is available for chat.".to_owned())?
+    };
+    let profile = provider_profile(database, &request.project_id, &participant.kind, "chat")?;
+    let settings = project_settings(database, &request.project_id)?;
+    if EMBEDDED_TUI_CHAT_ENABLED
+        && matches!(
+            participant.kind.as_str(),
+            "codex" | "claude" | "cursor" | "antigravity"
+        )
+    {
+        let session_key = terminal_session_key(&request.project_id, &participant.kind);
+        let executable = find_provider_executable(&participant.kind)
+            .ok_or_else(|| format!("{} CLI is not installed.", participant.name))?;
+        let mut interactive_error = None;
+        for attempt in 0..2 {
+            let interactive_writer = {
+                let mut sessions = runtime.interactive_sessions.lock().await;
+                let needs_session = sessions
+                    .get(&session_key)
+                    .is_none_or(interactive_session_has_ended);
+                if needs_session {
+                    if let Some(stale) = sessions.remove(&session_key) {
+                        let _ = close_interactive_session(&stale);
+                    }
+                    match spawn_interactive_session(
+                        &app,
+                        &request.run_id,
+                        &request.project_id,
+                        &participant.kind,
+                        &executable,
+                        &repository,
+                        profile.model.as_deref(),
+                        profile.effort.as_deref(),
+                        Some(message),
+                    ) {
+                        Ok(session) => {
+                            sessions.insert(session_key.clone(), session);
+                        }
+                        Err(error) => {
+                            interactive_error = Some(error);
+                        }
+                    }
+                }
+                sessions.get(&session_key).map(|session| {
+                    (
+                        session.writer.clone(),
+                        session.active_run_id.clone(),
+                        needs_session && participant.kind == "antigravity",
+                    )
+                })
+            };
+            let Some((writer, active_run_id, message_was_initial_prompt)) = interactive_writer
+            else {
+                break;
+            };
+            *active_run_id.lock().map_err(|error| error.to_string())? = request.run_id.clone();
+            let sent = if message_was_initial_prompt {
+                Ok(())
+            } else {
+                let mut writer = writer.lock().map_err(|error| error.to_string())?;
+                writer
+                    .write_all(format!("{message}\r").as_bytes())
+                    .and_then(|_| writer.flush())
+            };
+            if sent.is_ok() {
+                persist_message(
+                    database,
+                    &request.project_id,
+                    &request.run_id,
+                    "human",
+                    "human",
+                    message,
+                    &[],
+                    &[],
+                    None,
+                )?;
+                runtime
+                    .interactive_runs
+                    .lock()
+                    .await
+                    .retain(|_, active_session| active_session != &session_key);
+                runtime
+                    .interactive_runs
+                    .lock()
+                    .await
+                    .insert(request.run_id.clone(), session_key.clone());
+                emit_event(
+                    &app,
+                    &request.run_id,
+                    "phase",
+                    "chat",
+                    "working",
+                    Some(&participant.kind),
+                    "Interactive native session",
+                    if attempt == 0 {
+                        "Warm native terminal session. Output appears as it is produced."
+                    } else {
+                        "The previous native terminal had ended, so Agent Room recreated it before sending."
+                    },
+                    None,
+                );
+                return Ok(ChatResult {
+                    run_id: request.run_id,
+                    participant: participant.kind.clone(),
+                    summary: format!("Interactive {} session is running.", participant.name),
+                    session_id: Some(session_key),
+                    actual_model: profile.model,
+                    stopped: false,
+                    ship_intent: None,
+                });
+            }
+            interactive_error = Some(format!(
+                "The native terminal closed while sending: {}",
+                sent.expect_err("checked above")
+            ));
+            if let Some(stale) = runtime
+                .interactive_sessions
+                .lock()
+                .await
+                .remove(&session_key)
+            {
+                let _ = close_interactive_session(&stale);
+            }
+        }
+        let compatibility_detail = interactive_error.unwrap_or_else(|| {
+            "This CLI could not open an interactive terminal, so Agent Room is using its compatible one-shot route."
+                .to_owned()
+        });
+        emit_event(
+            &app,
+            &request.run_id,
+            "phase",
+            "chat",
+            "working",
+            Some(&participant.kind),
+            "Compatibility chat route",
+            &compatibility_detail,
+            None,
+        );
+    }
+    let session_id = load_chat_session(database, &request.project_id, &participant.kind)?;
+    let room_handoff = recent_chat_handoff(
+        database,
+        &request.project_id,
+        &participant.kind,
+        session_id.is_some(),
+    )?;
+    let (cancel_sender, cancel_receiver) = watch::channel(false);
+    runtime
+        .cancellations
+        .lock()
+        .await
+        .insert(request.run_id.clone(), cancel_sender);
+
+    persist_message(
+        database,
+        &request.project_id,
+        &request.run_id,
+        "human",
+        "human",
+        message,
+        &[],
+        &[],
+        None,
+    )?;
+    let chat_mode_detail = "Instant project chat. No worktree, verification, review, or promotion.";
+    emit_event(
+        &app,
+        &request.run_id,
+        "phase",
+        "chat",
+        "working",
+        Some(&participant.kind),
+        &format!("{} is answering", participant.name),
+        chat_mode_detail,
+        None,
+    );
+    let mut prompt = format!(
+        "You are in instant project chat for the current repository. Answer the user's message directly and concisely. Inspect files when useful, but do not modify files, create a worktree, run project verification, or use an Agent Room handoff.\n\nUser message:\n{message}"
+    );
+    if let Some(handoff) = room_handoff {
+        prompt.push_str("\n\n");
+        prompt.push_str(&handoff);
+    }
+    if settings.autonomous_ship_enabled {
+        prompt.push_str(&format!(
+            "\n\nAutonomous Ship is armed for this project. Apply the following skill when its trigger matches. The skill is `{AUTONOMOUS_SHIP_SKILL_PATH}`:\n\n{AUTONOMOUS_SHIP_SKILL}"
+        ));
+    }
+    let artifact_dir = run_artifact_directory(&app, &request.run_id)?;
+    let output_path = artifact_dir.join("chat.final.txt");
+    let preflight_ms = chat_started.elapsed().as_millis() as u64;
+    let first_result = invoke_provider(
+        &app,
+        &request.run_id,
+        &participant,
+        Phase::Chat,
+        &prompt,
+        &repository,
+        session_id.as_deref(),
+        profile.model.as_deref(),
+        profile.effort.as_deref(),
+        &output_path,
+        cancel_receiver.clone(),
+    )
+    .await;
+    let result = match first_result {
+        Ok(result)
+            if result.idle_timed_out
+                && result.summary.trim().is_empty()
+                && participant.kind == "antigravity" =>
+        {
+            emit_event(
+                &app,
+                &request.run_id,
+                "phase",
+                "chat",
+                "retrying",
+                Some(&participant.kind),
+                "Retrying Antigravity chat",
+                "Antigravity produced no output. Retrying once with a fresh chat session.",
+                None,
+            );
+            invoke_provider(
+                &app,
+                &request.run_id,
+                &participant,
+                Phase::Chat,
+                &prompt,
+                &repository,
+                None,
+                profile.model.as_deref(),
+                profile.effort.as_deref(),
+                &artifact_dir.join("chat.retry.final.txt"),
+                cancel_receiver,
+            )
+            .await
+        }
+        other => other,
+    };
+    runtime.cancellations.lock().await.remove(&request.run_id);
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            runtime
+                .provider_cache
+                .lock()
+                .await
+                .remove(&participant.kind);
+            return Err(error);
+        }
+    };
+    let total_ms = chat_started.elapsed().as_millis() as u64;
+    save_chat_session(
+        database,
+        &request.project_id,
+        &participant.kind,
+        result.session_id.as_deref(),
+    )?;
+    persist_chat_receipt(
+        database,
+        &request.project_id,
+        &request.run_id,
+        &participant,
+        &profile,
+        ChatReceiptMetrics {
+            context_bytes: prompt.len(),
+            preflight_ms,
+            total_ms,
+        },
+        &result,
+    )?;
+    let authentication_detail = authentication_attention(&result.summary, &result.stderr);
+    if !result.success || authentication_detail.is_some() {
+        let reason = if let Some(detail) = authentication_detail {
+            detail
+        } else if result.stopped {
+            "Chat stopped by you.".to_owned()
+        } else if result.timed_out {
+            "Chat exceeded the 20 minute limit.".to_owned()
+        } else if result.idle_timed_out {
+            format!(
+                "Chat produced no output for {CHAT_IDLE_TIMEOUT_SECONDS} seconds and was stopped."
+            )
+        } else {
+            format!(
+                "{} could not complete the chat response. {}",
+                participant.name, result.stderr
+            )
+        };
+        let status = if authentication_attention(&result.summary, &result.stderr).is_some() {
+            "sign-in-required"
+        } else {
+            "failed"
+        };
+        save_connection(
+            database,
+            &request.project_id,
+            &participant.kind,
+            &ProviderConnection {
+                status: status.to_owned(),
+                detail: reason.clone(),
+                last_verified_at: None,
+            },
+        )?;
+        persist_message(
+            database,
+            &request.project_id,
+            &request.run_id,
+            "system",
+            "error",
+            "Chat needs attention.",
+            &[],
+            &[],
+            Some(&reason),
+        )?;
+        emit_event(
+            &app,
+            &request.run_id,
+            "attention",
+            "chat",
+            if result.stopped { "stopped" } else { "failed" },
+            Some(&participant.kind),
+            "Chat needs attention",
+            &reason,
+            None,
+        );
+        return Err(reason);
+    }
+
+    save_connection(
+        database,
+        &request.project_id,
+        &participant.kind,
+        &ProviderConnection {
+            status: "connected".to_owned(),
+            detail: "Most recent native project chat completed.".to_owned(),
+            last_verified_at: None,
+        },
+    )?;
+
+    let (ship_intent, intent_diagnostic) = if settings.autonomous_ship_enabled {
+        match extract_ship_intent(&result.summary) {
+            Ok(intent) => (intent, None),
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (None, None)
+    };
+    let visible_summary = visible_chat_response(&result.summary);
+    persist_message(
+        database,
+        &request.project_id,
+        &request.run_id,
+        &participant.kind,
+        "agent",
+        &visible_summary,
+        &[],
+        &[],
+        None,
+    )?;
+    if let Some(intent) = ship_intent.as_ref() {
+        persist_message(
+            database,
+            &request.project_id,
+            &request.run_id,
+            "system",
+            "status",
+            "Autonomous Ship intent accepted.",
+            &[],
+            &[],
+            Some(&format!("{}\n{}", intent.objective, intent.reason)),
+        )?;
+    } else if let Some(diagnostic) = intent_diagnostic {
+        persist_message(
+            database,
+            &request.project_id,
+            &request.run_id,
+            "system",
+            "status",
+            "Autonomous Ship intent was ignored.",
+            &[],
+            &[],
+            Some(&diagnostic),
+        )?;
+    }
+    emit_event(
+        &app,
+        &request.run_id,
+        "complete",
+        "chat",
+        "complete",
+        Some(&participant.kind),
+        "Chat complete",
+        "Project chat response saved to this room.",
+        None,
+    );
+    Ok(ChatResult {
+        run_id: request.run_id,
+        participant: participant.kind.clone(),
+        summary: visible_summary,
+        session_id: result.session_id,
+        actual_model: result.actual_model,
+        stopped: false,
+        ship_intent,
+    })
 }
 
 #[tauri::command]
@@ -2553,11 +4696,16 @@ async fn start_room_run(
     git_static(&base_repository, &["rev-parse", "--show-toplevel"])
         .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
 
-    let participants = all_participants();
+    let participants = participants_with_connections(
+        database,
+        &request.project_id,
+        cached_participants(runtime.inner(), false).await?,
+    )?;
     let ready = participants
         .iter()
         .filter(|participant| {
-            participant.installed
+            participant.connection_status == "connected"
+                && participant.installed
                 && !matches!(
                     participant.capabilities.autonomy_mode.as_str(),
                     "manual" | "unavailable"
@@ -2624,8 +4772,9 @@ async fn start_room_run(
         .copied()
         .unwrap_or(builder);
     let degraded_review = reviewer.kind == builder.kind;
-    let builder_profile = provider_profile(database, &request.project_id, &builder.kind)?;
-    let reviewer_profile = provider_profile(database, &request.project_id, &reviewer.kind)?;
+    let builder_profile = provider_profile(database, &request.project_id, &builder.kind, "build")?;
+    let reviewer_profile =
+        provider_profile(database, &request.project_id, &reviewer.kind, "review")?;
     let (cancel_sender, cancel_receiver) = watch::channel(false);
     runtime
         .cancellations
@@ -2868,7 +5017,7 @@ async fn start_room_run(
     let build_result = invoke_provider(
         &app,
         &request.run_id,
-        &builder.kind,
+        builder,
         Phase::Build,
         &build_packet,
         &worktree,
@@ -3128,7 +5277,7 @@ async fn start_room_run(
     let review_result = invoke_provider(
         &app,
         &request.run_id,
-        &reviewer.kind,
+        reviewer,
         Phase::Review,
         &review_packet,
         &worktree,
@@ -3307,7 +5456,7 @@ async fn start_room_run(
         let revision_result = invoke_provider(
             &app,
             &request.run_id,
-            &builder.kind,
+            builder,
             Phase::Revise,
             &revision_packet,
             &worktree,
@@ -3484,7 +5633,7 @@ async fn start_room_run(
         let final_result = invoke_provider(
             &app,
             &request.run_id,
-            &reviewer.kind,
+            reviewer,
             Phase::FinalReview,
             &final_packet,
             &worktree,
@@ -3803,9 +5952,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_environment,
             save_project,
+            load_project_settings,
+            save_project_settings,
             load_provider_profiles,
             save_provider_profile,
             load_room,
+            test_provider_connection,
+            discover_provider_models,
+            start_room_chat,
+            send_terminal_key,
             start_room_run,
             stop_run
         ])
@@ -3852,10 +6007,195 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_requires_explicit_workspace_attachment() {
+        let ready = capabilities_for(
+            "antigravity",
+            true,
+            Some("test"),
+            "--print --sandbox --dangerously-skip-permissions --add-dir",
+            "",
+        );
+        assert_eq!(ready.autonomy_mode, "unattended-bypass");
+        let incomplete = capabilities_for(
+            "antigravity",
+            true,
+            Some("test"),
+            "--print --sandbox --dangerously-skip-permissions",
+            "",
+        );
+        assert_eq!(incomplete.autonomy_mode, "manual");
+    }
+
+    #[test]
     fn antigravity_probe_includes_the_cli_installer_location() {
         assert!(provider_fallback_paths("antigravity")
             .iter()
             .any(|path| path.ends_with(Path::new("agy").join("bin").join("agy.exe"))));
+    }
+
+    #[test]
+    fn model_discovery_keeps_selectable_lines_and_skips_headings() {
+        let models = parse_provider_model_list(
+            "Available models:\n1. Gemini 3.1 Pro (High)\n2. Gemini 3.1 Flash\nUse /model to choose\n",
+        );
+        assert_eq!(
+            models,
+            vec![
+                "Gemini 3.1 Flash".to_owned(),
+                "Gemini 3.1 Pro (High)".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cursor_model_discovery_groups_compound_presets_by_base_model() {
+        let models = parse_cursor_model_list(
+            "Available models\n\
+             auto - Auto (current, default)\n\
+             claude-opus-5-thinking-high - Opus 5 1M Thinking\n\
+             claude-opus-5-thinking-high-fast - Opus 5 1M Thinking Fast\n\
+             claude-opus-5-low - Opus 5 1M Low\n\
+             claude-opus-4-8-thinking-xhigh-fast - Opus 4.8 Extra High Thinking Fast\n\
+             gpt-5.6-terra-extra-high-fast - GPT-5.6 Terra Extra High Fast\n\
+             sonnet-4-thinking-fast - Sonnet 4 Thinking Fast\n\
+             composer-2.5-fast - Composer 2.5 Fast\n",
+        );
+        assert_eq!(
+            models,
+            vec![
+                "claude-opus-4-8".to_owned(),
+                "claude-opus-5".to_owned(),
+                "composer-2.5".to_owned(),
+                "gpt-5.6-terra".to_owned(),
+                "sonnet-4-thinking".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_terminal_parser_replaces_redrawn_content() {
+        let mut terminal = vt100::Parser::new(4, 40, 0);
+        terminal.process(b"Signing in...");
+        terminal.process(b"\x1b[2J\x1b[HReady");
+        assert_eq!(terminal.screen().contents(), "Ready");
+    }
+
+    #[test]
+    fn antigravity_terminal_screen_extracts_only_the_current_chat_response() {
+        let screen = "\
+Earlier conversation content
+────────────────────────────────────────
+> /plan @antigravity hello
+
+  Hello! I am ready to work with you.
+
+  What task shall we plan today?
+
+────────────────────────────────────────
+> Plan mode: research & plan only
+────────────────────────────────────────
+? for shortcuts                 plan · Gemini 3.6 Flash · high";
+        assert_eq!(
+            antigravity_chat_response(screen).as_deref(),
+            Some("Hello! I am ready to work with you.\n\nWhat task shall we plan today?")
+        );
+        assert!(antigravity_response_is_complete(screen));
+        assert!(!terminal_screen_needs_input(screen));
+    }
+
+    #[test]
+    fn onboarding_screen_remains_an_interactive_terminal() {
+        assert!(terminal_screen_needs_input(
+            "Terms of Service & Data Use\n> Previous    [Done]\n↑/↓ Navigate · enter Confirm"
+        ));
+        assert!(antigravity_chat_response("Choose your color scheme:").is_none());
+    }
+
+    #[test]
+    fn terminal_input_allows_navigation_and_one_typed_character() {
+        assert_eq!(terminal_key_sequence("down").unwrap(), b"\x1b[B");
+        assert_eq!(terminal_key_sequence("enter").unwrap(), b"\r");
+        assert_eq!(terminal_key_sequence("text:y").unwrap(), b"y");
+        assert!(terminal_key_sequence("text:yes").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_pty_remains_alive_for_two_turns() {
+        let system = native_pty_system();
+        let pair = system
+            .openpty(PtySize {
+                rows: 12,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open Windows PTY");
+        let master = pair.master;
+        let slave = pair.slave;
+        let mut command = CommandBuilder::new("cmd.exe");
+        command.arg("/D");
+        command.arg("/Q");
+        command.arg("/K");
+        command.arg("echo AGENT_ROOM_READY");
+        let mut child = slave.spawn_command(command).expect("spawn cmd.exe");
+        drop(slave);
+
+        let mut reader = master.try_clone_reader().expect("clone PTY reader");
+        let mut writer = master.take_writer().expect("take PTY writer");
+        writer
+            .write_all(b"\x1b[1;1R")
+            .and_then(|_| writer.flush())
+            .expect("answer the Windows cursor-position request");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let _reader_thread = thread::spawn(move || {
+            let mut buffer = [0_u8; 1024];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                if sender
+                    .send(String::from_utf8_lossy(&buffer[..count]).into_owned())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let receive_until = |marker: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let mut output = String::new();
+            while std::time::Instant::now() < deadline {
+                if let Ok(chunk) = receiver.recv_timeout(Duration::from_millis(100)) {
+                    output.push_str(&chunk);
+                    if output.contains(marker) {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        let first_response_received = receive_until("AGENT_ROOM_READY");
+        let alive_after_first_turn = child.try_wait().expect("inspect child").is_none();
+
+        writer
+            .write_all(b"echo AGENT_ROOM_PONG\r\n")
+            .expect("send second turn");
+        writer.flush().expect("flush second turn");
+        let second_response_received = receive_until("AGENT_ROOM_PONG");
+        let alive_after_second_turn = child.try_wait().expect("inspect child").is_none();
+
+        child.kill().expect("stop cmd.exe");
+        child.wait().expect("wait for cmd.exe");
+        drop(writer);
+        drop(master);
+
+        assert!(first_response_received);
+        assert!(alive_after_first_turn);
+        assert!(second_response_received);
+        assert!(alive_after_second_turn);
     }
 
     #[test]
@@ -3887,5 +6227,507 @@ mod tests {
         assert_eq!(usage.total_cost_usd, Some(0.0125));
         assert_eq!(usage.num_turns, Some(2));
         assert!(usage_note(&ProviderUsage::default()).contains("did not report"));
+    }
+
+    #[test]
+    fn chat_receipt_does_not_require_an_autonomous_run() {
+        let connection = Connection::open_in_memory().expect("open test database");
+        migrate(&connection).expect("migrate test database");
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, goal, repository_path)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params!["project-1", "Agent Room", "Test chat", "C:\\repo"],
+            )
+            .expect("insert project");
+        let database = Database(Mutex::new(connection));
+        let participant = Participant {
+            kind: "codex".to_owned(),
+            name: "Codex".to_owned(),
+            installed: true,
+            version: Some("test-version".to_owned()),
+            executable_path: None,
+            models: Vec::new(),
+            model_discovery_note: String::new(),
+            supports_effort: true,
+            effort_options: provider_effort_options("codex"),
+            state: "ready".to_owned(),
+            connection_status: "ready".to_owned(),
+            connection_detail: String::new(),
+            last_verified_at: None,
+            capabilities: capabilities_for("codex", true, None, "", ""),
+        };
+        let profile = ProviderProfile {
+            participant_kind: "codex".to_owned(),
+            route: "chat".to_owned(),
+            model: Some("test-model".to_owned()),
+            effort: None,
+        };
+        let result = ProviderRun {
+            summary: "Chat response".to_owned(),
+            session_id: Some("session-1".to_owned()),
+            success: true,
+            stopped: false,
+            timed_out: false,
+            idle_timed_out: false,
+            stderr: String::new(),
+            handoff: None,
+            actual_model: Some("test-model".to_owned()),
+            usage: ProviderUsage {
+                input_tokens: Some(12),
+                output_tokens: Some(4),
+                ..ProviderUsage::default()
+            },
+            stdout_log_path: String::new(),
+            stderr_log_path: String::new(),
+            first_output_ms: Some(25),
+        };
+
+        persist_chat_receipt(
+            &database,
+            "project-1",
+            "chat-1",
+            &participant,
+            &profile,
+            ChatReceiptMetrics {
+                context_bytes: 128,
+                preflight_ms: 10,
+                total_ms: 100,
+            },
+            &result,
+        )
+        .expect("persist chat receipt");
+
+        let connection = database.0.lock().expect("lock test database");
+        let stored: (String, String, i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT project_id, chat_id, context_bytes, preflight_ms,
+                        first_output_ms, total_ms
+                 FROM chat_receipts",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("read chat receipt");
+        let run_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get(0))
+            .expect("count autonomous runs");
+
+        assert_eq!(
+            stored,
+            (
+                "project-1".to_owned(),
+                "chat-1".to_owned(),
+                128,
+                10,
+                35,
+                100,
+            )
+        );
+        assert_eq!(run_count, 0);
+    }
+
+    #[test]
+    fn cross_provider_handoff_is_bounded_and_skips_resumed_owner() {
+        let connection = Connection::open_in_memory().expect("open test database");
+        migrate(&connection).expect("migrate test database");
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, goal, repository_path)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params!["project-1", "Agent Room", "Test chat", "C:\\repo"],
+            )
+            .expect("insert project");
+        let database = Database(Mutex::new(connection));
+        persist_message(
+            &database,
+            "project-1",
+            "chat-1",
+            "human",
+            "human",
+            "Explain the architecture.",
+            &[],
+            &[],
+            None,
+        )
+        .expect("persist human message");
+        persist_message(
+            &database,
+            "project-1",
+            "chat-1",
+            "codex",
+            "agent",
+            &"A".repeat(CHAT_HANDOFF_BUDGET_BYTES * 2),
+            &[],
+            &[],
+            None,
+        )
+        .expect("persist agent message");
+
+        assert!(recent_chat_handoff(&database, "project-1", "codex", true)
+            .expect("same-provider handoff")
+            .is_none());
+        let switched = recent_chat_handoff(&database, "project-1", "claude", true)
+            .expect("cross-provider handoff")
+            .expect("handoff exists");
+        assert!(switched.contains("Codex"));
+        assert!(switched.contains("Explain the architecture."));
+        assert!(switched.len() <= CHAT_HANDOFF_BUDGET_BYTES);
+        assert!(recent_chat_handoff(&database, "project-1", "codex", false)
+            .expect("fresh same-provider handoff")
+            .is_some());
+    }
+
+    #[test]
+    fn autonomous_ship_skill_requires_a_valid_explicit_intent() {
+        let response = format!(
+            "Ready to proceed.\n{SHIP_INTENT_START}\n{{\"schemaVersion\":1,\"objective\":\"Fix the failing chat persistence test\",\"reason\":\"The user explicitly requested a repository fix\"}}\n{SHIP_INTENT_END}"
+        );
+        let intent = extract_ship_intent(&response)
+            .expect("valid intent")
+            .expect("intent exists");
+        assert_eq!(intent.objective, "Fix the failing chat persistence test");
+        assert_eq!(visible_chat_response(&response), "Ready to proceed.");
+        assert!(extract_ship_intent("Information-only answer.")
+            .expect("no intent")
+            .is_none());
+        assert!(extract_ship_intent(&format!(
+            "{SHIP_INTENT_START}\n{{\"schemaVersion\":2}}\n{SHIP_INTENT_END}"
+        ))
+        .is_err());
+        let malformed =
+            format!("I can help.\n{SHIP_INTENT_START}\n{{\"schemaVersion\":1,\"objective\":");
+        assert_eq!(visible_chat_response(&malformed), "I can help.");
+    }
+
+    #[test]
+    fn autonomous_ship_setting_is_project_scoped() {
+        let connection = Connection::open_in_memory().expect("open test database");
+        migrate(&connection).expect("migrate test database");
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, goal, repository_path)
+                 VALUES ('armed', 'Armed', 'Test', 'C:\\armed'),
+                        ('quiet', 'Quiet', 'Test', 'C:\\quiet')",
+                [],
+            )
+            .expect("insert projects");
+        connection
+            .execute(
+                "INSERT INTO project_settings (project_id, autonomous_ship_enabled)
+                 VALUES ('armed', 1)",
+                [],
+            )
+            .expect("arm project");
+        let database = Database(Mutex::new(connection));
+
+        assert!(
+            project_settings(&database, "armed")
+                .expect("armed settings")
+                .autonomous_ship_enabled
+        );
+        assert!(
+            !project_settings(&database, "quiet")
+                .expect("default settings")
+                .autonomous_ship_enabled
+        );
+    }
+
+    #[test]
+    fn legacy_provider_profile_migrates_to_every_route_without_overwriting() {
+        let connection = Connection::open_in_memory().expect("open test database");
+        migrate(&connection).expect("migrate test database");
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, goal, repository_path)
+                 VALUES ('project-1', 'Agent Room', 'Test', 'C:\\repo')",
+                [],
+            )
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO provider_profiles
+                 (project_id, participant_kind, model, effort)
+                 VALUES ('project-1', 'codex', 'legacy-model', 'high')",
+                [],
+            )
+            .expect("insert legacy profile");
+        migrate(&connection).expect("rerun migration");
+        connection
+            .execute(
+                "UPDATE provider_route_profiles
+                 SET model = 'chat-model'
+                 WHERE project_id = 'project-1'
+                   AND participant_kind = 'codex'
+                   AND route = 'chat'",
+                [],
+            )
+            .expect("customize chat route");
+        migrate(&connection).expect("rerun idempotent migration");
+
+        let mut statement = connection
+            .prepare(
+                "SELECT route, model
+                 FROM provider_route_profiles
+                 WHERE project_id = 'project-1' AND participant_kind = 'codex'
+                 ORDER BY route",
+            )
+            .expect("prepare profiles");
+        let profiles = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query profiles")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect profiles");
+
+        assert_eq!(
+            profiles,
+            vec![
+                ("build".to_owned(), "legacy-model".to_owned()),
+                ("chat".to_owned(), "chat-model".to_owned()),
+                ("review".to_owned(), "legacy-model".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn cursor_chat_uses_read_only_partial_stream_arguments() {
+        assert_eq!(
+            cursor_chat_arguments(),
+            [
+                "--mode",
+                "ask",
+                "--sandbox",
+                "enabled",
+                "--stream-partial-output"
+            ]
+        );
+        let missing_sandbox = capabilities_for(
+            "cursor",
+            true,
+            Some("test"),
+            "--print --output-format stream-json --force --resume --mode ask --stream-partial-output",
+            "",
+        );
+        assert_eq!(missing_sandbox.autonomy_mode, "manual");
+        assert!(!missing_sandbox.repository_scoping);
+        assert_eq!(
+            cursor_model_with_effort("claude-opus-4-8", Some("high")),
+            "claude-opus-4-8[effort=high]"
+        );
+        assert_eq!(
+            cursor_model_with_effort(
+                "claude-opus-4-8[context=1m,effort=low,fast=false]",
+                Some("xhigh")
+            ),
+            "claude-opus-4-8[context=1m,fast=false,effort=xhigh]"
+        );
+    }
+
+    #[test]
+    fn every_provider_exposes_exact_models_and_truthful_effort_options() {
+        let (codex_models, _, codex_effort) = model_options("codex", Some(Path::new("codex")));
+        let (claude_models, _, claude_effort) = model_options("claude", Some(Path::new("claude")));
+        let (cursor_models, _, cursor_effort) =
+            model_options("cursor", Some(Path::new("cursor-agent")));
+        let (antigravity_models, _, antigravity_effort) =
+            model_options("antigravity", Some(Path::new("agy")));
+
+        assert!(codex_models.contains(&"gpt-5.6-sol".to_owned()));
+        assert!(claude_models.contains(&"claude-opus-4-8".to_owned()));
+        assert!(claude_models.contains(&"claude-opus-5".to_owned()));
+        assert!(cursor_models.contains(&"claude-opus-4-8".to_owned()));
+        assert!(antigravity_models.contains(&"Gemini 3.1 Pro (high)".to_owned()));
+        assert!(codex_effort.contains(&"xhigh".to_owned()));
+        assert!(claude_effort.contains(&"max".to_owned()));
+        assert!(cursor_effort.contains(&"xhigh".to_owned()));
+        assert_eq!(antigravity_effort, vec!["low", "medium", "high"]);
+    }
+
+    #[test]
+    fn connection_test_rejects_onboarding_output_even_when_the_process_succeeds() {
+        let result = ProviderRun {
+            summary: "Welcome to the Antigravity CLI. You are currently not signed in.".to_owned(),
+            session_id: None,
+            success: true,
+            stopped: false,
+            timed_out: false,
+            idle_timed_out: false,
+            stderr: String::new(),
+            handoff: None,
+            actual_model: None,
+            usage: ProviderUsage::default(),
+            stdout_log_path: String::new(),
+            stderr_log_path: String::new(),
+            first_output_ms: Some(10),
+        };
+        assert!(!connection_test_ready(&result));
+        assert!(authentication_attention(&result.summary, &result.stderr).is_some());
+
+        let ready = ProviderRun {
+            summary: " READY ".to_owned(),
+            ..result
+        };
+        assert!(connection_test_ready(&ready));
+        assert!(
+            authentication_attention("This repository uses OAuth authentication.", "").is_none()
+        );
+        assert!(authentication_attention("", "OAuth authentication required").is_some());
+    }
+
+    #[tokio::test]
+    async fn warm_provider_cache_avoids_reprobing_the_cli() {
+        let runtime = RuntimeState::default();
+        let participant = Participant {
+            kind: "codex".to_owned(),
+            name: "Codex".to_owned(),
+            installed: true,
+            version: Some("cached-version".to_owned()),
+            executable_path: Some("intentionally-missing.exe".to_owned()),
+            models: Vec::new(),
+            model_discovery_note: String::new(),
+            supports_effort: false,
+            effort_options: Vec::new(),
+            state: "ready".to_owned(),
+            connection_status: "connected".to_owned(),
+            connection_detail: String::new(),
+            last_verified_at: None,
+            capabilities: capabilities_for("codex", true, None, "", ""),
+        };
+        runtime
+            .provider_cache
+            .lock()
+            .await
+            .insert("codex".to_owned(), participant);
+
+        let cached = cached_provider(&runtime, "codex", false)
+            .await
+            .expect("read warm cache");
+        assert_eq!(cached.version.as_deref(), Some("cached-version"));
+    }
+
+    #[test]
+    fn codex_chat_adapter_extracts_only_agent_messages() {
+        let message = serde_json::json!({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "Codex answer"}
+        });
+        let command = serde_json::json!({
+            "type": "item.completed",
+            "item": {"type": "command_execution", "text": "not chat"}
+        });
+        assert_eq!(
+            provider_chat_text("codex", &message).as_deref(),
+            Some("Codex answer")
+        );
+        assert!(provider_chat_text("codex", &command).is_none());
+    }
+
+    #[test]
+    fn claude_chat_adapter_supports_snapshots_and_partial_text() {
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "private"},
+                    {"type": "text", "text": "Claude answer"}
+                ]
+            }
+        });
+        let partial = serde_json::json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": {"type": "text_delta", "text": "Cl"}
+            }
+        });
+        assert_eq!(
+            provider_chat_text("claude", &assistant).as_deref(),
+            Some("Claude answer")
+        );
+        assert_eq!(
+            provider_chat_fragment("claude", &partial).as_deref(),
+            Some("Cl")
+        );
+    }
+
+    #[test]
+    fn cursor_chat_adapter_supports_stream_fragments_and_terminal_result() {
+        let fragment = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Cursor "}]
+            }
+        });
+        let result = serde_json::json!({
+            "type": "result",
+            "result": "Cursor answer"
+        });
+        assert_eq!(
+            provider_chat_fragment("cursor", &fragment).as_deref(),
+            Some("Cursor ")
+        );
+        assert_eq!(
+            provider_chat_text("cursor", &result).as_deref(),
+            Some("Cursor answer")
+        );
+    }
+
+    #[test]
+    fn provider_usage_accepts_claude_and_codex_field_shapes() {
+        let claude = serde_json::json!({
+            "message": {
+                "usage": {
+                    "input_tokens": 20,
+                    "cache_read_input_tokens": 8,
+                    "output_tokens": 4
+                }
+            },
+            "total_cost_usd": 0.01
+        });
+        let codex = serde_json::json!({
+            "usage": {
+                "inputTokens": 30,
+                "cachedInputTokens": 10,
+                "outputTokens": 5
+            }
+        });
+        let mut claude_usage = ProviderUsage::default();
+        merge_usage(&mut claude_usage, &claude);
+        assert_eq!(claude_usage.input_tokens, Some(20));
+        assert_eq!(claude_usage.cached_input_tokens, Some(8));
+        assert_eq!(claude_usage.output_tokens, Some(4));
+        assert_eq!(claude_usage.total_cost_usd, Some(0.01));
+        let mut codex_usage = ProviderUsage::default();
+        merge_usage(&mut codex_usage, &codex);
+        assert_eq!(codex_usage.input_tokens, Some(30));
+        assert_eq!(codex_usage.cached_input_tokens, Some(10));
+        assert_eq!(codex_usage.output_tokens, Some(5));
+    }
+
+    #[test]
+    fn chat_accepts_plain_provider_text_without_a_handoff() {
+        assert!(chat_response_is_complete("The repository is ready."));
+        assert!(!chat_response_is_complete(" \n\t "));
+        assert!(extract_phase_handoff("plain provider text", Phase::Chat).is_err());
+    }
+
+    #[test]
+    fn chat_uses_a_shorter_idle_limit_than_autonomous_phases() {
+        assert_eq!(idle_timeout_seconds(Phase::Chat), CHAT_IDLE_TIMEOUT_SECONDS);
+        assert_eq!(
+            idle_timeout_seconds(Phase::Build),
+            PROCESS_IDLE_TIMEOUT_SECONDS
+        );
     }
 }

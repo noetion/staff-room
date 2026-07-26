@@ -50,10 +50,14 @@ export interface Participant {
   version?: string;
   executablePath?: string;
   state: "ready" | "running" | "reviewing" | "manual" | "unavailable";
+  connectionStatus: "connected" | "sign-in-required" | "unverified" | "not-installed" | "failed";
+  connectionDetail: string;
+  lastVerifiedAt?: string;
   capabilities: ProviderCapabilities;
   models: string[];
   modelDiscoveryNote: string;
   supportsEffort: boolean;
+  effortOptions: string[];
 }
 
 export interface Project {
@@ -141,6 +145,26 @@ export interface StartRunResult {
   recoveryCount: number;
 }
 
+export interface ChatResult {
+  runId: string;
+  participant: AgentKind;
+  summary: string;
+  sessionId?: string;
+  actualModel?: string;
+  stopped: boolean;
+  shipIntent?: ShipIntent;
+}
+
+export interface ShipIntent {
+  schemaVersion: 1;
+  objective: string;
+  reason: string;
+}
+
+export interface ProjectSettings {
+  autonomousShipEnabled: boolean;
+}
+
 export interface StoredRun {
   id: string;
   objective: string;
@@ -184,12 +208,23 @@ export interface ExecutionReceipt {
   usage: ProviderUsage;
   usageNote: string;
   createdAt: string;
+  preflightMs?: number;
+  firstOutputMs?: number;
+  totalMs?: number;
+  stdoutLogPath?: string;
+  stderrLogPath?: string;
 }
 
 export interface ProviderProfile {
   participantKind: AgentKind;
+  route: "chat" | "build" | "review";
   model?: string;
   effort?: string;
+}
+
+export interface ModelDiscoveryResult {
+  models: string[];
+  detail: string;
 }
 
 export interface RoomSnapshot {

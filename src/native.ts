@@ -2,9 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AgentKind,
+  ChatResult,
+  ModelDiscoveryResult,
   NativeEnvironment,
+  Participant,
   ProviderProfile,
   Project,
+  ProjectSettings,
   RoomSnapshot,
   StartRunResult,
 } from "./model";
@@ -24,8 +28,8 @@ export function isNativeApp(): boolean {
   return "__TAURI_INTERNALS__" in window;
 }
 
-export async function getEnvironment(): Promise<NativeEnvironment> {
-  return invoke<NativeEnvironment>("get_environment");
+export async function getEnvironment(forceRefresh = false): Promise<NativeEnvironment> {
+  return invoke<NativeEnvironment>("get_environment", { forceRefresh });
 }
 
 export async function saveProject(project: Project): Promise<void> {
@@ -34,6 +38,19 @@ export async function saveProject(project: Project): Promise<void> {
 
 export async function loadRoom(projectId: string): Promise<RoomSnapshot> {
   return invoke<RoomSnapshot>("load_room", { projectId });
+}
+
+export async function loadProjectSettings(projectId: string): Promise<ProjectSettings> {
+  return invoke<ProjectSettings>("load_project_settings", { projectId });
+}
+
+export async function saveProjectSettings(
+  projectId: string,
+  settings: ProjectSettings,
+): Promise<void> {
+  return invoke("save_project_settings", {
+    settings: { projectId, ...settings },
+  });
 }
 
 export async function loadProviderProfiles(
@@ -59,6 +76,34 @@ export async function startRoomRun(
   },
 ): Promise<StartRunResult> {
   return invoke<StartRunResult>("start_room_run", { request });
+}
+
+export async function startRoomChat(
+  request: {
+    runId: string;
+    projectId: string;
+    message: string;
+    repositoryPath: string;
+    requestedAgent?: AgentKind;
+  },
+): Promise<ChatResult> {
+  return invoke<ChatResult>("start_room_chat", { request });
+}
+
+export async function testProviderConnection(request: {
+  projectId: string;
+  repositoryPath: string;
+  participantKind: AgentKind;
+}): Promise<Participant> {
+  return invoke<Participant>("test_provider_connection", { request });
+}
+
+export async function discoverProviderModels(
+  participantKind: AgentKind,
+): Promise<ModelDiscoveryResult> {
+  return invoke<ModelDiscoveryResult>("discover_provider_models", {
+    request: { participantKind },
+  });
 }
 
 export async function stopRun(runId: string): Promise<boolean> {

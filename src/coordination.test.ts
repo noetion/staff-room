@@ -4,6 +4,7 @@ import {
   contextPacketSize,
   createRun,
   explicitAgent,
+  selectChatParticipant,
   requestReview,
   routeForPhase,
 } from "./coordination";
@@ -25,10 +26,10 @@ const capabilities = {
 };
 
 const participants: Participant[] = [
-  { kind: "codex", name: "Codex", installed: true, state: "ready", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: false },
-  { kind: "claude", name: "Claude", installed: true, state: "ready", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: false },
-  { kind: "cursor", name: "Cursor", installed: false, state: "unavailable", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: false },
-  { kind: "antigravity", name: "Antigravity", installed: false, state: "unavailable", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true },
+  { kind: "codex", name: "Codex", installed: true, state: "ready", connectionStatus: "connected", connectionDetail: "Test", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high", "xhigh"] },
+  { kind: "claude", name: "Claude", installed: true, state: "ready", connectionStatus: "connected", connectionDetail: "Test", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high", "xhigh", "max"] },
+  { kind: "cursor", name: "Cursor", installed: false, state: "unavailable", connectionStatus: "not-installed", connectionDetail: "Test", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high", "xhigh", "max"] },
+  { kind: "antigravity", name: "Antigravity", installed: false, state: "unavailable", connectionStatus: "not-installed", connectionDetail: "Test", capabilities, models: [], modelDiscoveryNote: "Test", supportsEffort: true, effortOptions: ["low", "medium", "high"] },
 ];
 
 describe("coordination policy", () => {
@@ -41,6 +42,20 @@ describe("coordination policy", () => {
     const run = createRun("@cursor implement this", participants);
     expect(run.state).toBe("waiting");
     expect(run.currentOwner).toBeUndefined();
+  });
+
+  it("does not route an installed but unverified participant", () => {
+    const unverified = participants.map((participant) =>
+      participant.kind === "claude" ? { ...participant, connectionStatus: "unverified" as const } : participant,
+    );
+    expect(createRun("@claude review this", unverified).state).toBe("waiting");
+  });
+
+  it("allows project chat with an installed but unverified CLI", () => {
+    const unverified = participants.map((participant) =>
+      participant.kind === "claude" ? { ...participant, connectionStatus: "unverified" as const } : participant,
+    );
+    expect(selectChatParticipant("@claude hello", unverified)).toBe("claude");
   });
 
   it("never assigns review to the writer when a second participant exists", () => {

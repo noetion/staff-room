@@ -12,11 +12,13 @@ Let a user save a model and optional reasoning-effort choice for each installed 
 
 ## Acceptance criteria
 
-1. Provider settings persist a model choice per CLI.
-2. Antigravity discovers models from `agy models`; other providers accept an explicit model string when their CLI has no dependable discovery command.
-3. Build, review, revision, and final review receive the configured provider model and effort where supported.
-4. Every completed or failed provider phase persists a receipt with provider version, requested model, requested effort, session ID, Agent Room context size, reported usage fields, and an explicit availability note.
-5. The evidence UI distinguishes Agent Room limits from provider-reported usage and quota information.
+1. Provider settings persist separate Model and Effort choices for Chat, Build, and Review.
+2. Every provider presents the same route-control structure. Model choices show exact maintained identifiers, such as `claude-opus-4-8`, instead of ambiguous tier aliases.
+3. Cursor and Antigravity refresh their signed-in account catalogues from their native model commands. Cursor's compound effort, context, thinking, and speed presets are grouped by base model because effort is selected separately. Codex and Claude use maintained exact identifiers because their installed CLIs do not expose a zero-spend account catalogue.
+4. Codex effort maps to `model_reasoning_effort`, Claude and Antigravity use native `--effort` flags, and Cursor effort is encoded in its parameterized model value.
+5. Build, review, revision, and final review receive the configured provider model and effort.
+6. Every completed or failed provider phase persists a receipt with provider version, requested model, requested effort, session ID, Agent Room context size, reported usage fields, and an explicit availability note.
+7. The evidence UI distinguishes Agent Room limits from provider-reported usage and quota information.
 
 ## Risks and rollback
 

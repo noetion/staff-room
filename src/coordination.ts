@@ -5,8 +5,13 @@ const mentionPattern = /@(codex|claude|cursor|antigravity)\b/i;
 export function participantIsRunnable(participant: Participant): boolean {
   return (
     participant.installed &&
+    participant.connectionStatus === "connected" &&
     !["manual", "unavailable"].includes(participant.capabilities.autonomyMode)
   );
+}
+
+export function participantCanChat(participant: Participant): boolean {
+  return participant.installed && participant.capabilities.nonInteractiveTurn;
 }
 
 export function explicitAgent(objective: string): AgentKind | undefined {
@@ -30,6 +35,21 @@ export function selectParticipant(
     )?.kind;
   }
   return participants.find(participantIsRunnable)?.kind;
+}
+
+export function selectChatParticipant(
+  objective: string,
+  participants: Participant[],
+  replyTarget?: AgentKind,
+): AgentKind | undefined {
+  const requested = explicitAgent(objective);
+  if (requested) {
+    return participants.find((participant) => participant.kind === requested && participantCanChat(participant))?.kind;
+  }
+  if (replyTarget) {
+    return participants.find((participant) => participant.kind === replyTarget && participantCanChat(participant))?.kind;
+  }
+  return participants.find(participantCanChat)?.kind;
 }
 
 export function createRun(
