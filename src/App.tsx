@@ -469,6 +469,8 @@ function WindowControls({ native }: { native: boolean }) {
         type="button"
         className="window-control"
         aria-label="Minimize window"
+        disabled={!native}
+        title={native ? "Minimize window" : "Inert in browser preview mode"}
         onClick={() => {
           if (native) void getCurrentWindow().minimize();
         }}
@@ -479,6 +481,8 @@ function WindowControls({ native }: { native: boolean }) {
         type="button"
         className="window-control"
         aria-label="Maximize or restore window"
+        disabled={!native}
+        title={native ? "Maximize or restore window" : "Inert in browser preview mode"}
         onClick={() => {
           if (native) void getCurrentWindow().toggleMaximize();
         }}
@@ -489,6 +493,8 @@ function WindowControls({ native }: { native: boolean }) {
         type="button"
         className="window-control window-close"
         aria-label="Close Agent Room"
+        disabled={!native}
+        title={native ? "Close Agent Room" : "Inert in browser preview mode"}
         onClick={() => {
           if (native) void getCurrentWindow().close();
         }}
@@ -1742,6 +1748,9 @@ export function App() {
         <div
           className="titlebar-drag"
           data-tauri-drag-region
+          onDoubleClick={() => {
+            if (native) void getCurrentWindow().toggleMaximize();
+          }}
           aria-hidden="true"
         />
         <div className="topbar-status">
