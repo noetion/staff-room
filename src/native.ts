@@ -9,6 +9,7 @@ import type {
   ProviderProfile,
   Project,
   ProjectSettings,
+  QuickEditResult,
   RoomSnapshot,
   StartRunResult,
 } from "./model";
@@ -106,6 +107,26 @@ export async function startRoomChat(
   },
 ): Promise<ChatResult> {
   return invoke<ChatResult>("start_room_chat", { request });
+}
+
+export async function quickEditStart(
+  request: {
+    editId: string;
+    projectId: string;
+    message: string;
+    repositoryPath: string;
+    requestedAgent?: AgentKind;
+  },
+): Promise<QuickEditResult> {
+  return invoke<QuickEditResult>("quick_edit_start", { request });
+}
+
+export async function quickEditApply(editId: string): Promise<void> {
+  return invoke("quick_edit_apply", { request: { editId } });
+}
+
+export async function quickEditDiscard(editId: string): Promise<void> {
+  return invoke("quick_edit_discard", { request: { editId } });
 }
 
 export async function testProviderConnection(request: {

@@ -32,7 +32,7 @@ import {
   useState,
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { createRun, participantCanChat, participantIsRunnable, routeForPhase, selectChatParticipant, selectParticipant } from "./coordination";
+import { createRun, participantCanChat, participantCanQuickEdit, participantIsRunnable, routeForPhase, selectChatParticipant, selectParticipant } from "./coordination";
 import type {
   AgentKind,
   ExecutionReceipt,
@@ -41,6 +41,7 @@ import type {
   ProviderProfile,
   Project,
   ProjectSettings,
+  QuickEditResult,
   RoomMessage,
   Run,
   RunState,
@@ -61,6 +62,9 @@ import {
   projectList,
   projectPick,
   projectSelect,
+  quickEditApply,
+  quickEditDiscard,
+  quickEditStart,
   saveProviderProfile,
   saveProjectSettings,
   startRoomChat,
@@ -98,7 +102,7 @@ const emptyRun: Run = {
   revisionCount: 0,
   startedAt: "",
 };
-type ComposerMode = "chat" | "ship";
+type ComposerMode = "ask" | "quick-edit" | "ship";
 type LiveActivityItem = { title: string; detail: string };
 
 const activeStates: RunState[] = [
@@ -1006,7 +1010,9 @@ function Inspector({
                   <small>{participant.installed ? participant.version ?? "Installed" : "Not installed"}</small>
                 </span>
                 <span className={`status-chip mode-${participant.capabilities.autonomyMode}`}>
-                  {autonomyLabel(participant.capabilities.autonomyMode)}
+                  {participant.kind === "antigravity"
+                    ? "Ship only — no read-only mode"
+                    : autonomyLabel(participant.capabilities.autonomyMode)}
                 </span>
               </div>
               <p>{participant.capabilities.autonomyNote}</p>
@@ -1166,8 +1172,9 @@ export function App() {
   const [discoveringModelsKind, setDiscoveringModelsKind] = useState<AgentKind>();
   const [run, setRun] = useState<Run>(emptyRun);
   const [objective, setObjective] = useState("");
-  const [composerMode, setComposerMode] = useState<ComposerMode>("chat");
+  const [composerMode, setComposerMode] = useState<ComposerMode>("ask");
   const [chatSending, setChatSending] = useState(false);
+  const [quickEdit, setQuickEdit] = useState<QuickEditResult>();
   const [activity, setActivity] = useState<LiveActivityItem[]>([]);
   const [streamTitle, setStreamTitle] = useState("Provider events");
   const [activeView, setActiveView] = useState<PrimaryView>("rooms");
@@ -1437,7 +1444,9 @@ export function App() {
   const activeShipAgent = run.currentOwner
     ?? (run.state === "reviewing" ? run.reviewer : run.writer)
     ?? run.reviewer;
-  const sideChatAvailable = activeStates.includes(run.state) && run.state !== "promoting";
+  const sideChatAvailable = activeStates.includes(run.state)
+    && run.state !== "promoting"
+    && activeShipAgent !== "antigravity";
 
   const visibleMessages = useMemo(() => {
     const query = searchQuery.trim().toLocaleLowerCase();
@@ -1603,7 +1612,7 @@ export function App() {
     nextRun.degradedReview = Boolean(writer && reviewer === writer);
     nextRun.route = routeForPhase("build", writer, reviewer);
     setRun(nextRun);
-    setComposerMode("chat");
+    setComposerMode("ask");
     setObjective("");
     setActivity([]);
     if (recordHumanMessage) {
@@ -1773,14 +1782,9 @@ export function App() {
         activeRunId: activeShip ? run.id : undefined,
       });
       if (result.shipIntent && !activeShip) {
-        setChatSending(false);
-        chatRunRef.current = undefined;
         setComposerMode("ship");
-        await runShipObjective(
-          result.shipIntent.objective,
-          participant,
-          false,
-        );
+        setObjective(result.shipIntent.objective);
+        await refreshRoom(project.id);
       } else {
         await refreshRoom(project.id);
       }
@@ -1794,10 +1798,64 @@ export function App() {
     }
   }
 
+  async function submitQuickEdit() {
+    const text = objective.trim();
+    if (!text || chatSending) return;
+    const priorAgent = [...messages].reverse().find(
+      (message) => message.kind === "agent" && message.sender !== "system" && message.sender !== "human",
+    )?.sender as AgentKind | undefined;
+    const participant = selectChatParticipant(text, environment.participants, priorAgent);
+    if (!participant || !native) {
+      setUiError(participant ? "Quick Edit is available in the Tauri desktop app." : "No Full-tier participant can perform a Quick Edit.");
+      return;
+    }
+    const editId = crypto.randomUUID();
+    setUiError("");
+    setObjective("");
+    setChatSending(true);
+    try {
+      setQuickEdit(await quickEditStart({
+        editId,
+        projectId: project.id,
+        message: text,
+        repositoryPath: project.repositoryPath,
+        requestedAgent: participant,
+      }));
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChatSending(false);
+    }
+  }
+
+  async function applyQuickEdit() {
+    if (!quickEdit) return;
+    setUiError("");
+    try {
+      await quickEditApply(quickEdit.editId);
+      setQuickEdit(undefined);
+      await refreshRoom(project.id);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function discardQuickEdit() {
+    if (!quickEdit) return;
+    setUiError("");
+    try {
+      await quickEditDiscard(quickEdit.editId);
+      setQuickEdit(undefined);
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   async function submitComposer(event: FormEvent) {
     event.preventDefault();
     if (sideChatAvailable) await submitChat(true);
-    else if (composerMode === "chat") await submitChat();
+    else if (composerMode === "ask") await submitChat();
+    else if (composerMode === "quick-edit") await submitQuickEdit();
     else await submitObjective();
   }
 
@@ -1840,7 +1898,7 @@ export function App() {
     }
     setUiError("");
     setActivity([]);
-    setComposerMode("chat");
+    setComposerMode("ask");
     setRun((current) => ({
       ...current,
       state: "working",
@@ -2045,13 +2103,29 @@ export function App() {
           )}
         </div>
 
+        {quickEdit && (
+          <section className="quick-edit-preview" aria-label="Quick Edit preview">
+            <p><strong>{agentNames[quickEdit.participant]}</strong>: {quickEdit.summary}</p>
+            <pre>{quickEdit.diff || "No file changes were produced."}</pre>
+            <div className="composer-actions">
+              <button type="button" className="send-button" onClick={() => void applyQuickEdit()} disabled={!quickEdit.diff}>
+                <Check size={15} /> Apply edit
+              </button>
+              <button type="button" className="danger-button" onClick={() => void discardQuickEdit()}>
+                <X size={15} /> Discard
+              </button>
+            </div>
+          </section>
+        )}
         <form className="composer" onSubmit={submitComposer}>
           <div className="composer-context">
             <label className="composer-label" htmlFor="room-objective">
-              {composerMode === "chat"
+              {composerMode === "ask"
                 ? sideChatAvailable
                   ? "Ask about active Ship run"
-                  : "Project chat and quick edits"
+                  : "Ask a question"
+                : composerMode === "quick-edit"
+                  ? "Quick Edit"
                 : run.state === "promoting"
                   ? "Promoting verified work"
                   : sideChatAvailable
@@ -2061,11 +2135,20 @@ export function App() {
             <div className="composer-mode" role="group" aria-label="Message route">
               <button
                 type="button"
-                className={composerMode === "chat" ? "active" : ""}
-                onClick={() => setComposerMode("chat")}
-                aria-pressed={composerMode === "chat"}
+                className={composerMode === "ask" ? "active" : ""}
+                onClick={() => setComposerMode("ask")}
+                aria-pressed={composerMode === "ask"}
               >
-                Chat
+                Ask
+              </button>
+              <button
+                type="button"
+                className={composerMode === "quick-edit" ? "active" : ""}
+                onClick={() => setComposerMode("quick-edit")}
+                aria-pressed={composerMode === "quick-edit"}
+                disabled={sideChatAvailable || run.state === "promoting" || Boolean(quickEdit)}
+              >
+                Quick Edit
               </button>
               <button
                 type="button"
@@ -2089,10 +2172,12 @@ export function App() {
               }
             }}
             placeholder={
-              composerMode === "chat"
+              composerMode === "ask"
                 ? sideChatAvailable
                   ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
-                  : "Ask a question or request a quick edit..."
+                  : "Ask a question..."
+                : composerMode === "quick-edit"
+                  ? "Describe a small, bounded edit..."
                 : run.state === "promoting"
                   ? "Promotion is finishing safely..."
                   : sideChatAvailable
@@ -2104,15 +2189,19 @@ export function App() {
           />
           <div className="composer-actions">
             <div className="mention-list">
-              {environment.participants.map((participant) => (
+              {environment.participants
+                .filter((participant) => composerMode === "ship" || participant.kind !== "antigravity")
+                .map((participant) => (
                 <button
                   type="button"
                   key={participant.kind}
                   disabled={
                     sideChatAvailable
                       ? participant.kind !== activeShipAgent
-                      : composerMode === "chat"
+                      : composerMode === "ask"
                       ? !participantCanChat(participant)
+                      : composerMode === "quick-edit"
+                        ? !participantCanQuickEdit(participant)
                       : run.state === "promoting"
                         ? true
                         : sideChatAvailable
@@ -2125,7 +2214,11 @@ export function App() {
                     )
                   }
                   title={
-                    (composerMode === "chat" ? participantCanChat(participant) : participantIsRunnable(participant))
+                    (composerMode === "ask"
+                      ? participantCanChat(participant)
+                      : composerMode === "quick-edit"
+                        ? participantCanQuickEdit(participant)
+                        : participantIsRunnable(participant))
                       ? `${autonomyLabel(participant.capabilities.autonomyMode)}: ${participant.capabilities.autonomyNote}`
                       : participant.capabilities.autonomyNote
                   }
@@ -2145,13 +2238,15 @@ export function App() {
                 type="submit"
                 className="send-button"
                 disabled={!objective.trim() || (composerMode === "ship" && run.state === "promoting")}
-                aria-busy={composerMode === "chat" ? chatSending : false}
+                aria-busy={composerMode === "ask" || composerMode === "quick-edit" ? chatSending : false}
               >
-                {composerMode === "chat" ? <Sparkles size={15} /> : <Play size={15} fill="currentColor" />}
-                {composerMode === "chat"
+                {composerMode === "ask" || composerMode === "quick-edit" ? <Sparkles size={15} /> : <Play size={15} fill="currentColor" />}
+                {composerMode === "ask"
                   ? sideChatAvailable
                     ? "Ask active run"
-                    : "Send"
+                    : "Ask"
+                  : composerMode === "quick-edit"
+                    ? "Preview edit"
                   : run.state === "promoting"
                     ? "Promoting"
                     : sideChatAvailable

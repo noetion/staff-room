@@ -52,6 +52,13 @@ struct Database(Mutex<Connection>);
 struct RuntimeState {
     cancellations: AsyncMutex<HashMap<String, watch::Sender<bool>>>,
     provider_cache: AsyncMutex<HashMap<String, Participant>>,
+    quick_edits: AsyncMutex<HashMap<String, QuickEditState>>,
+}
+
+#[derive(Clone)]
+struct QuickEditState {
+    repository: PathBuf,
+    worktree: PathBuf,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -222,6 +229,32 @@ struct ChatResult {
     actual_model: Option<String>,
     stopped: bool,
     ship_intent: Option<ShipIntent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuickEditRequest {
+    edit_id: String,
+    project_id: String,
+    message: String,
+    repository_path: String,
+    requested_agent: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QuickEditResult {
+    edit_id: String,
+    participant: String,
+    summary: String,
+    diff: String,
+    stopped: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QuickEditActionRequest {
+    edit_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -2625,7 +2658,7 @@ async fn invoke_provider(
     run_id: &str,
     participant: &Participant,
     phase: Phase,
-    allow_writes: bool,
+    mode: ProviderMode,
     prompt: &str,
     repository: &Path,
     session_id: Option<&str>,
@@ -2671,13 +2704,6 @@ async fn invoke_provider(
     };
     let effective_session = preallocated_cursor_session.clone().or_else(|| session_id.map(str::to_owned));
     let effective_session_id = effective_session.as_deref();
-    let mode = if !allow_writes {
-        ProviderMode::Ask
-    } else if phase == Phase::Chat {
-        ProviderMode::QuickEdit
-    } else {
-        ProviderMode::Ship
-    };
     let handoff_contract = (phase != Phase::Chat).then(|| handoff_contract(phase));
     let prepared = providers::build_command(
         kind,
@@ -3599,6 +3625,60 @@ fn create_worktree(
         .map_err(|error| error.to_string())?
         .join("worktrees");
     create_isolation_at_root(repository, run_id, &root)
+}
+
+fn create_quick_edit_worktree(
+    app: &AppHandle,
+    repository: &Path,
+    edit_id: &str,
+) -> Result<PathBuf, String> {
+    let root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("quick-edits");
+    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    let short = edit_id
+        .chars()
+        .filter(|value| *value != '-')
+        .take(10)
+        .collect::<String>();
+    let worktree = root.join(short);
+    if worktree.exists() {
+        return Err(format!(
+            "Quick Edit worktree path already exists: {}",
+            worktree.to_string_lossy()
+        ));
+    }
+    git(
+        repository,
+        &[
+            "worktree".to_owned(),
+            "add".to_owned(),
+            "--detach".to_owned(),
+            worktree.to_string_lossy().into_owned(),
+            "HEAD".to_owned(),
+        ],
+    )?;
+    Ok(worktree)
+}
+
+fn remove_quick_edit_worktree(repository: &Path, worktree: &Path) -> Result<(), String> {
+    git(
+        repository,
+        &[
+            "worktree".to_owned(),
+            "remove".to_owned(),
+            "--force".to_owned(),
+            worktree.to_string_lossy().into_owned(),
+        ],
+    )
+    .map(|_| ())
+}
+
+fn quick_edit_diff(worktree: &Path) -> Result<String, String> {
+    git_static(worktree, &["add", "-N", "--", "."])?;
+    git_static(worktree, &["diff", "--binary", "--no-ext-diff", "HEAD"])
 }
 
 fn commit_managed_changes(worktree: &Path, objective: &str) -> Result<bool, String> {
@@ -4542,7 +4622,7 @@ async fn test_provider_connection(
         &run_id,
         &participant,
         Phase::Chat,
-        false,
+        ProviderMode::Ask,
         "This is an Agent Room connection test. Reply with exactly READY. Do not inspect or modify files.",
         &repository,
         None,
@@ -4732,6 +4812,9 @@ async fn start_room_chat(
         .find(|participant| participant.installed)
         .ok_or_else(|| "No installed coding-agent CLI is available for chat.".to_owned())?
     };
+    if participant.kind == "antigravity" {
+        return Err("Antigravity is available for Ship only because it has no true read-only mode.".to_owned());
+    }
     let profile = provider_profile(database, &request.project_id, &participant.kind, "chat")?;
     let settings = project_settings(database, &request.project_id)?;
     let session_id = load_chat_session(database, &request.project_id, &participant.kind)?;
@@ -4776,7 +4859,6 @@ async fn start_room_chat(
         chat_mode_detail,
         None,
     );
-    let chat_can_write = active_run.is_none() && participant.capabilities.write_mode;
     let mut prompt = if active_run.is_some() {
         format!(
             "You are in a read-only side chat attached to an active Agent Room Ship worktree. \
@@ -4786,9 +4868,8 @@ async fn start_room_chat(
         )
     } else {
         format!(
-            "You are in the current repository's fast working chat. Answer questions directly and concisely. \
-             When the user explicitly requests a small, bounded repository edit, make that edit directly in the attached checkout and report what changed. \
-             Do not create a worktree, run broad project verification, or use an Agent Room handoff. \
+            "You are in Ask mode for the current repository. Answer questions directly and concisely. \
+             Do not modify files, create a worktree, run broad project verification, or use an Agent Room handoff. \
              For substantial or unattended implementation work, do not edit first; use the autonomous Ship intent when its trigger matches.\n\nUser message:\n{message}"
         )
     };
@@ -4809,7 +4890,7 @@ async fn start_room_chat(
         &request.run_id,
         &participant,
         Phase::Chat,
-        chat_can_write,
+        ProviderMode::Ask,
         &prompt,
         &repository,
         session_id.as_deref(),
@@ -4986,6 +5067,169 @@ async fn start_room_chat(
         stopped: false,
         ship_intent,
     })
+}
+
+#[tauri::command]
+async fn quick_edit_start(
+    app: AppHandle,
+    database: State<'_, Database>,
+    runtime: State<'_, RuntimeState>,
+    request: QuickEditRequest,
+) -> Result<QuickEditResult, String> {
+    let database = database.inner();
+    let repository = PathBuf::from(&request.repository_path);
+    git_static(&repository, &["rev-parse", "--show-toplevel"])
+        .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
+    let message = request.message.trim();
+    if message.is_empty() {
+        return Err("Enter a Quick Edit request before sending.".to_owned());
+    }
+    let participants = participants_with_connections(
+        database,
+        &request.project_id,
+        cached_participants(runtime.inner(), false).await?,
+    )?;
+    let participant = if let Some(requested) = request.requested_agent.as_deref() {
+        participants
+            .into_iter()
+            .find(|participant| participant.kind == requested)
+            .ok_or_else(|| format!("The requested {requested} CLI is unavailable."))?
+    } else {
+        participants
+            .into_iter()
+            .find(|participant| participant.installed && participant.kind != "antigravity")
+            .ok_or_else(|| "No Full-tier coding-agent CLI is available for Quick Edit.".to_owned())?
+    };
+    if !participant.installed || participant.kind == "antigravity" {
+        return Err("Quick Edit is available only to Codex, Claude Code, and Cursor Agent.".to_owned());
+    }
+    let worktree = create_quick_edit_worktree(&app, &repository, &request.edit_id)?;
+    let state = QuickEditState {
+        repository,
+        worktree: worktree.clone(),
+    };
+    runtime
+        .quick_edits
+        .lock()
+        .await
+        .insert(request.edit_id.clone(), state.clone());
+    let profile = provider_profile(database, &request.project_id, &participant.kind, "chat")?;
+    let artifact_dir = run_artifact_directory(&app, &request.edit_id)?;
+    let output_path = artifact_dir.join("quick-edit.final.txt");
+    let (cancel_sender, cancel_receiver) = watch::channel(false);
+    runtime
+        .cancellations
+        .lock()
+        .await
+        .insert(request.edit_id.clone(), cancel_sender);
+    let prompt = format!(
+        "You are in Quick Edit mode inside an isolated worktree. Make only the requested bounded edit. \
+         Do not modify the user's attached checkout, create another worktree, run broad verification, or start Ship. \
+         Explain the completed edit briefly.\n\nUser request:\n{message}"
+    );
+    let result = invoke_provider(
+        &app,
+        &request.edit_id,
+        &participant,
+        Phase::Chat,
+        ProviderMode::QuickEdit,
+        &prompt,
+        &worktree,
+        None,
+        profile.model.as_deref(),
+        profile.effort.as_deref(),
+        &output_path,
+        cancel_receiver,
+    )
+    .await;
+    runtime.cancellations.lock().await.remove(&request.edit_id);
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            runtime.quick_edits.lock().await.remove(&request.edit_id);
+            let _ = remove_quick_edit_worktree(&state.repository, &state.worktree);
+            return Err(error);
+        }
+    };
+    if !result.success {
+        runtime.quick_edits.lock().await.remove(&request.edit_id);
+        let _ = remove_quick_edit_worktree(&state.repository, &state.worktree);
+        return Err(provider_failure_reason(&participant.name, "the Quick Edit", &result));
+    }
+    Ok(QuickEditResult {
+        edit_id: request.edit_id,
+        participant: participant.kind,
+        summary: result.summary,
+        diff: quick_edit_diff(&worktree)?,
+        stopped: result.stopped,
+    })
+}
+
+#[tauri::command]
+async fn quick_edit_apply(
+    app: AppHandle,
+    runtime: State<'_, RuntimeState>,
+    request: QuickEditActionRequest,
+) -> Result<(), String> {
+    let state = runtime
+        .quick_edits
+        .lock()
+        .await
+        .get(&request.edit_id)
+        .cloned()
+        .ok_or_else(|| "This Quick Edit is no longer available.".to_owned())?;
+    let diff = quick_edit_diff(&state.worktree)?;
+    if diff.trim().is_empty() {
+        return Err("The Quick Edit produced no changes to apply.".to_owned());
+    }
+    let patch = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("quick-edits")
+        .join(format!(".apply-{}.patch", request.edit_id));
+    std::fs::write(&patch, diff).map_err(|error| error.to_string())?;
+    let apply_result = (|| {
+        git(
+            &state.repository,
+            &[
+                "apply".to_owned(),
+                "--check".to_owned(),
+                "--binary".to_owned(),
+                patch.to_string_lossy().into_owned(),
+            ],
+        )?;
+        git(
+            &state.repository,
+            &[
+                "apply".to_owned(),
+                "--binary".to_owned(),
+                patch.to_string_lossy().into_owned(),
+            ],
+        )
+    })();
+    let _ = std::fs::remove_file(&patch);
+    apply_result?;
+    remove_quick_edit_worktree(&state.repository, &state.worktree)?;
+    runtime.quick_edits.lock().await.remove(&request.edit_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn quick_edit_discard(
+    runtime: State<'_, RuntimeState>,
+    request: QuickEditActionRequest,
+) -> Result<(), String> {
+    let state = runtime
+        .quick_edits
+        .lock()
+        .await
+        .get(&request.edit_id)
+        .cloned()
+        .ok_or_else(|| "This Quick Edit is no longer available.".to_owned())?;
+    remove_quick_edit_worktree(&state.repository, &state.worktree)?;
+    runtime.quick_edits.lock().await.remove(&request.edit_id);
+    Ok(())
 }
 
 async fn execute_room_run(
@@ -5407,7 +5651,7 @@ async fn execute_room_run(
         &request.run_id,
         builder,
         Phase::Build,
-        true,
+        ProviderMode::Ship,
         &build_packet,
         &worktree,
         recovery_session.as_deref(),
@@ -5684,7 +5928,7 @@ async fn execute_room_run(
         &request.run_id,
         reviewer,
         Phase::Review,
-        false,
+        ProviderMode::Ship,
         &review_packet,
         &worktree,
         None,
@@ -5869,9 +6113,9 @@ async fn execute_room_run(
         let revision_result = invoke_provider(
             &app,
             &request.run_id,
-            builder,
-            Phase::Revise,
-            true,
+        builder,
+        Phase::Revise,
+        ProviderMode::Ship,
             &revision_packet,
             &worktree,
             build_result.session_id.as_deref(),
@@ -6054,9 +6298,9 @@ async fn execute_room_run(
         let final_result = invoke_provider(
             &app,
             &request.run_id,
-            reviewer,
-            Phase::FinalReview,
-            false,
+        reviewer,
+        Phase::FinalReview,
+        ProviderMode::Ship,
             &final_packet,
             &worktree,
             review_result.session_id.as_deref(),
@@ -6526,6 +6770,9 @@ pub fn run() {
             test_provider_connection,
             discover_provider_models,
             start_room_chat,
+            quick_edit_start,
+            quick_edit_apply,
+            quick_edit_discard,
             start_room_run,
             stop_run
         ])
@@ -7499,6 +7746,29 @@ mod tests {
             "--workspace", "C:/worktree", "--sandbox", "enabled", "--mode", "ask",
             "--model", "claude-opus-4-8[effort=high]", "--resume", "chat-1", "Read the packet."
         ]);
+    }
+
+    #[test]
+    fn antigravity_review_uses_plan_without_permission_bypass() {
+        let request = TurnRequest {
+            mode: ProviderMode::Ship,
+            phase: "review",
+            prompt: "Review the diff.",
+            repository: Path::new("C:/worktree"),
+            session_id: None,
+            model: None,
+            effort: None,
+            final_output_path: Path::new("C:/output.txt"),
+            structured_output: false,
+            handoff_contract: None,
+        };
+        let command = providers::build_command("antigravity", &request)
+            .expect("build Antigravity review command");
+        assert!(command.args.windows(2).any(|pair| pair == ["--mode", "plan"]));
+        assert!(!command
+            .args
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"));
     }
 
     #[test]

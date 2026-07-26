@@ -11,8 +11,10 @@ export function participantIsRunnable(participant: Participant): boolean {
 }
 
 export function participantCanChat(participant: Participant): boolean {
-  return participant.installed && participant.capabilities.nonInteractiveTurn;
+  return participant.kind !== "antigravity" && participant.installed && participant.capabilities.nonInteractiveTurn;
 }
+
+export const participantCanQuickEdit = participantCanChat;
 
 export function explicitAgent(objective: string): AgentKind | undefined {
   return objective.match(mentionPattern)?.[1].toLowerCase() as AgentKind | undefined;

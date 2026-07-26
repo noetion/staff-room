@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   explicitAgent,
   participantCanChat,
+  participantCanQuickEdit,
   participantIsRunnable,
   selectChatParticipant,
 } from "./coordination";
@@ -60,5 +61,16 @@ describe("participant selection", () => {
   it("allows project chat with an installed but unverified CLI", () => {
     const unverified = participants.map((participant) => participant.kind === "claude" ? { ...participant, connectionStatus: "unverified" as const } : participant);
     expect(selectChatParticipant("@claude hello", unverified)).toBe("claude");
+  });
+
+  it("excludes Ship-only Antigravity from Ask and Quick Edit", () => {
+    const antigravity: Participant = {
+      ...participants[0],
+      kind: "antigravity",
+      name: "Antigravity",
+    };
+    expect(participantCanChat(antigravity)).toBe(false);
+    expect(participantCanQuickEdit(antigravity)).toBe(false);
+    expect(selectChatParticipant("@antigravity explain this", [antigravity])).toBeUndefined();
   });
 });

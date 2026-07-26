@@ -157,6 +157,14 @@ export interface ChatResult {
   shipIntent?: ShipIntent;
 }
 
+export interface QuickEditResult {
+  editId: string;
+  participant: AgentKind;
+  summary: string;
+  diff: string;
+  stopped: boolean;
+}
+
 export interface ShipIntent {
   schemaVersion: 1;
   objective: string;
