@@ -4,15 +4,17 @@ Agent Room is a local-first desktop room that carries one engineering objective,
 
 The working v1 provides:
 
-- instant project chat as the default route: Enter sends one selected CLI in the attached repository without creating a worktree;
-- an optional project-scoped autonomous Ship skill that lets a chat agent propose a structured implementation objective, then hands control to Agent Room's isolated verification, review, and promotion route without routine approval prompts;
+- instant project working chat as the default route: Enter sends one selected CLI in the attached repository without creating a worktree, and explicit bounded edits can update the attached checkout directly;
+- an optional project-scoped autonomous Ship skill that reserves the isolated verification, review, and promotion route for substantial or unattended implementation instead of simple file edits;
 - an explicit Ship route for directly stated implementation objectives;
 - Codex, Claude Code, Cursor Agent, and Antigravity automation probes that verify required flags from each installed CLI's live help output;
 - cached provider discovery on the message path, with an explicit refresh control instead of repeating every CLI probe before every turn;
 - Antigravity invocation with its managed worktree explicitly attached through `--add-dir`, plus its declared sandboxed unattended permission mode;
 - explicit `@agent` selection with a deterministic fallback;
-- a managed Git branch and worktree for every objective;
-- provider-native streaming, cancellation, session capture, and revision resume where supported;
+- isolated execution for every objective: a Git worktree for a clean checkout, or a private snapshot clone when current uncommitted files must be included;
+- provider-native streaming, cancellation, session capture, and revision resume where supported, with provider-reported reasoning and tool activity normalized into the room timeline while raw diagnostics remain in durable logs;
+- in-conversation Ship progress showing Build, Verify, Review, optional revision, final review, and Promote stages instead of relying on a detached status banner;
+- read-only side chat against the active managed workspace while build, verification, review, or revision continues, so the user can ask what is happening without starting another run or interrupting the route; side chat closes during final promotion so the worktree or snapshot clone can be cleaned up safely;
 - one compact four-provider settings grid with per-route Model and Effort controls for Chat, Build, and Review; exact maintained model IDs; live Cursor or Antigravity account discovery; and a grouped Cursor catalogue that does not repeat effort, context, thinking, and speed presets as separate models;
 - bounded cross-provider Chat handoffs, while resumed native sessions receive only the new turn;
 - durable per-phase execution receipts with preflight, first-output, and total latency; requested and provider-reported models; token/cost telemetry when emitted; and an explicit "not reported" state for provider quota and reset-window data;
@@ -25,8 +27,11 @@ The working v1 provides:
 - a repository-owned autonomous Ship skill whose schema is validated by Agent Room before any implementation route can start;
 - a measured 48 KiB context packet containing applicable instructions, selected skill references, memory, handoff, diff, and checks rather than the complete room transcript;
 - schema-v1 JSON handoffs containing status, summary, changed files, checks, findings, and next action;
-- policy-gated fast-forward promotion only when the base checkout is clean and unchanged;
+- policy-gated promotion: clean checkouts fast-forward, while dirty-checkout runs verify an exact workspace fingerprint and reapply only the reviewed agent delta without committing or stashing the user's work;
 - preserved worktrees on failure or attention states, with a bounded Resume recovery action;
+- restart reconciliation and coordinator-error finalisation, so an interrupted Ship run becomes recoverable instead of remaining permanently “Working”;
+- a single desktop process per user, preventing a second launch from misclassifying an active run while focusing the existing window instead;
+- process-scoped Git trust for managed worktrees and background-only Windows subprocesses, preventing dubious-ownership failures and unwanted console windows without changing global Git configuration;
 - durable capped stdout/stderr logs and final responses under the app's local run-artifact directory;
 - desktop notifications for completion, failure, stop, and required attention;
 - SQLite-backed rooms, runs, activations, evidence, and provider session identifiers;

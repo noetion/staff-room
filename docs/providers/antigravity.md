@@ -13,9 +13,9 @@ The desktop application is not substituted for the automation CLI. Agent Room pr
 
 - Non-interactive turn: `agy --print`
 - Terminal restriction: `--sandbox`
-- Write mode: `--dangerously-skip-permissions`, used only for build/revision inside the managed worktree
+- Headless autonomy: `--dangerously-skip-permissions`, always paired with `--sandbox` because print mode cannot present a permission prompt
 - Session resume: `--conversation <id>`
-- Review mode remains sandboxed and does not request permission bypass
+- Chat and Review remain instruction-level read-only while using the same sandboxed headless permission contract
 - Cancellation: terminate only the child process owned by the run
 
 The installed CLI print surface is text-first. Agent Room does not claim streaming, structured output, or usage reporting because version `1.1.7` does not expose those capabilities in live help. Provider-specific session history recovery remains out of scope.

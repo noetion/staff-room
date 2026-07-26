@@ -28,7 +28,7 @@ Agent Room adopts those mechanics without adopting their broader IDE, server, ta
 ```text
 objective
   -> select builder
-  -> create managed branch + worktree
+  -> create managed worktree or dirty-checkout snapshot clone
   -> build in safest supported autonomous mode
   -> capture native session + repository delta
   -> run detected verification commands
@@ -46,7 +46,7 @@ The normal flow has no per-command human approval. User attention is reserved fo
 - authentication or provider usage limits;
 - a destructive or external action outside the repository policy;
 - a material product decision the objective does not answer;
-- a changed or dirty base checkout that prevents safe promotion;
+- a base checkout that changed after its isolated snapshot and therefore prevents safe promotion;
 - a merge conflict;
 - failed verification after the bounded repair pass;
 - failed or inconclusive final review;
@@ -71,7 +71,7 @@ Provider policy:
 - Codex: `--ask-for-approval never` with `workspace-write` for build/revision and `read-only` for review.
 - Claude Code: `--permission-mode auto` when its live help proves that choice. Unsupported historical flags are not passed.
 - Cursor Agent: read-only Chat uses proved ask mode, sandboxing, and partial output; `--force` is used only for unattended writes inside the managed worktree boundary.
-- Antigravity: installed `agy 1.1.7` proves sandboxed print mode, permission bypass, and exact conversation resume. Text-only output and unavailable usage reporting remain explicit downgrades.
+- Antigravity: installed `agy 1.1.7` proves sandboxed print mode, permission bypass, and exact conversation resume. Headless print mode cannot present permission prompts, so every unattended Antigravity phase combines `--sandbox` with `--dangerously-skip-permissions`; Chat and Review remain instruction-level read-only. Text-only output and unavailable usage reporting remain explicit downgrades.
 
 The probe executes `--version` and `--help`, plus provider subcommand help where needed. An executable being present is not sufficient for a ready state. Every flag required for the claimed autonomy mode must be present in current help output. Known Windows installer locations are checked after `PATH`, without substituting a desktop editor executable for its automation CLI.
 
@@ -90,7 +90,7 @@ Same-provider review is a functional fallback, not equivalent independence. It l
 Each objective receives:
 
 - a branch named `agent-room/<run>`;
-- a managed Git worktree in the application cache;
+- a managed Git worktree in the application cache for a clean checkout, or a private snapshot clone containing the current tracked and non-ignored untracked state for a dirty checkout;
 - the base branch and base HEAD captured before execution;
 - a preserved worktree on failure or unresolved attention state.
 
@@ -105,6 +105,12 @@ Promotion is automatic only when:
 - a fast-forward merge succeeds.
 
 If any condition fails, Agent Room does not modify the base checkout. It preserves the branch/worktree and reports the recovery path.
+
+Ship does not require a manual commit or stash. A clean checkout uses a normal Git worktree and fast-forward promotion. A dirty checkout uses a private clone in the application cache, applies the current tracked delta and non-ignored untracked files, and commits that snapshot only inside the private clone. Review and verification compare the agent result against that snapshot, not stale `HEAD`.
+
+Before promotion, Agent Room verifies that the attached branch name, HEAD, file modes, and a SHA-256 fingerprint of its staged, unstaged, deleted, and non-ignored untracked state still match the captured snapshot. It then applies only the reviewed agent delta back to the working tree without changing the user's branch HEAD or index. If the checkout changed, switched branch, or detached HEAD while Ship was active, promotion stops and preserves the isolated result instead of overwriting newer work.
+
+Non-ignored untracked files are included because omitting them could make the agent validate stale or incomplete code. They exist in the private local clone until successful cleanup, or remain there when recovery evidence is intentionally preserved. Secrets should be covered by the repository's ignore rules before running autonomous tools.
 
 ## Compact context packet
 
@@ -162,6 +168,8 @@ Build and revision statuses are `completed`, `blocked`, or `failed`. Review stat
 - manual recovery attempts: 2.
 
 Each phase writes durable capped stdout, stderr, and final-response artifacts in the application local-data run directory. A failed, stopped, or waiting run exposes `Resume recovery`. Recovery reuses the same worktree, branch, base HEAD, objective, and builder session when available. It reruns the bounded build, verification, review, and promotion route. Exhausted recovery attempts require manual inspection.
+
+Unexpected coordinator errors finalise the durable run as failed and preserve its worktree. On application startup, any run left in an active state by a prior process is reconciled to stopped and recoverable.
 
 ## Completion contract
 
@@ -231,7 +239,7 @@ The v1 is complete when:
 
 1. all four CLIs are probed and report truthful autonomy and resume capabilities;
 2. any installed participant can be explicitly selected;
-3. a run creates and uses a managed worktree;
+3. a run creates and uses a managed worktree or dirty-checkout snapshot clone without requiring a manual commit or stash;
 4. provider events stream into the room and Stop terminates only the owned process;
 5. builder output, Git delta, and checks reach the reviewer without copying;
 6. one revision can resume the builder session;

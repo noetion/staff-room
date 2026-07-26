@@ -11,12 +11,14 @@ import {
   GitBranch,
   HardDrive,
   History,
+  Minus,
   PanelRight,
   Play,
   RefreshCw,
   Search,
   Settings,
   ShieldCheck,
+  Square,
   Sparkles,
   TerminalSquare,
   Workflow,
@@ -29,6 +31,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { createRun, participantCanChat, participantIsRunnable, routeForPhase, selectChatParticipant, selectParticipant } from "./coordination";
 import type {
   AgentKind,
@@ -67,6 +70,7 @@ import { previewEnvironment, seedMessages, seedProject, seedRun } from "./seed";
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 type PrimaryView = "rooms" | "activity" | "settings";
 type ComposerMode = "chat" | "ship";
+type LiveActivityItem = { title: string; detail: string };
 
 const activeStates: RunState[] = [
   "selecting",
@@ -208,11 +212,15 @@ function ParticipantMark({ participant }: { participant: Participant }) {
 function RunLens({
   run,
   participants,
+  activity,
+  streamTitle,
   onStop,
   onResume,
 }: {
   run: Run;
   participants: Participant[];
+  activity: LiveActivityItem[];
+  streamTitle: string;
   onStop: () => void;
   onResume: () => void;
 }) {
@@ -227,77 +235,99 @@ function RunLens({
     (run.recoveryCount ?? 0) < 2;
 
   return (
-    <section className={`run-lens state-${run.state}`} aria-label="Current run" aria-live="polite">
-      <div className="lens-glow" aria-hidden="true" />
-      <div className="lens-copy">
-        <span className="eyebrow">
-          <span className="state-pulse" />
-          {run.state === "ready" ? "Room ready" : run.state.replace("-", " ")}
+    <article
+      className={`timeline-entry entry-run-progress state-${run.state}`}
+      aria-label="Current Ship run"
+      aria-live="polite"
+    >
+      <div className="entry-rail">
+        <span className="entry-dot progress-dot">
+          <Workflow size={13} />
         </span>
-        <strong>
-          {run.state === "waiting"
-            ? "Your attention is needed"
-            : active
-              ? `${active.name} owns this phase`
-              : run.state === "complete"
-                ? "Verified handoff complete"
-                : "State one objective"}
-        </strong>
-        <span className="lens-objective">{run.stopReason ?? run.objective}</span>
+        <span className="entry-line" />
       </div>
-
-      <div className="route-shell">
-        <span className="handoff-beam" aria-hidden="true" />
-        <div className="route" aria-label="Autonomous route">
-          {run.route.length ? (
-            run.route.map((step, index) => (
-              <div className={`route-step ${step.state}`} key={`${step.label}-${index}`}>
-                <span>{step.agent ? initials(step.agent) : index + 1}</span>
-                <small>{step.label}</small>
-                {index < run.route.length - 1 && <ArrowRight size={13} aria-hidden="true" />}
-              </div>
-            ))
-          ) : (
-            <div className="route-placeholder">Build / verify / review / promote</div>
-          )}
+      <section className="entry-content run-progress">
+        <header>
+          <span className="state-pulse" />
+          <strong>Agent Room / Ship</strong>
+          <span>{run.state.replace("-", " ")}</span>
+        </header>
+        <div className="progress-summary">
+          <strong>
+            {run.state === "waiting"
+              ? "Your attention is needed"
+              : active
+                ? `${active.name} is handling ${run.route.find((step) => step.state === "current")?.label ?? "this phase"}`
+                : run.state === "complete"
+                  ? "Verified workflow complete"
+                  : "Ship workflow"}
+          </strong>
+          <p>{run.stopReason ?? run.objective}</p>
         </div>
-      </div>
 
-      <div className="lens-action">
-        {running ? (
-          <button type="button" className="danger-button" onClick={onStop}>
-            <CircleStop size={16} />
-            Stop
-          </button>
-        ) : recoverable ? (
-          <button type="button" className="send-button recovery-button" onClick={onResume}>
-            <History size={15} />
-            Resume recovery
-          </button>
-        ) : (
-          <div className="limit-readout">
-            <span>{run.revisionCount}/1 revisions</span>
-            <span>{run.reviewCount}/2 reviews</span>
-            <span>{run.recoveryCount ?? 0}/2 recoveries</span>
+        <div className="progress-route" aria-label="Ship stages">
+          {run.route.map((step, index) => (
+            <div className={`progress-step ${step.state}`} key={`${step.label}-${index}`}>
+              <span>{step.state === "complete" ? <Check size={11} /> : step.agent ? initials(step.agent) : index + 1}</span>
+              <small>{step.label}</small>
+              {index < run.route.length - 1 && <ArrowRight size={12} aria-hidden="true" />}
+            </div>
+          ))}
+        </div>
+
+        {activity.length > 0 && (
+          <div className="progress-activity" role="log" aria-live="polite" aria-relevant="additions text">
+            <div className="progress-live-label">
+              <span className="stream-pulse" />
+              <strong>{streamTitle}</strong>
+              <span>live</span>
+            </div>
+            <div className="activity-list">
+              {activity.slice(-4).map((item, index) => (
+                <div className="activity-item" key={`${item.title}-${index}`}>
+                  <strong>{item.title}</strong>
+                  <p>{item.detail}</p>
+                </div>
+              ))}
+            </div>
           </div>
         )}
-      </div>
 
-      <div className="lens-facts">
-        <span>
-          <ShieldCheck size={13} />
-          {run.degradedReview ? "Same-provider review" : run.reviewer ? "Independent review" : "Reviewer selected at run time"}
-        </span>
-        <span>
-          <Gauge size={13} />
-          {contextLabel(run.contextBytes)}
-        </span>
-        <span>
-          <Workflow size={13} />
-          {autonomy ? autonomyLabel(autonomy) : "Bounded autonomous route"}
-        </span>
-      </div>
-    </section>
+        <div className="progress-footer">
+          <div className="progress-meta">
+            <span>
+              <ShieldCheck size={12} />
+              {run.degradedReview ? "Same-provider review" : run.reviewer ? "Independent review" : "Reviewer selected at run time"}
+            </span>
+            <span>
+              <Gauge size={12} />
+              {contextLabel(run.contextBytes)}
+            </span>
+            <span>
+              <Workflow size={12} />
+              {autonomy ? autonomyLabel(autonomy) : "Bounded autonomous route"}
+            </span>
+          </div>
+          <div className="progress-action">
+            {running ? (
+              <button type="button" className="danger-button" onClick={onStop}>
+                <CircleStop size={15} />
+                Stop
+              </button>
+            ) : recoverable ? (
+              <button type="button" className="send-button recovery-button" onClick={onResume}>
+                <History size={14} />
+                Resume recovery
+              </button>
+            ) : (
+              <span className="progress-limits">
+                {run.revisionCount}/1 revisions · {run.reviewCount}/2 reviews · {run.recoveryCount ?? 0}/2 recoveries
+              </span>
+            )}
+          </div>
+        </div>
+      </section>
+    </article>
   );
 }
 
@@ -318,8 +348,31 @@ function VerificationList({ verification }: { verification: VerificationResult[]
   );
 }
 
+function visibleMessageReason(reason?: string): string | undefined {
+  if (!reason) return undefined;
+  const legacyDiagnosticSignals = [
+    "fatal: detected dubious ownership",
+    "codex_models_manager::",
+    "supports_reasoning_summaries",
+    "to add an exception for this directory",
+  ];
+  if (!legacyDiagnosticSignals.some((signal) => reason.toLocaleLowerCase().includes(signal))) {
+    return reason;
+  }
+  const recovery = reason
+    .split(/\r?\n/)
+    .find((line) => line.trim().toLocaleLowerCase().startsWith("recoverable worktree:"));
+  return [
+    "Earlier provider diagnostics are hidden from the conversation. Full details remain in the durable run artifacts.",
+    recovery?.trim(),
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function TimelineEntry({ message }: { message: RoomMessage }) {
   const isHuman = message.kind === "human";
+  const reason = visibleMessageReason(message.reason);
   const senderName =
     message.sender === "human"
       ? "You"
@@ -348,10 +401,10 @@ function TimelineEntry({ message }: { message: RoomMessage }) {
           <span className="entry-kind">{message.kind}</span>
         </header>
         <p>{message.body}</p>
-        {message.reason && (
+        {reason && (
           <div className="reason-line">
             <Braces size={14} />
-            <span>{message.reason}</span>
+            <span>{reason}</span>
           </div>
         )}
         {message.changedFiles?.length ? (
@@ -367,20 +420,91 @@ function TimelineEntry({ message }: { message: RoomMessage }) {
   );
 }
 
+function LiveActivity({
+  title,
+  activity,
+}: {
+  title: string;
+  activity: LiveActivityItem[];
+}) {
+  return (
+    <article
+      className="timeline-entry entry-activity"
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions text"
+    >
+      <div className="entry-rail">
+        <span className="entry-dot activity-dot">
+          <Bot size={13} />
+        </span>
+        <span className="entry-line" />
+      </div>
+      <div className="entry-content activity-content">
+        <header>
+          <span className="stream-pulse" />
+          <strong>{title}</strong>
+          <span>live</span>
+        </header>
+        <div className="activity-list">
+          {activity.slice(-6).map((item, index) => (
+            <div className="activity-item" key={`${item.title}-${index}`}>
+              <strong>{item.title}</strong>
+              <p>{item.detail}</p>
+            </div>
+          ))}
+        </div>
+        <small className="activity-note">
+          Provider-reported reasoning and tool activity only. Full output remains in the local run log.
+        </small>
+      </div>
+    </article>
+  );
+}
+
+function WindowControls({ native }: { native: boolean }) {
+  return (
+    <div className="window-controls" role="group" aria-label="Window controls">
+      <button
+        type="button"
+        className="window-control"
+        aria-label="Minimize window"
+        onClick={() => {
+          if (native) void getCurrentWindow().minimize();
+        }}
+      >
+        <Minus size={14} strokeWidth={1.7} />
+      </button>
+      <button
+        type="button"
+        className="window-control"
+        aria-label="Maximize or restore window"
+        onClick={() => {
+          if (native) void getCurrentWindow().toggleMaximize();
+        }}
+      >
+        <Square size={11} strokeWidth={1.7} />
+      </button>
+      <button
+        type="button"
+        className="window-control window-close"
+        aria-label="Close Agent Room"
+        onClick={() => {
+          if (native) void getCurrentWindow().close();
+        }}
+      >
+        <X size={14} strokeWidth={1.7} />
+      </button>
+    </div>
+  );
+}
+
 function ProjectRail({
-  project,
-  run,
-  installedCount,
   activeView,
   onNavigate,
-  onOpenProject,
 }: {
-  project: Project;
-  run: Run;
-  installedCount: number;
   activeView: PrimaryView;
   onNavigate: (view: PrimaryView) => void;
-  onOpenProject: () => void;
 }) {
   return (
     <aside className="project-rail">
@@ -413,32 +537,9 @@ function ProjectRail({
           <span>Settings</span>
         </button>
       </nav>
-      <div className="rail-section">
-        <span className="rail-label">Project room</span>
-        <button type="button" className="project-row selected" onClick={onOpenProject}>
-          <span className="project-monogram">AR</span>
-          <span>
-            <strong>{project.name}</strong>
-            <small>
-              {run.state} / {installedCount} agents ready
-            </small>
-          </span>
-          <ChevronRight size={15} />
-        </button>
-      </div>
-      <div className="rail-policy">
-        <ShieldCheck size={15} />
-        <span>
-          <strong>Autonomous policy</strong>
-          <small>Interrupts only when policy cannot continue safely.</small>
-        </span>
-      </div>
       <div className="rail-foot">
         <span className="local-indicator" />
-        <span>
-          <strong>Local orchestration</strong>
-          <small>SQLite and managed Git worktrees</small>
-        </span>
+        <span>Local</span>
       </div>
     </aside>
   );
@@ -962,7 +1063,7 @@ export function App() {
   const [objective, setObjective] = useState("");
   const [composerMode, setComposerMode] = useState<ComposerMode>("chat");
   const [chatSending, setChatSending] = useState(false);
-  const [stream, setStream] = useState("");
+  const [activity, setActivity] = useState<LiveActivityItem[]>([]);
   const [streamTitle, setStreamTitle] = useState("Provider events");
   const [activeView, setActiveView] = useState<PrimaryView>("rooms");
   const [activeTab, setActiveTab] = useState<InspectorTab>("Repository");
@@ -977,6 +1078,7 @@ export function App() {
   const runRef = useRef(run);
   const chatRunRef = useRef<string | undefined>(undefined);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const contextToggleRef = useRef<HTMLButtonElement>(null);
   const native = isNativeApp();
 
   useEffect(() => {
@@ -1030,13 +1132,11 @@ export function App() {
         setStreamTitle(event.agent ? `${agentNames[event.agent]} / ${event.phase}` : event.title);
         if (
           (event.title === "Chat response" ||
-            event.title === "Chat activity" ||
-            event.title === "Native chat response" ||
-            event.title === "Native chat activity") &&
+            event.title === "Native chat response") &&
           event.agent
         ) {
           const agent = event.agent;
-          setStream("");
+          setActivity([]);
           setMessages((current) => {
             const existingIndex = current.findIndex(
               (message) =>
@@ -1061,11 +1161,12 @@ export function App() {
             );
           });
         } else {
-          setStream((current) =>
-            event.title.startsWith("Native terminal")
-              ? event.detail
-              : `${current}${event.detail}\n`.slice(-12_000),
-          );
+          setActivity((current) => {
+            const next = { title: event.title, detail: event.detail };
+            return event.title.startsWith("Native terminal")
+              ? [next]
+              : [...current, next].slice(-12);
+          });
         }
         return;
       }
@@ -1090,6 +1191,20 @@ export function App() {
           setChatSending(false);
         }
         return;
+      }
+      if (
+        event.runId === runRef.current.id &&
+        (event.eventType === "phase" || event.eventType === "attention")
+      ) {
+        setStreamTitle(
+          event.agent
+            ? `${agentNames[event.agent]} / ${event.phase}`
+            : `Agent Room / ${event.phase}`,
+        );
+        setActivity((current) => [
+          ...current,
+          { title: event.title, detail: event.detail },
+        ].slice(-12));
       }
       setRun((current) => {
         if (current.id !== event.runId) return current;
@@ -1123,7 +1238,7 @@ export function App() {
       top: timelineRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages, stream]);
+  }, [messages, activity]);
 
   useEffect(() => {
     function handleShortcut(event: KeyboardEvent) {
@@ -1132,19 +1247,30 @@ export function App() {
         setSearchOpen(true);
         requestAnimationFrame(() => searchInputRef.current?.focus());
       }
-      if (event.key === "Escape" && searchOpen) {
-        setSearchOpen(false);
-        setSearchQuery("");
+      if (event.key === "Escape") {
+        if (inspectorOpen) {
+          setInspectorOpen(false);
+          requestAnimationFrame(() => contextToggleRef.current?.focus());
+          return;
+        }
+        if (searchOpen) {
+          setSearchOpen(false);
+          setSearchQuery("");
+        }
       }
     }
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [searchOpen]);
+  }, [inspectorOpen, searchOpen]);
 
   const installedCount = useMemo(
     () => environment.participants.filter(participantIsRunnable).length,
     [environment],
   );
+  const activeShipAgent = run.currentOwner
+    ?? (run.state === "reviewing" ? run.reviewer : run.writer)
+    ?? run.reviewer;
+  const sideChatAvailable = activeStates.includes(run.state) && run.state !== "promoting";
 
   const visibleMessages = useMemo(() => {
     const query = searchQuery.trim().toLocaleLowerCase();
@@ -1286,8 +1412,9 @@ export function App() {
     nextRun.degradedReview = Boolean(writer && reviewer === writer);
     nextRun.route = routeForPhase("build", writer, reviewer);
     setRun(nextRun);
+    setComposerMode("chat");
     setObjective("");
-    setStream("");
+    setActivity([]);
     if (recordHumanMessage) {
       setMessages((current) => [
         ...current,
@@ -1372,22 +1499,36 @@ export function App() {
 
   async function submitObjective() {
     const text = objective.trim();
-    if (!text || activeStates.includes(run.state)) return;
+    if (!text) return;
+    if (run.state === "promoting") {
+      setUiError("Promotion is finishing now. Side chat will reopen when this Ship run completes.");
+      return;
+    }
+    if (sideChatAvailable) {
+      await submitChat(true);
+      return;
+    }
     await runShipObjective(text);
   }
 
-  async function submitChat() {
+  async function submitChat(activeShip = false) {
     const text = objective.trim();
     if (!text || chatSending) return;
     const priorAgent = [...messages].reverse().find(
       (message) => message.kind === "agent" && message.sender !== "system" && message.sender !== "human",
     )?.sender as AgentKind | undefined;
-    const participant = selectChatParticipant(text, environment.participants, priorAgent);
+    const participant = activeShip && activeShipAgent
+      ? activeShipAgent
+      : selectChatParticipant(text, environment.participants, priorAgent);
     const chatRunId = crypto.randomUUID();
     setUiError("");
     setObjective("");
-    setStream("");
-    setStreamTitle(participant ? `${agentNames[participant]} / chat` : "Project chat");
+    setActivity([]);
+    setStreamTitle(
+      participant
+        ? `${agentNames[participant]} / ${activeShip ? "active run" : "chat"}`
+        : "Project chat",
+    );
     setMessages((current) => [
       ...current,
       {
@@ -1437,8 +1578,9 @@ export function App() {
         message: text,
         repositoryPath: project.repositoryPath,
         requestedAgent: participant,
+        activeRunId: activeShip ? run.id : undefined,
       });
-      if (result.shipIntent) {
+      if (result.shipIntent && !activeShip) {
         setChatSending(false);
         chatRunRef.current = undefined;
         setComposerMode("ship");
@@ -1462,7 +1604,8 @@ export function App() {
 
   async function submitComposer(event: FormEvent) {
     event.preventDefault();
-    if (composerMode === "chat") await submitChat();
+    if (sideChatAvailable) await submitChat(true);
+    else if (composerMode === "chat") await submitChat();
     else await submitObjective();
   }
 
@@ -1504,7 +1647,8 @@ export function App() {
       return;
     }
     setUiError("");
-    setStream("");
+    setActivity([]);
+    setComposerMode("chat");
     setRun((current) => ({
       ...current,
       state: "working",
@@ -1595,6 +1739,11 @@ export function App() {
             <kbd>Ctrl K</kbd>
           </button>
         )}
+        <div
+          className="titlebar-drag"
+          data-tauri-drag-region
+          aria-hidden="true"
+        />
         <div className="topbar-status">
           <span className={native ? "online" : ""} />
           {native
@@ -1604,33 +1753,22 @@ export function App() {
             : "Read-only preview"}
         </div>
         <button
+          ref={contextToggleRef}
           type="button"
           className="icon-button context-toggle"
-          aria-label="Toggle context"
+          aria-label={inspectorOpen ? "Close context" : "Open context"}
+          aria-expanded={inspectorOpen}
+          aria-controls="room-context"
           onClick={() => setInspectorOpen((open) => !open)}
         >
           <PanelRight size={18} />
         </button>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="Open provider settings"
-          onClick={() => setActiveView("settings")}
-        >
-          <Settings size={18} />
-        </button>
+        <WindowControls native={native} />
       </header>
 
       <ProjectRail
-        project={project}
-        run={run}
-        installedCount={installedCount}
         activeView={activeView}
         onNavigate={showView}
-        onOpenProject={() => {
-          setActiveView("rooms");
-          openInspector("Repository");
-        }}
       />
 
       <main className="room" id="room-main" tabIndex={-1}>
@@ -1676,13 +1814,6 @@ export function App() {
           </div>
         </div>
 
-        <RunLens
-          run={run}
-          participants={environment.participants}
-          onStop={handleStop}
-          onResume={handleResume}
-        />
-
         <div className="timeline" ref={timelineRef} role="feed" aria-label="Room timeline">
           <div className="timeline-date">
             <span>Durable room</span>
@@ -1693,29 +1824,34 @@ export function App() {
           {searchQuery && !visibleMessages.length && (
             <p className="empty-state">No room activity matches this search.</p>
           )}
-          {stream && (
-            <article
-              className="stream-block"
-              role="log"
-              aria-live="polite"
-              aria-relevant="additions text"
-            >
-              <header>
-                <span className="stream-pulse" />
-                <strong>{streamTitle}</strong>
-                <small>Live, capped locally</small>
-              </header>
-              <pre>{stream}</pre>
-            </article>
+          {run.state !== "ready" && !searchQuery && (
+            <RunLens
+              run={run}
+              participants={environment.participants}
+              activity={activity}
+              streamTitle={streamTitle}
+              onStop={handleStop}
+              onResume={handleResume}
+            />
+          )}
+          {run.state === "ready" && activity.length > 0 && (
+            <LiveActivity title={streamTitle} activity={activity} />
           )}
         </div>
 
         <form className="composer" onSubmit={submitComposer}>
           <div className="composer-context">
-            <span>
-              <TerminalSquare size={14} />
-              {project.name}
-            </span>
+            <label className="composer-label" htmlFor="room-objective">
+              {composerMode === "chat"
+                ? sideChatAvailable
+                  ? "Ask about active Ship run"
+                  : "Project chat and quick edits"
+                : run.state === "promoting"
+                  ? "Promoting verified work"
+                  : sideChatAvailable
+                  ? "Ask about active Ship run"
+                  : "Engineering objective"}
+            </label>
             <div className="composer-mode" role="group" aria-label="Message route">
               <button
                 type="button"
@@ -1730,15 +1866,12 @@ export function App() {
                 className={composerMode === "ship" ? "active" : ""}
                 onClick={() => setComposerMode("ship")}
                 aria-pressed={composerMode === "ship"}
+                disabled={sideChatAvailable || run.state === "promoting"}
               >
                 Ship
               </button>
             </div>
           </div>
-          <label className="composer-label" htmlFor="room-objective">
-            {composerMode === "chat" ? "Project chat" : "Engineering objective"}
-            <span>{composerMode === "chat" ? "Enter sends. Shift+Enter adds a new line." : "Create an isolated build, verification, review, and promotion route."}</span>
-          </label>
           <textarea
             id="room-objective"
             value={objective}
@@ -1749,7 +1882,17 @@ export function App() {
                 event.currentTarget.form?.requestSubmit();
               }
             }}
-            placeholder={composerMode === "chat" ? "Ask about this project..." : "@codex State the objective once..."}
+            placeholder={
+              composerMode === "chat"
+                ? sideChatAvailable
+                  ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
+                  : "Ask a question or request a quick edit..."
+                : run.state === "promoting"
+                  ? "Promotion is finishing safely..."
+                  : sideChatAvailable
+                  ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
+                  : "@codex State the objective once..."
+            }
             aria-describedby={uiError ? "composer-error" : undefined}
             rows={2}
           />
@@ -1759,7 +1902,17 @@ export function App() {
                 <button
                   type="button"
                   key={participant.kind}
-                  disabled={composerMode === "chat" ? !participantCanChat(participant) : !participantIsRunnable(participant)}
+                  disabled={
+                    sideChatAvailable
+                      ? participant.kind !== activeShipAgent
+                      : composerMode === "chat"
+                      ? !participantCanChat(participant)
+                      : run.state === "promoting"
+                        ? true
+                        : sideChatAvailable
+                        ? participant.kind !== activeShipAgent
+                        : !participantIsRunnable(participant)
+                  }
                   onClick={() =>
                     setObjective(
                       (current) => `@${participant.kind} ${current.replace(/^@\w+\s*/, "")}`,
@@ -1776,7 +1929,7 @@ export function App() {
                 </button>
               ))}
             </div>
-            {composerMode === "chat" && chatSending ? (
+            {chatSending ? (
               <button type="button" className="danger-button chat-stop" onClick={handleStopChat}>
                 <CircleStop size={15} />
                 Stop response
@@ -1785,11 +1938,19 @@ export function App() {
               <button
                 type="submit"
                 className="send-button"
-                disabled={!objective.trim() || (composerMode === "ship" && activeStates.includes(run.state))}
-                aria-busy={composerMode === "chat" ? chatSending : activeStates.includes(run.state)}
+                disabled={!objective.trim() || (composerMode === "ship" && run.state === "promoting")}
+                aria-busy={composerMode === "chat" ? chatSending : false}
               >
                 {composerMode === "chat" ? <Sparkles size={15} /> : <Play size={15} fill="currentColor" />}
-                {composerMode === "chat" ? "Send" : "Run autonomously"}
+                {composerMode === "chat"
+                  ? sideChatAvailable
+                    ? "Ask active run"
+                    : "Send"
+                  : run.state === "promoting"
+                    ? "Promoting"
+                    : sideChatAvailable
+                    ? "Ask active run"
+                    : "Run autonomously"}
                 <kbd>Enter</kbd>
               </button>
             )}
@@ -1804,25 +1965,40 @@ export function App() {
         )}
       </main>
 
-      <div className={`inspector-wrap ${inspectorOpen ? "open" : ""}`}>
-        <button
-          type="button"
-          className="inspector-close"
-          aria-label="Close context"
-          onClick={() => setInspectorOpen(false)}
-        >
-          <X size={18} />
-        </button>
-        <Inspector
-          project={project}
-          environment={environment}
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          run={run}
-          messages={messages}
-          receipts={receipts}
-        />
-      </div>
+      {inspectorOpen && (
+        <>
+          <div
+            className="inspector-scrim"
+            aria-hidden="true"
+            onClick={() => {
+              setInspectorOpen(false);
+              requestAnimationFrame(() => contextToggleRef.current?.focus());
+            }}
+          />
+          <div className="inspector-wrap open" id="room-context">
+            <button
+              type="button"
+              className="inspector-close"
+              aria-label="Close context"
+              onClick={() => {
+                setInspectorOpen(false);
+                requestAnimationFrame(() => contextToggleRef.current?.focus());
+              }}
+            >
+              <X size={18} />
+            </button>
+            <Inspector
+              project={project}
+              environment={environment}
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              run={run}
+              messages={messages}
+              receipts={receipts}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }

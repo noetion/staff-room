@@ -2,6 +2,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     ffi::OsStr,
@@ -25,6 +26,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
+
 const CONTEXT_BUDGET_BYTES: usize = 48 * 1024;
 const SOURCE_BUDGET_BYTES: usize = 16 * 1024;
 const PROCESS_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
@@ -41,6 +45,8 @@ const SHIP_INTENT_END: &str = "AGENT_ROOM_SHIP_INTENT_END";
 const AUTONOMOUS_SHIP_SKILL_PATH: &str = ".agents/skills/autonomous-ship/SKILL.md";
 const AUTONOMOUS_SHIP_SKILL: &str = include_str!("../../.agents/skills/autonomous-ship/SKILL.md");
 const EMBEDDED_TUI_CHAT_ENABLED: bool = false;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct Database(Mutex<Connection>);
 
@@ -181,6 +187,29 @@ struct StartRunRequest {
     requested_agent: Option<String>,
 }
 
+#[derive(Debug)]
+struct IsolationContext {
+    worktree: PathBuf,
+    branch: String,
+    base_branch: String,
+    base_head: String,
+    snapshot_head: String,
+    isolation_kind: String,
+    workspace_fingerprint: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromotionMode {
+    FastForward,
+    WorkingTree,
+}
+
+#[derive(Debug)]
+struct PromotionResult {
+    mode: PromotionMode,
+    cleanup_warning: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatRequest {
@@ -189,6 +218,7 @@ struct ChatRequest {
     message: String,
     repository_path: String,
     requested_agent: Option<String>,
+    active_run_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -365,10 +395,6 @@ impl Phase {
             Self::FinalReview => "final-review",
         }
     }
-
-    fn writes(self) -> bool {
-        matches!(self, Self::Build | Self::Revise)
-    }
 }
 
 fn idle_timeout_seconds(phase: Phase) -> u64 {
@@ -468,6 +494,10 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             worktree_path TEXT,
             branch TEXT,
             base_head TEXT,
+            base_branch TEXT,
+            snapshot_head TEXT,
+            isolation_kind TEXT NOT NULL DEFAULT 'worktree',
+            workspace_fingerprint TEXT,
             context_bytes INTEGER NOT NULL DEFAULT 0,
             degraded_review INTEGER NOT NULL DEFAULT 0,
             artifact_path TEXT,
@@ -614,6 +644,10 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE runs ADD COLUMN worktree_path TEXT",
         "ALTER TABLE runs ADD COLUMN branch TEXT",
         "ALTER TABLE runs ADD COLUMN base_head TEXT",
+        "ALTER TABLE runs ADD COLUMN base_branch TEXT",
+        "ALTER TABLE runs ADD COLUMN snapshot_head TEXT",
+        "ALTER TABLE runs ADD COLUMN isolation_kind TEXT NOT NULL DEFAULT 'worktree'",
+        "ALTER TABLE runs ADD COLUMN workspace_fingerprint TEXT",
         "ALTER TABLE runs ADD COLUMN context_bytes INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE runs ADD COLUMN degraded_review INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE runs ADD COLUMN artifact_path TEXT",
@@ -645,6 +679,24 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+fn reconcile_interrupted_runs(connection: &Connection) -> rusqlite::Result<usize> {
+    connection.execute(
+        "UPDATE activations
+         SET state = 'failed', finished_at = CURRENT_TIMESTAMP
+         WHERE state = 'running'",
+        [],
+    )?;
+    connection.execute(
+        "UPDATE runs
+         SET state = 'stopped',
+             current_owner = NULL,
+             stop_reason = 'Agent Room closed or restarted while this run was active. The managed worktree was preserved for recovery.',
+             finished_at = CURRENT_TIMESTAMP
+         WHERE state IN ('selecting', 'working', 'verifying', 'reviewing', 'revising', 'promoting')",
+        [],
+    )
+}
+
 fn command_output<I, S>(
     executable: &Path,
     args: I,
@@ -655,6 +707,7 @@ where
     S: AsRef<OsStr>,
 {
     let mut command = StdCommand::new(executable);
+    hide_std_command_window(&mut command);
     command.args(args);
     if let Some(path) = working_directory {
         command.current_dir(path);
@@ -670,6 +723,22 @@ where
         None
     }
 }
+
+#[cfg(windows)]
+fn hide_std_command_window(command: &mut StdCommand) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_std_command_window(_command: &mut StdCommand) {}
+
+#[cfg(windows)]
+fn hide_tokio_command_window(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_tokio_command_window(_command: &mut Command) {}
 
 fn find_executable(names: &[&str]) -> Option<PathBuf> {
     names.iter().find_map(|name| which::which(name).ok())
@@ -1369,27 +1438,42 @@ fn participants_with_connections(
         .collect()
 }
 
-fn git(repository: &Path, args: &[String]) -> Result<String, String> {
+fn git_bytes(repository: &Path, args: &[String]) -> Result<Vec<u8>, String> {
     let executable = find_executable(&["git"]).ok_or_else(|| "Git is not installed.".to_owned())?;
     let safe = format!("safe.directory={}", repository.to_string_lossy());
-    let output = StdCommand::new(executable)
+    let mut command = StdCommand::new(executable);
+    hide_std_command_window(&mut command);
+    let output = command
         .arg("-c")
         .arg(safe)
         .args(args)
         .current_dir(repository)
         .output()
         .map_err(|error| format!("Failed to run Git: {error}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if output.status.success() {
-        Ok(stdout)
+        Ok(output.stdout)
     } else {
-        Err(if stderr.is_empty() {
-            format!("Git command failed with status {}", output.status)
-        } else {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let command = format!("git {}", args.join(" "));
+        let detail = if !stderr.is_empty() {
             stderr
-        })
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            "Git returned no diagnostic output.".to_owned()
+        };
+        Err(format!(
+            "{command} failed with {}.\n{detail}",
+            output.status
+        ))
     }
+}
+
+fn git(repository: &Path, args: &[String]) -> Result<String, String> {
+    Ok(String::from_utf8_lossy(&git_bytes(repository, args)?)
+        .trim()
+        .to_owned())
 }
 
 fn git_static(repository: &Path, args: &[&str]) -> Result<String, String> {
@@ -1758,6 +1842,18 @@ fn handoff_status_allowed(handoff: &AgentHandoff, phase: Phase) -> bool {
     }
 }
 
+fn handoff_attention_reason(handoff: &AgentHandoff) -> String {
+    let findings = if handoff.findings.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}", handoff.findings.join("\n"))
+    };
+    format!(
+        "{}{findings}\nNext action: {}",
+        handoff.summary, handoff.next_action
+    )
+}
+
 fn extract_phase_handoff(value: &str, phase: Phase) -> Result<AgentHandoff, String> {
     if phase == Phase::Chat {
         return Err("Chat responses do not require an Agent Room handoff.".to_owned());
@@ -2046,12 +2142,119 @@ fn provider_chat_fragment(kind: &str, value: &Value) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-fn apply_provider_environment(command: &mut Command) {
+fn apply_provider_environment(command: &mut Command, repository: &Path) {
     command.env("NO_COLOR", "1");
+    command
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "safe.directory")
+        .env("GIT_CONFIG_VALUE_0", repository);
+    hide_tokio_command_window(command);
 }
 
-fn apply_interactive_provider_environment(command: &mut CommandBuilder) {
+fn apply_interactive_provider_environment(command: &mut CommandBuilder, repository: &Path) {
     command.env("NO_COLOR", "1");
+    command.env("GIT_CONFIG_COUNT", "1");
+    command.env("GIT_CONFIG_KEY_0", "safe.directory");
+    command.env("GIT_CONFIG_VALUE_0", repository);
+}
+
+fn provider_activity(kind: &str, value: &Value) -> Option<(String, String)> {
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    match kind {
+        "codex" if matches!(event_type, "item.started" | "item.completed") => {
+            let item = value.get("item")?;
+            let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+            match item_type {
+                "reasoning" => item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.trim().is_empty())
+                    .map(|text| ("Thinking".to_owned(), truncate_utf8(text.trim(), 2 * 1024))),
+                "command_execution" => item.get("command").and_then(Value::as_str).map(|command| {
+                    let status = item
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("running");
+                    (
+                        if status == "completed" {
+                            "Command finished"
+                        } else {
+                            "Running command"
+                        }
+                        .to_owned(),
+                        truncate_utf8(command, 1024),
+                    )
+                }),
+                "file_change" => Some((
+                    "Updating files".to_owned(),
+                    "Applying repository changes in the managed worktree.".to_owned(),
+                )),
+                "mcp_tool_call" => Some((
+                    "Using tool".to_owned(),
+                    item.get("tool")
+                        .or_else(|| item.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("Provider tool")
+                        .to_owned(),
+                )),
+                _ => None,
+            }
+        }
+        "claude" if event_type == "stream_event" => {
+            let event = value.get("event")?;
+            let native_type = event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if native_type == "content_block_start" {
+                let block = event.get("content_block")?;
+                if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                    return Some((
+                        "Using tool".to_owned(),
+                        block
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Claude tool")
+                            .to_owned(),
+                    ));
+                }
+            }
+            if native_type == "content_block_delta" {
+                let delta = event.get("delta")?;
+                if delta.get("type").and_then(Value::as_str) == Some("thinking_delta") {
+                    return delta
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.trim().is_empty())
+                        .map(|text| ("Thinking".to_owned(), truncate_utf8(text.trim(), 2 * 1024)));
+                }
+            }
+            None
+        }
+        "cursor" => {
+            let tool = value
+                .get("tool")
+                .or_else(|| value.get("name"))
+                .and_then(Value::as_str);
+            if event_type.contains("tool") || event_type.contains("command") {
+                Some((
+                    if event_type.contains("command") {
+                        "Running command"
+                    } else {
+                        "Using tool"
+                    }
+                    .to_owned(),
+                    tool.unwrap_or("Cursor tool").to_owned(),
+                ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2081,14 +2284,12 @@ fn emit_event(
     );
 }
 
-fn cursor_chat_arguments() -> [&'static str; 5] {
-    [
-        "--mode",
-        "ask",
-        "--sandbox",
-        "enabled",
-        "--stream-partial-output",
-    ]
+fn cursor_chat_arguments(allow_writes: bool) -> Vec<&'static str> {
+    let mut arguments = vec!["--sandbox", "enabled", "--stream-partial-output"];
+    if !allow_writes {
+        arguments.splice(0..0, ["--mode", "ask"]);
+    }
+    arguments
 }
 
 fn cursor_model_with_effort(model: &str, effort: Option<&str>) -> String {
@@ -2130,6 +2331,7 @@ async fn invoke_provider(
     run_id: &str,
     participant: &Participant,
     phase: Phase,
+    allow_writes: bool,
     prompt: &str,
     repository: &Path,
     session_id: Option<&str>,
@@ -2172,8 +2374,10 @@ async fn invoke_provider(
                 .arg("never")
                 .arg("-c")
                 .arg("approval_policy=\"never\"")
+                .arg("-c")
+                .arg("shell_environment_policy.inherit=all")
                 .arg("-s")
-                .arg(if phase.writes() {
+                .arg(if allow_writes {
                     "workspace-write"
                 } else {
                     "read-only"
@@ -2210,7 +2414,7 @@ async fn invoke_provider(
             command
                 .arg("--print")
                 .arg("--permission-mode")
-                .arg(if phase == Phase::Chat { "plan" } else { "auto" });
+                .arg(if allow_writes { "auto" } else { "plan" });
             if structured_chat {
                 command
                     .arg("--verbose")
@@ -2247,14 +2451,14 @@ async fn invoke_provider(
                 command.arg("--output-format").arg("stream-json");
             }
             if phase == Phase::Chat {
-                command.args(cursor_chat_arguments());
+                command.args(cursor_chat_arguments(allow_writes));
             }
             if let Some(model) = requested_model {
                 command
                     .arg("--model")
                     .arg(cursor_model_with_effort(model, requested_effort));
             }
-            if phase.writes() {
+            if allow_writes {
                 command.arg("--force");
             }
             if participant.capabilities.exact_resume {
@@ -2265,14 +2469,15 @@ async fn invoke_provider(
             command.arg(prompt);
         }
         "antigravity" => {
-            command.arg("--sandbox").arg("--add-dir").arg(repository);
-            if phase.writes() {
-                command.arg("--dangerously-skip-permissions");
-            }
+            command
+                .arg("--sandbox")
+                .arg("--dangerously-skip-permissions")
+                .arg("--add-dir")
+                .arg(repository);
             if phase == Phase::Chat {
                 command
                     .arg("--mode")
-                    .arg("plan")
+                    .arg(if allow_writes { "accept-edits" } else { "plan" })
                     .arg("--print-timeout")
                     .arg(format!("{CHAT_IDLE_TIMEOUT_SECONDS}s"));
             }
@@ -2292,7 +2497,7 @@ async fn invoke_provider(
         _ => return Err(format!("Unsupported provider: {kind}")),
     }
 
-    apply_provider_environment(&mut command);
+    apply_provider_environment(&mut command, repository);
     command
         .current_dir(repository)
         .kill_on_drop(true)
@@ -2354,6 +2559,20 @@ async fn invoke_provider(
                 session_id = session_id.or_else(|| parse_session_id(&value));
                 actual_model = actual_model.or_else(|| reported_model(&value));
                 merge_usage(&mut usage, &value);
+                if let Some((title, detail)) = provider_activity(&stdout_agent, &value) {
+                    emit_event(
+                        &stdout_app,
+                        &stdout_run,
+                        "stream",
+                        &stdout_phase,
+                        "running",
+                        Some(&stdout_agent),
+                        &title,
+                        &detail,
+                        None,
+                    );
+                    activity_emitted = true;
+                }
                 if completion_phase == Phase::Chat {
                     if let Some(fragment) = provider_chat_fragment(&stdout_agent, &value) {
                         result_text.push_str(&fragment);
@@ -2403,7 +2622,7 @@ async fn invoke_provider(
                         None,
                     );
                 }
-            } else {
+            } else if !line.trim_start().starts_with('{') {
                 emit_event(
                     &stdout_app,
                     &stdout_run,
@@ -2411,8 +2630,8 @@ async fn invoke_provider(
                     &stdout_phase,
                     "running",
                     Some(&stdout_agent),
-                    "Provider event",
-                    &truncate_utf8(&line, 4 * 1024),
+                    "Provider activity",
+                    &truncate_utf8(&line, 2 * 1024),
                     None,
                 );
             }
@@ -2427,10 +2646,6 @@ async fn invoke_provider(
         )
     });
 
-    let stderr_app = app.clone();
-    let stderr_run = run_id.to_owned();
-    let stderr_phase = phase.as_str().to_owned();
-    let stderr_agent = kind.to_owned();
     let stderr_activity = activity_sender;
     let stderr_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
@@ -2438,19 +2653,6 @@ async fn invoke_provider(
         while let Ok(Some(line)) = lines.next_line().await {
             stderr_activity.send_modify(|value| *value = value.saturating_add(1));
             append_capped(&mut raw, &line);
-            if completion_phase != Phase::Chat {
-                emit_event(
-                    &stderr_app,
-                    &stderr_run,
-                    "stream",
-                    &stderr_phase,
-                    "running",
-                    Some(&stderr_agent),
-                    "Provider diagnostic",
-                    &truncate_utf8(&line, 4 * 1024),
-                    None,
-                );
-            }
         }
         raw
     });
@@ -2559,6 +2761,13 @@ fn provider_log_note(run: &ProviderRun) -> String {
     format!(
         "Durable logs:\nstdout: {}\nstderr: {}",
         run.stdout_log_path, run.stderr_log_path
+    )
+}
+
+fn provider_failure_reason(provider: &str, activity: &str, run: &ProviderRun) -> String {
+    format!(
+        "{provider} could not complete {activity}. {}",
+        provider_log_note(run)
     )
 }
 
@@ -2709,7 +2918,7 @@ fn spawn_interactive_session(
     let slave = pair.slave;
     let command = interactive_command(kind, executable, repository, model, effort, initial_prompt)?;
     let mut command = command;
-    apply_interactive_provider_environment(&mut command);
+    apply_interactive_provider_environment(&mut command, repository);
     let mut child = slave.spawn_command(command).map_err(|error| {
         format!(
             "Failed to start interactive {} session: {error}",
@@ -3270,11 +3479,141 @@ fn run_artifact_directory(app: &AppHandle, run_id: &str) -> Result<PathBuf, Stri
     Ok(path)
 }
 
-fn create_worktree(
-    app: &AppHandle,
+fn git_paths(repository: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let arguments = args
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<Vec<_>>();
+    Ok(git_bytes(repository, &arguments)?
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect())
+}
+
+fn workspace_fingerprint(repository: &Path) -> Result<String, String> {
+    let status = git_bytes(
+        repository,
+        &[
+            "status".to_owned(),
+            "--porcelain=v1".to_owned(),
+            "-z".to_owned(),
+            "--untracked-files=all".to_owned(),
+        ],
+    )?;
+    let mut paths = BTreeSet::new();
+    for args in [
+        &["ls-files", "-m", "-d", "-o", "--exclude-standard", "-z"][..],
+        &["diff", "--cached", "--name-only", "-z"][..],
+    ] {
+        paths.extend(git_paths(repository, args)?);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(&status);
+    for relative in paths {
+        hasher.update([0]);
+        hasher.update(relative.as_bytes());
+        let path = repository.join(&relative);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                hasher.update(b"symlink");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    hasher.update(metadata.mode().to_le_bytes());
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    hasher.update(metadata.file_attributes().to_le_bytes());
+                }
+                hasher.update(
+                    std::fs::read_link(&path)
+                        .map_err(|error| format!("Failed to inspect {relative}: {error}"))?
+                        .to_string_lossy()
+                        .as_bytes(),
+                );
+            }
+            Ok(metadata) if metadata.is_file() => {
+                hasher.update(b"file");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    hasher.update(metadata.mode().to_le_bytes());
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    hasher.update(metadata.file_attributes().to_le_bytes());
+                }
+                let mut file = std::fs::File::open(&path)
+                    .map_err(|error| format!("Failed to inspect {relative}: {error}"))?;
+                let mut buffer = [0_u8; 64 * 1024];
+                loop {
+                    let count = file
+                        .read(&mut buffer)
+                        .map_err(|error| format!("Failed to inspect {relative}: {error}"))?;
+                    if count == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..count]);
+                }
+            }
+            Ok(_) => hasher.update(b"directory"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update(b"missing"),
+            Err(error) => return Err(format!("Failed to inspect {relative}: {error}")),
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn copy_workspace_file(source: &Path, destination: &Path) -> Result<(), String> {
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let metadata = std::fs::symlink_metadata(source).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() {
+        let target = std::fs::read_link(source).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, destination).map_err(|error| error.to_string())?;
+        #[cfg(windows)]
+        {
+            if source.is_dir() {
+                std::os::windows::fs::symlink_dir(target, destination)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                std::os::windows::fs::symlink_file(target, destination)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    } else {
+        std::fs::copy(source, destination).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn remove_managed_clone(root: &Path, worktree: &Path) -> Result<(), String> {
+    let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let parent = worktree
+        .parent()
+        .ok_or_else(|| "Managed snapshot clone has no parent directory.".to_owned())?;
+    let parent = std::fs::canonicalize(parent).map_err(|error| error.to_string())?;
+    if parent != root || !worktree.join(".git").is_dir() {
+        return Err(format!(
+            "Refused to remove an unverified managed snapshot clone: {}",
+            worktree.to_string_lossy()
+        ));
+    }
+    std::fs::remove_dir_all(worktree).map_err(|error| error.to_string())
+}
+
+fn create_isolation_at_root(
     repository: &Path,
     run_id: &str,
-) -> Result<(PathBuf, String, String, String), String> {
+    root: &Path,
+) -> Result<IsolationContext, String> {
+    let base_changes = git_static(repository, &["status", "--porcelain"])?;
     let base_head = git_static(repository, &["rev-parse", "HEAD"])?;
     let base_branch = git_static(repository, &["branch", "--show-current"])?;
     if base_branch.trim().is_empty() {
@@ -3286,12 +3625,7 @@ fn create_worktree(
         .take(10)
         .collect::<String>();
     let branch = format!("agent-room/{short}");
-    let root = app
-        .path()
-        .app_cache_dir()
-        .map_err(|error| error.to_string())?
-        .join("worktrees");
-    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
     let worktree = root.join(&short);
     if worktree.exists() {
         return Err(format!(
@@ -3299,18 +3633,117 @@ fn create_worktree(
             worktree.to_string_lossy()
         ));
     }
-    git(
-        repository,
-        &[
-            "worktree".to_owned(),
-            "add".to_owned(),
-            "-b".to_owned(),
-            branch.clone(),
-            worktree.to_string_lossy().into_owned(),
-            base_head.clone(),
-        ],
-    )?;
-    Ok((worktree, branch, base_branch, base_head))
+
+    if base_changes.trim().is_empty() {
+        git(
+            repository,
+            &[
+                "worktree".to_owned(),
+                "add".to_owned(),
+                "-b".to_owned(),
+                branch.clone(),
+                worktree.to_string_lossy().into_owned(),
+                base_head.clone(),
+            ],
+        )?;
+        return Ok(IsolationContext {
+            worktree,
+            branch,
+            base_branch,
+            snapshot_head: base_head.clone(),
+            base_head,
+            isolation_kind: "worktree".to_owned(),
+            workspace_fingerprint: None,
+        });
+    }
+
+    let fingerprint = workspace_fingerprint(repository)?;
+    let patch = root.join(format!(".snapshot-{short}.patch"));
+    let snapshot_result = (|| {
+        git(
+            repository,
+            &[
+                "diff".to_owned(),
+                "--binary".to_owned(),
+                "--no-ext-diff".to_owned(),
+                "HEAD".to_owned(),
+                format!("--output={}", patch.to_string_lossy()),
+            ],
+        )?;
+        git(
+            repository,
+            &[
+                "clone".to_owned(),
+                "--no-checkout".to_owned(),
+                repository.to_string_lossy().into_owned(),
+                worktree.to_string_lossy().into_owned(),
+            ],
+        )?;
+        git(
+            &worktree,
+            &[
+                "checkout".to_owned(),
+                "-b".to_owned(),
+                branch.clone(),
+                base_head.clone(),
+            ],
+        )?;
+        if patch
+            .metadata()
+            .map(|value| value.len())
+            .unwrap_or_default()
+            > 0
+        {
+            git(
+                &worktree,
+                &[
+                    "apply".to_owned(),
+                    "--binary".to_owned(),
+                    patch.to_string_lossy().into_owned(),
+                ],
+            )?;
+        }
+        for relative in git_paths(
+            repository,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+        )? {
+            copy_workspace_file(&repository.join(&relative), &worktree.join(&relative))?;
+        }
+        if !commit_managed_changes(&worktree, "Capture current workspace state")? {
+            return Err(
+                "Ship cannot safely snapshot these uncommitted changes. Nested repository or submodule changes must be committed or stashed first."
+                    .to_owned(),
+            );
+        }
+        let snapshot_head = git_static(&worktree, &["rev-parse", "HEAD"])?;
+        Ok(IsolationContext {
+            worktree: worktree.clone(),
+            branch,
+            base_branch,
+            base_head,
+            snapshot_head,
+            isolation_kind: "snapshot-clone".to_owned(),
+            workspace_fingerprint: Some(fingerprint),
+        })
+    })();
+    let _ = std::fs::remove_file(&patch);
+    if snapshot_result.is_err() && worktree.exists() {
+        let _ = remove_managed_clone(root, &worktree);
+    }
+    snapshot_result
+}
+
+fn create_worktree(
+    app: &AppHandle,
+    repository: &Path,
+    run_id: &str,
+) -> Result<IsolationContext, String> {
+    let root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("worktrees");
+    create_isolation_at_root(repository, run_id, &root)
 }
 
 fn commit_managed_changes(worktree: &Path, objective: &str) -> Result<bool, String> {
@@ -3412,6 +3845,7 @@ async fn run_verification(
             None,
         );
         let mut command = Command::new(executable);
+        apply_provider_environment(&mut command, repository);
         command
             .args(&args)
             .current_dir(repository)
@@ -3497,39 +3931,149 @@ fn diff_evidence(worktree: &Path, base_head: &str) -> String {
 
 fn promote_worktree(
     base_repository: &Path,
-    worktree: &Path,
-    branch: &str,
-    base_head: &str,
-) -> Result<(), String> {
-    let base_status = git_static(base_repository, &["status", "--porcelain"])?;
-    if !base_status.trim().is_empty() {
-        return Err("The base checkout changed while the run was active.".to_owned());
+    isolation: &IsolationContext,
+    managed_root: &Path,
+) -> Result<PromotionResult, String> {
+    let worktree = &isolation.worktree;
+    let branch = &isolation.branch;
+    let base_head = &isolation.base_head;
+    let snapshot_head = &isolation.snapshot_head;
+    let current_branch = git_static(base_repository, &["branch", "--show-current"])?;
+    if current_branch != isolation.base_branch {
+        return Err(format!(
+            "The attached checkout moved from branch `{}` to {} while Ship was active. The verified work remains isolated.",
+            isolation.base_branch,
+            if current_branch.is_empty() {
+                "a detached HEAD".to_owned()
+            } else {
+                format!("branch `{current_branch}`")
+            }
+        ));
     }
     let current_head = git_static(base_repository, &["rev-parse", "HEAD"])?;
-    if current_head != base_head {
+    if current_head != base_head.as_str() {
         return Err("The base branch advanced while the run was active.".to_owned());
     }
-    git(
-        base_repository,
-        &[
-            "merge".to_owned(),
-            "--ff-only".to_owned(),
-            branch.to_owned(),
-        ],
-    )?;
-    git(
+
+    match isolation.isolation_kind.as_str() {
+        "worktree" => {
+            let base_status = git_static(base_repository, &["status", "--porcelain"])?;
+            if !base_status.trim().is_empty() {
+                return Err("The base checkout changed while the run was active.".to_owned());
+            }
+            git(
+                base_repository,
+                &[
+                    "merge".to_owned(),
+                    "--ff-only".to_owned(),
+                    branch.to_owned(),
+                ],
+            )?;
+            let mut cleanup_errors = Vec::new();
+            if let Err(error) = git(
+                base_repository,
+                &[
+                    "worktree".to_owned(),
+                    "remove".to_owned(),
+                    worktree.to_string_lossy().into_owned(),
+                ],
+            ) {
+                cleanup_errors.push(error);
+            }
+            if let Err(error) = git(
+                base_repository,
+                &["branch".to_owned(), "-d".to_owned(), branch.to_owned()],
+            ) {
+                cleanup_errors.push(error);
+            }
+            Ok(PromotionResult {
+                mode: PromotionMode::FastForward,
+                cleanup_warning: (!cleanup_errors.is_empty()).then(|| cleanup_errors.join("\n")),
+            })
+        }
+        "snapshot-clone" => {
+            let expected = isolation.workspace_fingerprint.as_deref().ok_or_else(|| {
+                "The preserved workspace snapshot is missing its safety fingerprint.".to_owned()
+            })?;
+            if workspace_fingerprint(base_repository)? != expected {
+                return Err(
+                    "The attached checkout changed while Ship was active. The verified work remains isolated so your newer edits are not overwritten."
+                        .to_owned(),
+                );
+            }
+            let patch = managed_root.join(format!(".promote-{}.patch", Uuid::new_v4()));
+            let apply_result = (|| {
+                git(
+                    worktree,
+                    &[
+                        "diff".to_owned(),
+                        "--binary".to_owned(),
+                        "--no-ext-diff".to_owned(),
+                        snapshot_head.to_owned(),
+                        "HEAD".to_owned(),
+                        format!("--output={}", patch.to_string_lossy()),
+                    ],
+                )?;
+                git(
+                    base_repository,
+                    &[
+                        "apply".to_owned(),
+                        "--check".to_owned(),
+                        "--binary".to_owned(),
+                        patch.to_string_lossy().into_owned(),
+                    ],
+                )?;
+                git(
+                    base_repository,
+                    &[
+                        "apply".to_owned(),
+                        "--binary".to_owned(),
+                        patch.to_string_lossy().into_owned(),
+                    ],
+                )
+            })();
+            let _ = std::fs::remove_file(&patch);
+            apply_result?;
+            let cleanup_warning = remove_managed_clone(managed_root, worktree).err();
+            Ok(PromotionResult {
+                mode: PromotionMode::WorkingTree,
+                cleanup_warning,
+            })
+        }
+        other => Err(format!("Unknown Ship isolation kind: {other}")),
+    }
+}
+
+fn discard_isolation(
+    base_repository: &Path,
+    isolation: &IsolationContext,
+    managed_root: &Path,
+) -> Option<String> {
+    if isolation.isolation_kind == "snapshot-clone" {
+        return remove_managed_clone(managed_root, &isolation.worktree).err();
+    }
+    let mut errors = Vec::new();
+    if let Err(error) = git(
         base_repository,
         &[
             "worktree".to_owned(),
             "remove".to_owned(),
-            worktree.to_string_lossy().into_owned(),
+            isolation.worktree.to_string_lossy().into_owned(),
         ],
-    )?;
-    git(
+    ) {
+        errors.push(error);
+    }
+    if let Err(error) = git(
         base_repository,
-        &["branch".to_owned(), "-d".to_owned(), branch.to_owned()],
-    )?;
-    Ok(())
+        &[
+            "branch".to_owned(),
+            "-D".to_owned(),
+            isolation.branch.clone(),
+        ],
+    ) {
+        errors.push(error);
+    }
+    (!errors.is_empty()).then(|| errors.join("\n"))
 }
 
 fn notify(app: &AppHandle, title: &str, body: &str) {
@@ -3849,6 +4393,7 @@ fn recent_chat_handoff(
     project_id: &str,
     target_participant: &str,
     resumed_target_session: bool,
+    exclude_run_id: Option<&str>,
 ) -> Result<Option<String>, String> {
     let connection = database.0.lock().map_err(|error| error.to_string())?;
     let mut statement = connection
@@ -3856,12 +4401,13 @@ fn recent_chat_handoff(
             "SELECT sender_kind, message_kind, body
              FROM messages
              WHERE project_id = ?1 AND message_kind IN ('human', 'agent')
+               AND (?2 IS NULL OR run_id IS NULL OR run_id <> ?2)
              ORDER BY created_at DESC, rowid DESC
              LIMIT 8",
         )
         .map_err(|error| error.to_string())?;
     let messages = statement
-        .query_map([project_id], |row| {
+        .query_map(params![project_id, exclude_run_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -3898,6 +4444,26 @@ fn recent_chat_handoff(
         ),
     };
     Ok(Some(truncate_utf8(&handoff, CHAT_HANDOFF_BUDGET_BYTES)))
+}
+
+fn objective_needs_room_context(objective: &str) -> bool {
+    let normalized = format!(" {} ", objective.trim().to_ascii_lowercase());
+    objective.len() <= 180
+        && [
+            " it ",
+            " this ",
+            " that ",
+            " those ",
+            " above ",
+            " add it ",
+            " do it ",
+            " fix it ",
+            " go ahead ",
+            " can you add ",
+            " can you do ",
+        ]
+        .iter()
+        .any(|signal| normalized.contains(signal))
 }
 
 #[tauri::command]
@@ -4139,6 +4705,7 @@ async fn test_provider_connection(
         &run_id,
         &participant,
         Phase::Chat,
+        false,
         "This is an Agent Room connection test. Reply with exactly READY. Do not inspect or modify files.",
         &repository,
         None,
@@ -4173,10 +4740,8 @@ async fn test_provider_connection(
                     "Connection test expected READY but received: {}",
                     truncate_utf8(result.summary.trim(), 320)
                 )
-            } else if !result.stderr.trim().is_empty() {
-                truncate_utf8(&result.stderr, 512)
             } else {
-                "Connection test did not return a response.".to_owned()
+                provider_failure_reason(&participant.name, "the connection test", &result)
             },
             last_verified_at: None,
         }
@@ -4201,10 +4766,11 @@ async fn discover_provider_models(
         .ok_or_else(|| "Install this CLI before refreshing its models.".to_owned())?;
     match request.participant_kind.as_str() {
         "antigravity" | "cursor" => {
-            let output = timeout(
-                Duration::from_secs(15),
-                Command::new(executable).arg("models").output(),
-            )
+            let output = timeout(Duration::from_secs(15), {
+                let mut command = Command::new(executable);
+                hide_tokio_command_window(&mut command);
+                command.arg("models").output()
+            })
             .await
             .map_err(|_| "Model discovery timed out after 15 seconds.".to_owned())?
             .map_err(|error| format!("Could not start model discovery: {error}"))?;
@@ -4251,14 +4817,65 @@ async fn start_room_chat(
 ) -> Result<ChatResult, String> {
     let chat_started = Instant::now();
     let database = database.inner();
-    let repository = PathBuf::from(&request.repository_path);
+    let active_run = if let Some(active_run_id) = request.active_run_id.as_deref() {
+        let connection = database.0.lock().map_err(|error| error.to_string())?;
+        connection
+            .query_row(
+                "SELECT worktree_path, current_owner, writer, reviewer, state
+                 FROM runs WHERE id = ?1 AND project_id = ?2",
+                params![active_run_id, request.project_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "The active Ship run could not be found.".to_owned())
+            .and_then(|(worktree, current_owner, writer, reviewer, state)| {
+                if !run_state_allows_side_chat(&state) {
+                    return Err("This Ship run is no longer active.".to_owned());
+                }
+                let worktree = worktree
+                    .ok_or_else(|| "The active Ship worktree is unavailable.".to_owned())?;
+                let preferred_owner = if state == "reviewing" {
+                    reviewer.clone()
+                } else {
+                    writer.clone()
+                };
+                let owner = current_owner
+                    .or(preferred_owner)
+                    .or(writer)
+                    .or(reviewer)
+                    .ok_or_else(|| {
+                        "The active Ship run has no available participant.".to_owned()
+                    })?;
+                Ok((PathBuf::from(worktree), owner))
+            })?
+            .into()
+    } else {
+        None
+    };
+    let repository = active_run
+        .as_ref()
+        .map(|(repository, _)| repository.clone())
+        .unwrap_or_else(|| PathBuf::from(&request.repository_path));
     git_static(&repository, &["rev-parse", "--show-toplevel"])
         .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
     let message = request.message.trim();
     if message.is_empty() {
         return Err("Enter a message before sending.".to_owned());
     }
-    let participant = if let Some(requested) = request.requested_agent.as_deref() {
+    let requested_agent = active_run
+        .as_ref()
+        .map(|(_, owner)| owner.as_str())
+        .or(request.requested_agent.as_deref());
+    let participant = if let Some(requested) = requested_agent {
         let participant = participant_for_project(
             database,
             &request.project_id,
@@ -4422,6 +5039,7 @@ async fn start_room_chat(
         &request.project_id,
         &participant.kind,
         session_id.is_some(),
+        None,
     )?;
     let (cancel_sender, cancel_receiver) = watch::channel(false);
     runtime
@@ -4441,7 +5059,11 @@ async fn start_room_chat(
         &[],
         None,
     )?;
-    let chat_mode_detail = "Instant project chat. No worktree, verification, review, or promotion.";
+    let chat_mode_detail = if active_run.is_some() {
+        "Read-only side chat attached to the active managed worktree. The autonomous Ship route continues separately."
+    } else {
+        "Instant project chat. No worktree, verification, review, or promotion."
+    };
     emit_event(
         &app,
         &request.run_id,
@@ -4453,14 +5075,27 @@ async fn start_room_chat(
         chat_mode_detail,
         None,
     );
-    let mut prompt = format!(
-        "You are in instant project chat for the current repository. Answer the user's message directly and concisely. Inspect files when useful, but do not modify files, create a worktree, run project verification, or use an Agent Room handoff.\n\nUser message:\n{message}"
-    );
+    let chat_can_write = active_run.is_none() && participant.capabilities.write_mode;
+    let mut prompt = if active_run.is_some() {
+        format!(
+            "You are in a read-only side chat attached to an active Agent Room Ship worktree. \
+             Answer the user's question directly and concisely using the worktree's current state. \
+             Do not modify files, interrupt or steer the active builder, start another Ship run, \
+             run full project verification, or emit an Agent Room Ship intent or handoff.\n\nUser message:\n{message}"
+        )
+    } else {
+        format!(
+            "You are in the current repository's fast working chat. Answer questions directly and concisely. \
+             When the user explicitly requests a small, bounded repository edit, make that edit directly in the attached checkout and report what changed. \
+             Do not create a worktree, run broad project verification, or use an Agent Room handoff. \
+             For substantial or unattended implementation work, do not edit first; use the autonomous Ship intent when its trigger matches.\n\nUser message:\n{message}"
+        )
+    };
     if let Some(handoff) = room_handoff {
         prompt.push_str("\n\n");
         prompt.push_str(&handoff);
     }
-    if settings.autonomous_ship_enabled {
+    if settings.autonomous_ship_enabled && active_run.is_none() {
         prompt.push_str(&format!(
             "\n\nAutonomous Ship is armed for this project. Apply the following skill when its trigger matches. The skill is `{AUTONOMOUS_SHIP_SKILL_PATH}`:\n\n{AUTONOMOUS_SHIP_SKILL}"
         ));
@@ -4473,6 +5108,7 @@ async fn start_room_chat(
         &request.run_id,
         &participant,
         Phase::Chat,
+        chat_can_write,
         &prompt,
         &repository,
         session_id.as_deref(),
@@ -4504,6 +5140,7 @@ async fn start_room_chat(
                 &request.run_id,
                 &participant,
                 Phase::Chat,
+                chat_can_write,
                 &prompt,
                 &repository,
                 None,
@@ -4561,10 +5198,7 @@ async fn start_room_chat(
                 "Chat produced no output for {CHAT_IDLE_TIMEOUT_SECONDS} seconds and was stopped."
             )
         } else {
-            format!(
-                "{} could not complete the chat response. {}",
-                participant.name, result.stderr
-            )
+            provider_failure_reason(&participant.name, "the chat response", &result)
         };
         let status = if authentication_attention(&result.summary, &result.stderr).is_some() {
             "sign-in-required"
@@ -4684,14 +5318,12 @@ async fn start_room_chat(
     })
 }
 
-#[tauri::command]
-async fn start_room_run(
+async fn execute_room_run(
     app: AppHandle,
-    database: State<'_, Database>,
-    runtime: State<'_, RuntimeState>,
+    database: &Database,
+    runtime: &RuntimeState,
     request: StartRunRequest,
 ) -> Result<StartRunResult, String> {
-    let database = database.inner();
     let base_repository = PathBuf::from(&request.repository_path);
     git_static(&base_repository, &["rev-parse", "--show-toplevel"])
         .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
@@ -4699,7 +5331,7 @@ async fn start_room_run(
     let participants = participants_with_connections(
         database,
         &request.project_id,
-        cached_participants(runtime.inner(), false).await?,
+        cached_participants(runtime, false).await?,
     )?;
     let ready = participants
         .iter()
@@ -4724,13 +5356,18 @@ async fn start_room_run(
         String,
         Option<String>,
         Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
         u32,
     );
     let existing = {
         let connection = database.0.lock().map_err(|error| error.to_string())?;
         connection
             .query_row(
-                "SELECT objective, state, worktree_path, branch, base_head, writer,
+                "SELECT objective, state, worktree_path, branch, base_head, base_branch,
+                        snapshot_head, isolation_kind, workspace_fingerprint, writer,
                         native_session_id, recovery_count
                  FROM runs WHERE id = ?1",
                 [&request.run_id],
@@ -4743,7 +5380,11 @@ async fn start_room_run(
                         row.get(4)?,
                         row.get(5)?,
                         row.get(6)?,
-                        row.get::<_, i64>(7)?.max(0) as u32,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get::<_, i64>(11)?.max(0) as u32,
                     ))
                 },
             )
@@ -4753,7 +5394,7 @@ async fn start_room_run(
     let is_recovery = existing.is_some();
     let requested_builder = existing
         .as_ref()
-        .and_then(|row: &RecoveryRow| row.5.as_deref())
+        .and_then(|row: &RecoveryRow| row.9.as_deref())
         .or(request.requested_agent.as_deref());
     let builder = if let Some(requested) = requested_builder {
         ready
@@ -4782,58 +5423,86 @@ async fn start_room_run(
         .await
         .insert(request.run_id.clone(), cancel_sender);
 
-    let (worktree, branch, base_branch, base_head, recovery_session, recovery_count) =
-        if let Some((
-            stored_objective,
-            state,
-            worktree_path,
-            stored_branch,
-            stored_base_head,
-            _,
-            session,
-            prior_recovery_count,
-        )) = existing
-        {
-            if stored_objective != request.objective {
+    let (isolation, recovery_session, recovery_count) = if let Some((
+        stored_objective,
+        state,
+        worktree_path,
+        stored_branch,
+        stored_base_head,
+        stored_base_branch,
+        stored_snapshot_head,
+        stored_isolation_kind,
+        stored_fingerprint,
+        _,
+        session,
+        prior_recovery_count,
+    )) = existing
+    {
+        if stored_objective != request.objective {
+            runtime.cancellations.lock().await.remove(&request.run_id);
+            return Err("A preserved run can only resume its original objective.".to_owned());
+        }
+        if !matches!(state.as_str(), "waiting" | "failed" | "stopped") {
+            runtime.cancellations.lock().await.remove(&request.run_id);
+            return Err(format!("Run state `{state}` cannot be resumed."));
+        }
+        if prior_recovery_count >= MAX_RECOVERY_ATTEMPTS {
+            runtime.cancellations.lock().await.remove(&request.run_id);
+            return Err(format!(
+                "This run has exhausted its {MAX_RECOVERY_ATTEMPTS} recovery attempts."
+            ));
+        }
+        let path = PathBuf::from(worktree_path);
+        if !path.is_dir() {
+            runtime.cancellations.lock().await.remove(&request.run_id);
+            return Err("The preserved worktree no longer exists.".to_owned());
+        }
+        let stored_base_branch = match stored_base_branch {
+            Some(value) => value,
+            None => {
                 runtime.cancellations.lock().await.remove(&request.run_id);
-                return Err("A preserved run can only resume its original objective.".to_owned());
+                return Err(
+                    "This preserved run predates branch-identity safety. Start a new Ship run so Agent Room can prove the target branch."
+                        .to_owned(),
+                );
             }
-            if !matches!(state.as_str(), "waiting" | "failed" | "stopped") {
-                runtime.cancellations.lock().await.remove(&request.run_id);
-                return Err(format!("Run state `{state}` cannot be resumed."));
-            }
-            if prior_recovery_count >= MAX_RECOVERY_ATTEMPTS {
-                runtime.cancellations.lock().await.remove(&request.run_id);
-                return Err(format!(
-                    "This run has exhausted its {MAX_RECOVERY_ATTEMPTS} recovery attempts."
-                ));
-            }
-            let path = PathBuf::from(worktree_path);
-            if !path.is_dir() {
-                runtime.cancellations.lock().await.remove(&request.run_id);
-                return Err("The preserved worktree no longer exists.".to_owned());
-            }
-            let current_branch =
-                git_static(&base_repository, &["branch", "--show-current"]).unwrap_or_default();
-            (
-                path,
-                stored_branch,
-                current_branch,
-                stored_base_head,
-                session,
-                prior_recovery_count + 1,
-            )
-        } else {
-            let worktree_result = create_worktree(&app, &base_repository, &request.run_id);
-            let (worktree, branch, base_branch, base_head) = match worktree_result {
-                Ok(result) => result,
-                Err(error) => {
-                    runtime.cancellations.lock().await.remove(&request.run_id);
-                    return Err(error);
-                }
-            };
-            (worktree, branch, base_branch, base_head, None, 0)
         };
+        (
+            IsolationContext {
+                worktree: path,
+                branch: stored_branch,
+                base_branch: stored_base_branch,
+                snapshot_head: stored_snapshot_head.unwrap_or_else(|| stored_base_head.clone()),
+                base_head: stored_base_head,
+                isolation_kind: stored_isolation_kind,
+                workspace_fingerprint: stored_fingerprint,
+            },
+            session,
+            prior_recovery_count + 1,
+        )
+    } else {
+        let worktree_result = create_worktree(&app, &base_repository, &request.run_id);
+        let isolation = match worktree_result {
+            Ok(result) => result,
+            Err(error) => {
+                runtime.cancellations.lock().await.remove(&request.run_id);
+                return Err(error);
+            }
+        };
+        (isolation, None, 0)
+    };
+    let worktree = isolation.worktree.clone();
+    let branch = isolation.branch.clone();
+    let base_branch = isolation.base_branch.clone();
+    let base_head = isolation.base_head.clone();
+    let snapshot_head = isolation.snapshot_head.clone();
+    let isolation_kind = isolation.isolation_kind.clone();
+    let workspace_fingerprint = isolation.workspace_fingerprint.clone();
+    let managed_root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("worktrees");
     let artifact_dir = run_artifact_directory(&app, &request.run_id)?;
     let (instructions, instruction_files) = repository_instructions(&worktree, &[]);
     let selected_skills = select_project_skills(&worktree, &request.objective);
@@ -4881,9 +5550,11 @@ async fn start_room_run(
             .execute(
                 "INSERT INTO runs
                  (id, project_id, objective, state, current_owner, writer, reviewer,
-                  worktree_path, branch, base_head, degraded_review, artifact_path,
+                  worktree_path, branch, base_head, base_branch, snapshot_head,
+                  isolation_kind, workspace_fingerprint, degraded_review, artifact_path,
                   instruction_files_json, skill_files_json, recovery_count)
-                 VALUES (?1, ?2, ?3, 'working', ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0)",
+                 VALUES (?1, ?2, ?3, 'working', ?4, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                         ?11, ?12, ?13, ?14, ?15, ?16, 0)",
                 params![
                     request.run_id,
                     request.project_id,
@@ -4893,6 +5564,10 @@ async fn start_room_run(
                     worktree.to_string_lossy(),
                     branch,
                     base_head,
+                    base_branch,
+                    snapshot_head,
+                    isolation_kind,
+                    workspace_fingerprint,
                     degraded_review,
                     artifact_dir.to_string_lossy(),
                     serde_json::to_string(&instruction_files).unwrap_or_else(|_| "[]".to_owned()),
@@ -4922,18 +5597,28 @@ async fn start_room_run(
         "system",
         "status",
         &format!(
-            "{} isolated run on `{branch}` from `{base_branch}`.",
+            "{} isolated run on `{branch}` from `{base_branch}`.{}",
             if is_recovery {
                 "Resumed the"
             } else {
                 "Created an"
+            },
+            if isolation_kind == "snapshot-clone" {
+                " Current uncommitted files were captured without committing or stashing the attached checkout."
+            } else {
+                ""
             }
         ),
         &[],
         &[],
         Some(&format!(
-            "Managed worktree: {}\nArtifacts: {}\nInstructions: {}\nSelected skills: {}",
+            "Managed workspace: {}\nIsolation: {}\nArtifacts: {}\nInstructions: {}\nSelected skills: {}",
             worktree.to_string_lossy(),
+            if isolation_kind == "snapshot-clone" {
+                "dirty-checkout snapshot"
+            } else {
+                "Git worktree"
+            },
             artifact_dir.to_string_lossy(),
             instruction_files.len(),
             skill_files.len()
@@ -4948,7 +5633,15 @@ async fn start_room_run(
         "working",
         Some(&builder.kind),
         "Isolation ready",
-        &format!("{} will build on {branch}.", builder.name),
+        &format!(
+            "{} will build on {branch}.{}",
+            builder.name,
+            if isolation_kind == "snapshot-clone" {
+                " Existing uncommitted work is included and remains untouched in the attached checkout."
+            } else {
+                ""
+            }
+        ),
         None,
     );
 
@@ -4970,7 +5663,18 @@ async fn start_room_run(
         },
         handoff_contract(Phase::Build)
     );
-    let (build_packet, build_context_bytes) = assemble_packet(&[
+    let room_context = if objective_needs_room_context(&request.objective) {
+        recent_chat_handoff(
+            database,
+            &request.project_id,
+            &builder.kind,
+            false,
+            Some(&request.run_id),
+        )?
+    } else {
+        None
+    };
+    let mut build_sections = vec![
         ("Objective", request.objective.clone()),
         ("Assignment", assignment),
         ("Repository instructions", instructions.clone()),
@@ -4986,7 +5690,19 @@ async fn start_room_run(
                 MAX_RECOVERY_ATTEMPTS
             ),
         ),
-    ]);
+    ];
+    if let Some(context) = room_context {
+        build_sections.insert(
+            1,
+            (
+                "Recent room context",
+                format!(
+                    "The objective refers to the recent conversation. Resolve pronouns from this bounded handoff and implement the previously described change:\n{context}"
+                ),
+            ),
+        );
+    }
+    let (build_packet, build_context_bytes) = assemble_packet(&build_sections);
     let mut max_context_bytes = build_context_bytes;
     emit_event(
         &app,
@@ -5019,6 +5735,7 @@ async fn start_room_run(
         &request.run_id,
         builder,
         Phase::Build,
+        true,
         &build_packet,
         &worktree,
         recovery_session.as_deref(),
@@ -5040,10 +5757,14 @@ async fn start_room_run(
         &request.run_id,
         Phase::Build,
         &builder.kind,
-        if build_result.success {
-            "complete"
-        } else {
-            "failed"
+        match build_result
+            .handoff
+            .as_ref()
+            .map(|handoff| handoff.status.as_str())
+        {
+            Some("completed") => "complete",
+            Some("blocked") => "blocked",
+            _ => "failed",
         },
         build_result.session_id.as_deref(),
         build_context_bytes,
@@ -5068,6 +5789,12 @@ async fn start_room_run(
     if build_result.stopped || build_result.timed_out || !build_result.success {
         let state = if build_result.stopped {
             "stopped"
+        } else if build_result
+            .handoff
+            .as_ref()
+            .is_some_and(|handoff| handoff.status == "blocked")
+        {
+            "waiting"
         } else {
             "failed"
         };
@@ -5077,11 +5804,10 @@ async fn start_room_run(
             "The builder exceeded the 20 minute phase limit.".to_owned()
         } else if build_result.idle_timed_out {
             "The builder produced no output for 5 minutes and was stopped.".to_owned()
+        } else if let Some(handoff) = build_result.handoff.as_ref() {
+            handoff_attention_reason(handoff)
         } else {
-            format!(
-                "{} failed before completing the build. {}",
-                builder.name, build_result.stderr
-            )
+            provider_failure_reason(&builder.name, "the build", &build_result)
         };
         final_failure(
             &app,
@@ -5104,7 +5830,7 @@ async fn start_room_run(
             reviewer: reviewer.kind.clone(),
             degraded_review,
             session_id: build_result.session_id,
-            changed_files: changed_files(&worktree, &base_head),
+            changed_files: changed_files(&worktree, &snapshot_head),
             git_status: git_status(&worktree),
             verification: vec![],
             stopped: state == "stopped",
@@ -5121,7 +5847,7 @@ async fn start_room_run(
     }
 
     commit_managed_changes(&worktree, &request.objective)?;
-    let mut files = changed_files(&worktree, &base_head);
+    let mut files = changed_files(&worktree, &snapshot_head);
     persist_message(
         database,
         &request.project_id,
@@ -5228,7 +5954,7 @@ async fn start_room_run(
         ("Builder handoff", review_handoff),
         (
             "Focused repository delta",
-            diff_evidence(&worktree, &base_head),
+            diff_evidence(&worktree, &snapshot_head),
         ),
     ]);
     max_context_bytes = max_context_bytes.max(review_context_bytes);
@@ -5279,6 +6005,7 @@ async fn start_room_run(
         &request.run_id,
         reviewer,
         Phase::Review,
+        false,
         &review_packet,
         &worktree,
         None,
@@ -5357,7 +6084,7 @@ async fn start_room_run(
         } else if review_result.idle_timed_out {
             "The reviewer produced no output for 5 minutes and was stopped.".to_owned()
         } else {
-            format!("The reviewer failed: {}", review_result.stderr)
+            provider_failure_reason(&reviewer.name, "the review", &review_result)
         };
         final_failure(
             &app,
@@ -5421,7 +6148,7 @@ async fn start_room_run(
             ("Applicable repository instructions", revision_instructions),
             ("Selected project skills", selected_skill_context.clone()),
             ("Current changed files", files.join("\n")),
-            ("Focused delta", diff_evidence(&worktree, &base_head)),
+            ("Focused delta", diff_evidence(&worktree, &snapshot_head)),
             (
                 "Run limit",
                 "This is the only automatic revision. Resolve all material findings before stopping."
@@ -5458,6 +6185,7 @@ async fn start_room_run(
             &request.run_id,
             builder,
             Phase::Revise,
+            true,
             &revision_packet,
             &worktree,
             build_result.session_id.as_deref(),
@@ -5510,7 +6238,7 @@ async fn start_room_run(
             } else if revision_result.idle_timed_out {
                 "The revision produced no output for 5 minutes and was stopped.".to_owned()
             } else {
-                format!("The bounded revision failed: {}", revision_result.stderr)
+                provider_failure_reason(&builder.name, "the bounded revision", &revision_result)
             };
             final_failure(
                 &app,
@@ -5533,7 +6261,7 @@ async fn start_room_run(
                 reviewer: reviewer.kind.clone(),
                 degraded_review,
                 session_id: build_result.session_id,
-                changed_files: changed_files(&worktree, &base_head),
+                changed_files: changed_files(&worktree, &snapshot_head),
                 git_status: git_status(&worktree),
                 verification,
                 stopped: state == "stopped",
@@ -5549,7 +6277,7 @@ async fn start_room_run(
             });
         }
         commit_managed_changes(&worktree, &format!("Revise {}", request.objective))?;
-        files = changed_files(&worktree, &base_head);
+        files = changed_files(&worktree, &snapshot_head);
         persist_message(
             database,
             &request.project_id,
@@ -5602,7 +6330,7 @@ async fn start_room_run(
             ),
             (
                 "Current focused delta",
-                diff_evidence(&worktree, &base_head),
+                diff_evidence(&worktree, &snapshot_head),
             ),
         ]);
         max_context_bytes = max_context_bytes.max(final_context_bytes);
@@ -5635,6 +6363,7 @@ async fn start_room_run(
             &request.run_id,
             reviewer,
             Phase::FinalReview,
+            false,
             &final_packet,
             &worktree,
             review_result.session_id.as_deref(),
@@ -5698,7 +6427,7 @@ async fn start_room_run(
             } else if final_result.idle_timed_out {
                 "The final review produced no output for 5 minutes and was stopped.".to_owned()
             } else {
-                format!("Final review failed: {}", final_result.stderr)
+                provider_failure_reason(&reviewer.name, "the final review", &final_result)
             };
             let state = if final_result.stopped {
                 "stopped"
@@ -5787,6 +6516,18 @@ async fn start_room_run(
         });
     }
 
+    update_run(
+        database,
+        &request.run_id,
+        "promoting",
+        None,
+        review_count,
+        revision_count,
+        build_result.session_id.as_deref(),
+        max_context_bytes,
+        None,
+        false,
+    )?;
     emit_event(
         &app,
         &request.run_id,
@@ -5798,10 +6539,10 @@ async fn start_room_run(
         "Agent Room is checking that the base checkout has not changed.",
         Some(max_context_bytes),
     );
-    let has_changes = git_static(&worktree, &["rev-parse", "HEAD"])? != base_head;
-    let promoted = if has_changes {
-        match promote_worktree(&base_repository, &worktree, &branch, &base_head) {
-            Ok(()) => true,
+    let has_changes = git_static(&worktree, &["rev-parse", "HEAD"])? != snapshot_head;
+    let (promoted, promotion_mode, cleanup_warning) = if has_changes {
+        match promote_worktree(&base_repository, &isolation, &managed_root) {
+            Ok(result) => (true, Some(result.mode), result.cleanup_warning),
             Err(error) => {
                 final_failure(
                     &app,
@@ -5841,20 +6582,34 @@ async fn start_room_run(
             }
         }
     } else {
-        let _ = git(
-            &base_repository,
-            &[
-                "worktree".to_owned(),
-                "remove".to_owned(),
-                worktree.to_string_lossy().into_owned(),
-            ],
-        );
-        let _ = git(
-            &base_repository,
-            &["branch".to_owned(), "-D".to_owned(), branch.clone()],
-        );
-        false
+        (
+            false,
+            None,
+            discard_isolation(&base_repository, &isolation, &managed_root),
+        )
     };
+    let completion_body = match promotion_mode {
+        Some(PromotionMode::FastForward) => {
+            "Verification and review passed. The managed branch was fast-forwarded into the base checkout."
+        }
+        Some(PromotionMode::WorkingTree) => {
+            "Verification and review passed. Agent Room safely applied the verified delta to your existing uncommitted checkout without committing or stashing your work."
+        }
+        None => {
+            "Verification and review passed. The objective intentionally produced no repository change."
+        }
+    };
+    let mut completion_reasons = vec![if degraded_review {
+        "Completed with a same-provider review downgrade.".to_owned()
+    } else {
+        "Completed with independent provider review.".to_owned()
+    }];
+    if let Some(warning) = cleanup_warning {
+        completion_reasons.push(format!(
+            "The verified result was applied, but temporary isolation cleanup needs attention: {warning}"
+        ));
+    }
+    let completion_reason = completion_reasons.join("\n");
 
     persist_message(
         database,
@@ -5862,18 +6617,10 @@ async fn start_room_run(
         &request.run_id,
         "system",
         "status",
-        if promoted {
-            "Verification and review passed. The managed branch was fast-forwarded into the base checkout."
-        } else {
-            "Verification and review passed. The objective intentionally produced no repository change."
-        },
+        completion_body,
         &files,
         &verification,
-        if degraded_review {
-            Some("Completed with a same-provider review downgrade.")
-        } else {
-            Some("Completed with independent provider review.")
-        },
+        Some(&completion_reason),
     )?;
     update_run(
         database,
@@ -5895,20 +6642,24 @@ async fn start_room_run(
         "complete",
         None,
         "Run complete",
-        if promoted {
-            "Verified work was promoted safely."
-        } else {
-            "The reviewed objective required no repository change."
+        match promotion_mode {
+            Some(PromotionMode::WorkingTree) => {
+                "Verified work was applied to your current uncommitted checkout."
+            }
+            Some(PromotionMode::FastForward) => "Verified work was promoted safely.",
+            None => "The reviewed objective required no repository change.",
         },
         Some(max_context_bytes),
     );
     notify(
         &app,
         "Agent Room complete",
-        if promoted {
-            "Verified work was promoted to your base branch."
-        } else {
-            "The reviewed objective completed without repository changes."
+        match promotion_mode {
+            Some(PromotionMode::WorkingTree) => {
+                "Verified work was applied without committing or stashing your existing changes."
+            }
+            Some(PromotionMode::FastForward) => "Verified work was promoted to your base branch.",
+            None => "The reviewed objective completed without repository changes.",
         },
     );
     runtime.cancellations.lock().await.remove(&request.run_id);
@@ -5937,14 +6688,126 @@ async fn start_room_run(
     })
 }
 
+fn run_state_allows_side_chat(state: &str) -> bool {
+    matches!(
+        state,
+        "selecting" | "working" | "verifying" | "reviewing" | "revising"
+    )
+}
+
+fn mark_run_and_activation_failed(
+    database: &Database,
+    run_id: &str,
+    error: &str,
+) -> Result<bool, String> {
+    let connection = database.0.lock().map_err(|lock| lock.to_string())?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|database_error| database_error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE runs SET
+                   state = 'failed',
+                   current_owner = NULL,
+                   stop_reason = ?1,
+                   finished_at = CURRENT_TIMESTAMP
+                 WHERE id = ?2
+                   AND state IN ('selecting', 'working', 'verifying', 'reviewing', 'revising', 'promoting')",
+            params![error, run_id],
+        )
+        .map_err(|database_error| database_error.to_string())?;
+    if changed == 0 {
+        transaction
+            .rollback()
+            .map_err(|database_error| database_error.to_string())?;
+        return Ok(false);
+    }
+    transaction
+        .execute(
+            "UPDATE activations
+             SET state = 'failed', finished_at = CURRENT_TIMESTAMP
+             WHERE run_id = ?1 AND state = 'running'",
+            params![run_id],
+        )
+        .map_err(|database_error| database_error.to_string())?;
+    transaction
+        .commit()
+        .map_err(|database_error| database_error.to_string())?;
+    Ok(true)
+}
+
+fn finalize_unhandled_run_error(
+    app: &AppHandle,
+    database: &Database,
+    project_id: &str,
+    run_id: &str,
+    error: &str,
+) -> Result<bool, String> {
+    if !mark_run_and_activation_failed(database, run_id, error)? {
+        return Ok(false);
+    }
+    persist_message(
+        database,
+        project_id,
+        run_id,
+        "system",
+        "error",
+        "Ship stopped safely.",
+        &[],
+        &[],
+        Some(error),
+    )?;
+    emit_event(
+        app,
+        run_id,
+        "attention",
+        "ship",
+        "failed",
+        None,
+        "Ship stopped safely",
+        error,
+        None,
+    );
+    notify(
+        app,
+        "Agent Room needs attention",
+        "Ship stopped after an unexpected coordinator error. Its worktree was preserved.",
+    );
+    Ok(true)
+}
+
+#[tauri::command]
+async fn start_room_run(
+    app: AppHandle,
+    database: State<'_, Database>,
+    runtime: State<'_, RuntimeState>,
+    request: StartRunRequest,
+) -> Result<StartRunResult, String> {
+    let run_id = request.run_id.clone();
+    let project_id = request.project_id.clone();
+    let result = execute_room_run(app.clone(), database.inner(), runtime.inner(), request).await;
+    if let Err(error) = result.as_ref() {
+        let _ = finalize_unhandled_run_error(&app, database.inner(), &project_id, &run_id, error);
+        runtime.cancellations.lock().await.remove(&run_id);
+    }
+    result
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let data_directory = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_directory)?;
             let connection = Connection::open(data_directory.join("agent-room.db"))?;
             migrate(&connection)?;
+            reconcile_interrupted_runs(&connection)?;
             app.manage(Database(Mutex::new(connection)));
             app.manage(RuntimeState::default());
             Ok(())
@@ -5972,6 +6835,40 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    fn test_repository() -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("agent-room-test-{}", Uuid::new_v4()));
+        let repository = root.join("repository");
+        std::fs::create_dir_all(&repository).expect("create test repository");
+        git(&repository, &["init".to_owned()]).expect("initialize repository");
+        git(
+            &repository,
+            &[
+                "config".to_owned(),
+                "user.name".to_owned(),
+                "Agent Room Test".to_owned(),
+            ],
+        )
+        .expect("configure test name");
+        git(
+            &repository,
+            &[
+                "config".to_owned(),
+                "user.email".to_owned(),
+                "agent-room-test@local".to_owned(),
+            ],
+        )
+        .expect("configure test email");
+        std::fs::write(repository.join("plan.md"), "committed\n").expect("write tracked file");
+        git_static(&repository, &["add", "plan.md"]).expect("stage tracked file");
+        git_static(&repository, &["commit", "-m", "Initial"]).expect("commit tracked file");
+        (root, repository)
+    }
+
+    fn remove_test_repository(root: &Path) {
+        assert!(root.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(root).expect("remove test repository");
+    }
+
     #[test]
     fn context_packet_is_bounded_and_explicitly_truncated() {
         let oversized = "x".repeat(CONTEXT_BUDGET_BYTES * 2);
@@ -5997,6 +6894,29 @@ mod tests {
         );
         assert!(extract_phase_handoff(&value, Phase::Build).is_ok());
         assert!(extract_phase_handoff(&value, Phase::Review).is_err());
+    }
+
+    #[test]
+    fn referential_ship_objectives_receive_recent_room_context() {
+        assert!(objective_needs_room_context("@codex can you add it now"));
+        assert!(objective_needs_room_context("Go ahead and fix that"));
+        assert!(!objective_needs_room_context(
+            "Implement a retry button in the room header and preserve existing state."
+        ));
+
+        let handoff = AgentHandoff {
+            schema_version: 1,
+            status: "blocked".to_owned(),
+            summary: "The requested change was not specified.".to_owned(),
+            changed_files: vec![],
+            checks: vec![],
+            findings: vec!["Recent context was unavailable.".to_owned()],
+            next_action: "Carry the prior chat into Ship.".to_owned(),
+        };
+        let reason = handoff_attention_reason(&handoff);
+        assert!(reason.contains("requested change was not specified"));
+        assert!(reason.contains("Recent context was unavailable"));
+        assert!(reason.contains("Next action: Carry the prior chat into Ship"));
     }
 
     #[test]
@@ -6230,6 +7150,412 @@ Earlier conversation content
     }
 
     #[test]
+    fn provider_activity_surfaces_only_explicit_reasoning_and_tools() {
+        let reasoning = serde_json::json!({
+            "type": "item.completed",
+            "item": {
+                "type": "reasoning",
+                "text": "Inspecting the repository instructions."
+            }
+        });
+        assert_eq!(
+            provider_activity("codex", &reasoning),
+            Some((
+                "Thinking".to_owned(),
+                "Inspecting the repository instructions.".to_owned()
+            ))
+        );
+
+        let command = serde_json::json!({
+            "type": "item.started",
+            "item": {
+                "type": "command_execution",
+                "command": "npm test",
+                "status": "in_progress"
+            }
+        });
+        assert_eq!(
+            provider_activity("codex", &command),
+            Some(("Running command".to_owned(), "npm test".to_owned()))
+        );
+        assert!(
+            provider_activity("codex", &serde_json::json!({"type": "thread.started"})).is_none()
+        );
+    }
+
+    #[test]
+    fn side_chat_closes_before_promotion_removes_the_worktree() {
+        for state in ["selecting", "working", "verifying", "reviewing", "revising"] {
+            assert!(run_state_allows_side_chat(state), "{state}");
+        }
+        for state in ["promoting", "complete", "failed", "stopped", "waiting"] {
+            assert!(!run_state_allows_side_chat(state), "{state}");
+        }
+    }
+
+    #[test]
+    fn unhandled_run_failure_finishes_the_active_activation_transactionally() {
+        let connection = Connection::open_in_memory().expect("open test database");
+        migrate(&connection).expect("migrate test database");
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, goal, repository_path)
+                 VALUES ('project-1', 'Agent Room', 'Test failure', 'C:\\repo')",
+                [],
+            )
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO runs
+                 (id, project_id, objective, state, current_owner)
+                 VALUES ('run-1', 'project-1', 'Test', 'working', 'codex')",
+                [],
+            )
+            .expect("insert active run");
+        connection
+            .execute(
+                "INSERT INTO activations
+                 (id, run_id, phase, participant_kind, state, context_bytes)
+                 VALUES ('activation-1', 'run-1', 'build', 'codex', 'running', 0)",
+                [],
+            )
+            .expect("insert active activation");
+        let database = Database(Mutex::new(connection));
+
+        assert!(
+            mark_run_and_activation_failed(&database, "run-1", "coordinator error")
+                .expect("mark failure")
+        );
+        let connection = database.0.lock().expect("lock test database");
+        let run: (String, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT state, current_owner, finished_at FROM runs WHERE id = 'run-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read failed run");
+        let activation: (String, Option<String>) = connection
+            .query_row(
+                "SELECT state, finished_at FROM activations WHERE id = 'activation-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read failed activation");
+
+        assert_eq!(run.0, "failed");
+        assert!(run.1.is_none());
+        assert!(run.2.is_some());
+        assert_eq!(activation.0, "failed");
+        assert!(activation.1.is_some());
+    }
+
+    #[test]
+    fn dirty_checkout_ship_applies_only_the_verified_delta_without_committing_user_work() {
+        let (root, repository) = test_repository();
+        let managed_root = root.join("managed");
+        std::fs::write(repository.join("plan.md"), "user draft\n").expect("modify tracked file");
+        std::fs::write(repository.join("notes.md"), "user notes\n").expect("write untracked file");
+        let original_head = git_static(&repository, &["rev-parse", "HEAD"]).expect("read head");
+
+        let isolation = create_isolation_at_root(&repository, "dirty-ship-test", &managed_root)
+            .expect("create dirty isolation");
+        assert_eq!(isolation.isolation_kind, "snapshot-clone");
+        assert_eq!(
+            std::fs::read_to_string(isolation.worktree.join("plan.md"))
+                .expect("read snapshot tracked file")
+                .replace("\r\n", "\n"),
+            "user draft\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(isolation.worktree.join("notes.md"))
+                .expect("read snapshot untracked file"),
+            "user notes\n"
+        );
+
+        std::fs::write(
+            isolation.worktree.join("plan.md"),
+            "user draft\nagent addition\n",
+        )
+        .expect("write agent change");
+        std::fs::write(
+            isolation.worktree.join("notes.md"),
+            "user notes\nagent addition\n",
+        )
+        .expect("update captured untracked file");
+        commit_managed_changes(&isolation.worktree, "Add implementation detail")
+            .expect("commit agent change");
+        let promotion =
+            promote_worktree(&repository, &isolation, &managed_root).expect("apply verified delta");
+
+        assert_eq!(promotion.mode, PromotionMode::WorkingTree);
+        assert!(promotion.cleanup_warning.is_none());
+        assert_eq!(
+            git_static(&repository, &["rev-parse", "HEAD"]).expect("read unchanged head"),
+            original_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.join("plan.md"))
+                .expect("read promoted file")
+                .replace("\r\n", "\n"),
+            "user draft\nagent addition\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.join("notes.md"))
+                .expect("read user notes")
+                .replace("\r\n", "\n"),
+            "user notes\nagent addition\n"
+        );
+        assert!(git_static(&repository, &["status", "--porcelain"])
+            .expect("read dirty status")
+            .contains("?? notes.md"));
+        assert!(!isolation.worktree.exists());
+        remove_test_repository(&root);
+    }
+
+    #[test]
+    fn dirty_checkout_ship_preserves_isolation_when_the_user_edits_during_the_run() {
+        let (root, repository) = test_repository();
+        let managed_root = root.join("managed");
+        std::fs::write(repository.join("plan.md"), "user draft\n").expect("modify tracked file");
+        let isolation = create_isolation_at_root(&repository, "dirty-conflict-test", &managed_root)
+            .expect("create dirty isolation");
+        std::fs::write(
+            isolation.worktree.join("plan.md"),
+            "user draft\nagent addition\n",
+        )
+        .expect("write agent change");
+        commit_managed_changes(&isolation.worktree, "Add implementation detail")
+            .expect("commit agent change");
+
+        std::fs::write(repository.join("plan.md"), "newer user edit\n")
+            .expect("change attached checkout");
+        let error = promote_worktree(&repository, &isolation, &managed_root)
+            .expect_err("promotion must stop");
+
+        assert!(error.contains("changed while Ship was active"));
+        assert_eq!(
+            std::fs::read_to_string(repository.join("plan.md")).expect("read preserved edit"),
+            "newer user edit\n"
+        );
+        assert!(isolation.worktree.exists());
+        remove_managed_clone(&managed_root, &isolation.worktree).expect("remove isolation");
+        remove_test_repository(&root);
+    }
+
+    #[test]
+    fn dirty_checkout_ship_preserves_index_rename_deletion_and_binary_state() {
+        let (root, repository) = test_repository();
+        let managed_root = root.join("managed");
+        std::fs::write(repository.join("delete.md"), "delete me\n").expect("write deleted file");
+        std::fs::write(repository.join("old-name.md"), "rename me\n").expect("write renamed file");
+        std::fs::write(repository.join("binary.bin"), [0_u8, 1, 2, 3]).expect("write binary file");
+        git_static(&repository, &["add", "-A"]).expect("stage fixtures");
+        git_static(&repository, &["commit", "-m", "Add fixtures"]).expect("commit fixtures");
+
+        std::fs::write(repository.join("plan.md"), "staged user draft\n")
+            .expect("write staged user change");
+        git_static(&repository, &["add", "plan.md"]).expect("stage user change");
+        std::fs::remove_file(repository.join("delete.md")).expect("delete tracked file");
+        git_static(&repository, &["mv", "old-name.md", "new-name.md"]).expect("stage rename");
+        std::fs::write(repository.join("binary.bin"), [0_u8, 255, 2, 3])
+            .expect("modify binary file");
+        std::fs::write(repository.join("notes.md"), "untracked user note\n")
+            .expect("write untracked file");
+        let staged_before =
+            git_static(&repository, &["diff", "--cached", "--binary"]).expect("capture index");
+
+        let isolation = create_isolation_at_root(&repository, "dirty-state-test", &managed_root)
+            .expect("capture dirty state");
+        assert!(!isolation.worktree.join("delete.md").exists());
+        assert!(!isolation.worktree.join("old-name.md").exists());
+        assert!(isolation.worktree.join("new-name.md").is_file());
+        assert_eq!(
+            std::fs::read(isolation.worktree.join("binary.bin")).expect("read snapshot binary"),
+            [0_u8, 255, 2, 3]
+        );
+
+        std::fs::write(
+            isolation.worktree.join("plan.md"),
+            "staged user draft\nagent addition\n",
+        )
+        .expect("change staged-origin file");
+        std::fs::write(
+            isolation.worktree.join("new-name.md"),
+            "rename me\nagent addition\n",
+        )
+        .expect("change renamed file");
+        std::fs::write(isolation.worktree.join("binary.bin"), [0_u8, 255, 9, 3])
+            .expect("change binary file");
+        std::fs::write(
+            isolation.worktree.join("notes.md"),
+            "untracked user note\nagent addition\n",
+        )
+        .expect("change untracked file");
+        commit_managed_changes(&isolation.worktree, "Update captured files")
+            .expect("commit agent delta");
+        promote_worktree(&repository, &isolation, &managed_root)
+            .expect("apply complex verified delta");
+
+        assert_eq!(
+            git_static(&repository, &["diff", "--cached", "--binary"])
+                .expect("read preserved index"),
+            staged_before
+        );
+        assert!(!repository.join("delete.md").exists());
+        assert!(!repository.join("old-name.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(repository.join("new-name.md"))
+                .expect("read renamed file")
+                .replace("\r\n", "\n"),
+            "rename me\nagent addition\n"
+        );
+        assert_eq!(
+            std::fs::read(repository.join("binary.bin")).expect("read promoted binary"),
+            [0_u8, 255, 9, 3]
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.join("notes.md"))
+                .expect("read promoted untracked file")
+                .replace("\r\n", "\n"),
+            "untracked user note\nagent addition\n"
+        );
+        remove_test_repository(&root);
+    }
+
+    #[test]
+    fn clean_checkout_ship_still_fast_forwards_the_verified_branch() {
+        let (root, repository) = test_repository();
+        let managed_root = root.join("managed");
+        let original_head = git_static(&repository, &["rev-parse", "HEAD"]).expect("read head");
+        let isolation = create_isolation_at_root(&repository, "clean-ship-test", &managed_root)
+            .expect("create clean isolation");
+        assert_eq!(isolation.isolation_kind, "worktree");
+
+        std::fs::write(isolation.worktree.join("plan.md"), "agent change\n")
+            .expect("write agent change");
+        commit_managed_changes(&isolation.worktree, "Update plan").expect("commit agent change");
+        let promotion = promote_worktree(&repository, &isolation, &managed_root)
+            .expect("fast-forward verified branch");
+
+        assert_eq!(promotion.mode, PromotionMode::FastForward);
+        assert!(promotion.cleanup_warning.is_none());
+        assert_ne!(
+            git_static(&repository, &["rev-parse", "HEAD"]).expect("read promoted head"),
+            original_head
+        );
+        assert_eq!(
+            std::fs::read_to_string(repository.join("plan.md"))
+                .expect("read promoted file")
+                .replace("\r\n", "\n"),
+            "agent change\n"
+        );
+        assert!(!isolation.worktree.exists());
+        remove_test_repository(&root);
+    }
+
+    #[test]
+    fn ship_rejects_a_same_head_branch_switch_before_promotion() {
+        let (root, repository) = test_repository();
+        let managed_root = root.join("managed");
+        let isolation = create_isolation_at_root(&repository, "branch-switch-test", &managed_root)
+            .expect("create clean isolation");
+        std::fs::write(isolation.worktree.join("plan.md"), "agent change\n")
+            .expect("write agent change");
+        commit_managed_changes(&isolation.worktree, "Update plan").expect("commit agent change");
+
+        git_static(&repository, &["switch", "-c", "other-branch"]).expect("switch base branch");
+        let error = promote_worktree(&repository, &isolation, &managed_root)
+            .expect_err("branch switch must block promotion");
+        assert!(error.contains("moved from branch"));
+        assert!(error.contains("other-branch"));
+        assert_eq!(
+            std::fs::read_to_string(repository.join("plan.md"))
+                .expect("read unchanged base")
+                .replace("\r\n", "\n"),
+            "committed\n"
+        );
+
+        if let Some(warning) = discard_isolation(&repository, &isolation, &managed_root) {
+            panic!("{warning}");
+        }
+        remove_test_repository(&root);
+    }
+
+    #[test]
+    fn ship_rejects_a_detached_head_before_promotion() {
+        let (root, repository) = test_repository();
+        let managed_root = root.join("managed");
+        let isolation = create_isolation_at_root(&repository, "detached-head-test", &managed_root)
+            .expect("create clean isolation");
+        std::fs::write(isolation.worktree.join("plan.md"), "agent change\n")
+            .expect("write agent change");
+        commit_managed_changes(&isolation.worktree, "Update plan").expect("commit agent change");
+
+        git_static(&repository, &["checkout", "--detach", &isolation.base_head])
+            .expect("detach base checkout");
+        let error = promote_worktree(&repository, &isolation, &managed_root)
+            .expect_err("detached head must block promotion");
+        assert!(error.contains("detached HEAD"));
+
+        if let Some(warning) = discard_isolation(&repository, &isolation, &managed_root) {
+            panic!("{warning}");
+        }
+        remove_test_repository(&root);
+    }
+
+    #[test]
+    fn interrupted_runs_become_recoverable_on_restart() {
+        let connection = Connection::open_in_memory().expect("open test database");
+        migrate(&connection).expect("migrate test database");
+        connection
+            .execute(
+                "INSERT INTO projects (id, name, goal, repository_path)
+                 VALUES ('project-1', 'Agent Room', 'Test restart', 'C:\\repo')",
+                [],
+            )
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO runs
+                 (id, project_id, objective, state, current_owner)
+                 VALUES ('run-1', 'project-1', 'Test', 'working', 'codex')",
+                [],
+            )
+            .expect("insert active run");
+        connection
+            .execute(
+                "INSERT INTO activations
+                 (id, run_id, phase, participant_kind, state, context_bytes)
+                 VALUES ('activation-1', 'run-1', 'build', 'codex', 'running', 0)",
+                [],
+            )
+            .expect("insert active activation");
+
+        assert_eq!(
+            reconcile_interrupted_runs(&connection).expect("reconcile runs"),
+            1
+        );
+        let run: (String, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT state, current_owner, stop_reason FROM runs WHERE id = 'run-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read reconciled run");
+        let activation: String = connection
+            .query_row(
+                "SELECT state FROM activations WHERE id = 'activation-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read reconciled activation");
+        assert_eq!(run.0, "stopped");
+        assert!(run.1.is_none());
+        assert!(run.2.expect("stop reason").contains("preserved"));
+        assert_eq!(activation, "failed");
+    }
+
+    #[test]
     fn chat_receipt_does_not_require_an_autonomous_run() {
         let connection = Connection::open_in_memory().expect("open test database");
         migrate(&connection).expect("migrate test database");
@@ -6372,18 +7698,53 @@ Earlier conversation content
         )
         .expect("persist agent message");
 
-        assert!(recent_chat_handoff(&database, "project-1", "codex", true)
-            .expect("same-provider handoff")
-            .is_none());
-        let switched = recent_chat_handoff(&database, "project-1", "claude", true)
+        assert!(
+            recent_chat_handoff(&database, "project-1", "codex", true, None)
+                .expect("same-provider handoff")
+                .is_none()
+        );
+        let switched = recent_chat_handoff(&database, "project-1", "claude", true, None)
             .expect("cross-provider handoff")
             .expect("handoff exists");
         assert!(switched.contains("Codex"));
         assert!(switched.contains("Explain the architecture."));
         assert!(switched.len() <= CHAT_HANDOFF_BUDGET_BYTES);
-        assert!(recent_chat_handoff(&database, "project-1", "codex", false)
-            .expect("fresh same-provider handoff")
-            .is_some());
+        assert!(
+            recent_chat_handoff(&database, "project-1", "codex", false, None)
+                .expect("fresh same-provider handoff")
+                .is_some()
+        );
+
+        persist_message(
+            &database,
+            "project-1",
+            "ship-1",
+            "human",
+            "human",
+            "How about now?",
+            &[],
+            &[],
+            None,
+        )
+        .expect("persist referential objective");
+        persist_message(
+            &database,
+            "project-1",
+            "ship-1",
+            "codex",
+            "agent",
+            "The objective is missing context.",
+            &[],
+            &[],
+            None,
+        )
+        .expect("persist failed build response");
+        let recovery_context =
+            recent_chat_handoff(&database, "project-1", "codex", false, Some("ship-1"))
+                .expect("recovery context")
+                .expect("prior chat remains available");
+        assert!(recovery_context.contains("Explain the architecture."));
+        assert!(!recovery_context.contains("missing context"));
     }
 
     #[test]
@@ -6500,9 +7861,9 @@ Earlier conversation content
     }
 
     #[test]
-    fn cursor_chat_uses_read_only_partial_stream_arguments() {
+    fn cursor_chat_uses_scoped_partial_stream_arguments() {
         assert_eq!(
-            cursor_chat_arguments(),
+            cursor_chat_arguments(false),
             [
                 "--mode",
                 "ask",
@@ -6510,6 +7871,10 @@ Earlier conversation content
                 "enabled",
                 "--stream-partial-output"
             ]
+        );
+        assert_eq!(
+            cursor_chat_arguments(true),
+            ["--sandbox", "enabled", "--stream-partial-output"]
         );
         let missing_sandbox = capabilities_for(
             "cursor",

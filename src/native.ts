@@ -85,6 +85,7 @@ export async function startRoomChat(
     message: string;
     repositoryPath: string;
     requestedAgent?: AgentKind;
+    activeRunId?: string;
   },
 ): Promise<ChatResult> {
   return invoke<ChatResult>("start_room_chat", { request });

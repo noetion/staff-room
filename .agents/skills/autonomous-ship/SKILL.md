@@ -1,15 +1,17 @@
 ---
 name: autonomous-ship
-description: Use in an armed Agent Room when the user explicitly asks to build, implement, fix, change, refactor, test, or otherwise modify the attached repository. Do not use for questions, explanations, reviews without requested edits, brainstorming, or ambiguous conversation.
+description: Use in an armed Agent Room when a substantial or unattended repository change needs isolation, verification, review, and promotion. Do not use for questions, explanations, bounded quick edits, reviews without requested edits, brainstorming, or ambiguous conversation.
 ---
 
 # Autonomous Ship
 
-Chat is read-only. Do not modify the repository while applying this skill.
+Agent Room Chat may perform small, explicit edits directly in the attached checkout. Do not trigger Ship for a bounded update to one or a few known files that can be completed safely in the current supervised chat.
 
-Trigger only when the user's current request clearly requires repository changes and contains enough information to state one concrete engineering objective. Never infer a code-changing objective from an information-only question.
+Trigger only when the user's current request clearly requires substantial or unattended repository work, contains enough information to state one concrete engineering objective, and materially benefits from Agent Room's isolated build, verification, independent review, and promotion route. Never infer a code-changing objective from an information-only question.
 
-When triggered, briefly acknowledge the transition and return exactly one JSON intent between these markers:
+When the request is a bounded quick edit, make the change in Chat and answer normally. Emit no Ship markers.
+
+When Ship is required, do not modify files in Chat. Briefly acknowledge the transition and return exactly one JSON intent between these markers:
 
 ```text
 AGENT_ROOM_SHIP_INTENT_START
