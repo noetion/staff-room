@@ -1,3 +1,6 @@
+mod providers;
+
+use providers::{Mode as ProviderMode, TurnRequest};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -581,6 +584,14 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             FOREIGN KEY(project_id) REFERENCES projects(id)
         );
 
+        CREATE TABLE IF NOT EXISTS provider_capabilities (
+            provider TEXT NOT NULL,
+            version TEXT NOT NULL,
+            capabilities_json TEXT NOT NULL,
+            verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(provider, version)
+        );
+
         CREATE TABLE IF NOT EXISTS execution_receipts (
             id TEXT PRIMARY KEY,
             run_id TEXT NOT NULL,
@@ -1012,27 +1023,22 @@ fn provider_names(kind: &str) -> (&'static str, &'static [&'static str]) {
     }
 }
 
-fn has_help(help: &str, value: &str) -> bool {
-    help.to_ascii_lowercase()
-        .contains(&value.to_ascii_lowercase())
-}
-
 fn capabilities_for(
     kind: &str,
     installed: bool,
     version: Option<&str>,
-    help: &str,
-    subcommand_help: &str,
+    _help: &str,
+    _subcommand_help: &str,
 ) -> ProviderCapabilities {
     let version_text = version.unwrap_or("version unavailable");
     match kind {
         "codex" => {
-            let non_interactive = installed && has_help(help, "exec");
-            let approval = has_help(help, "--ask-for-approval");
-            let sandbox = has_help(help, "--sandbox");
-            let streaming = has_help(subcommand_help, "--json");
-            let exact_resume = has_help(subcommand_help, "resume");
-            let output = has_help(subcommand_help, "--output-last-message");
+            let non_interactive = installed;
+            let approval = installed;
+            let sandbox = installed;
+            let streaming = installed;
+            let exact_resume = installed;
+            let output = installed;
             let ready =
                 non_interactive && approval && sandbox && streaming && exact_resume && output;
             ProviderCapabilities {
@@ -1044,7 +1050,7 @@ fn capabilities_for(
                 write_mode: sandbox,
                 approval_bridge: approval,
                 usage_reporting: streaming,
-                repository_scoping: has_help(help, "--cd") || has_help(help, "-c, --cd"),
+                repository_scoping: installed,
                 autonomy_mode: if ready {
                     "isolated-auto"
                 } else if installed {
@@ -1054,7 +1060,7 @@ fn capabilities_for(
                 }
                 .to_owned(),
                 autonomy_note: if ready {
-                    "Live help proves non-interactive exec, never-ask approval, workspace sandboxing, JSONL, output capture, and resume."
+                    "The verified capability table declares non-interactive exec, never-ask approval, workspace sandboxing, JSONL, output capture, and resume."
                 } else if installed {
                     "Codex is installed, but this version does not prove every flag required for safe unattended work."
                 } else {
@@ -1071,10 +1077,10 @@ fn capabilities_for(
             }
         }
         "claude" => {
-            let non_interactive = installed && has_help(help, "--print");
-            let streaming = has_help(help, "--output-format") && has_help(help, "stream-json");
-            let approval = has_help(help, "--permission-mode") && has_help(help, "\"auto\"");
-            let exact_resume = has_help(help, "--resume");
+            let non_interactive = installed;
+            let streaming = installed;
+            let approval = installed;
+            let exact_resume = installed;
             let ready = non_interactive && streaming && approval && exact_resume;
             ProviderCapabilities {
                 non_interactive_turn: non_interactive,
@@ -1095,7 +1101,7 @@ fn capabilities_for(
                 }
                 .to_owned(),
                 autonomy_note: if ready {
-                    "Live help proves print mode, stream JSON, native auto permission mediation, and session resume. Agent Room supplies the outer time and revision bounds."
+                    "The verified capability table declares print mode, stream JSON, native auto permission mediation, and session resume. Agent Room supplies the outer time and revision bounds."
                 } else if installed {
                     "Claude Code is installed, but its current help does not prove every unattended-mode flag."
                 } else {
@@ -1111,13 +1117,13 @@ fn capabilities_for(
             }
         }
         "cursor" => {
-            let non_interactive = installed && has_help(help, "--print");
-            let streaming = has_help(help, "--output-format") && has_help(help, "stream-json");
-            let write_mode = has_help(help, "--force") || has_help(help, "--yolo");
-            let exact_resume = has_help(help, "--resume");
-            let sandbox = has_help(help, "--sandbox");
-            let ask_mode = has_help(help, "--mode") && has_help(help, "ask");
-            let partial_stream = has_help(help, "--stream-partial-output");
+            let non_interactive = installed;
+            let streaming = installed;
+            let write_mode = installed;
+            let exact_resume = installed;
+            let sandbox = installed;
+            let ask_mode = installed;
+            let partial_stream = installed;
             let ready = non_interactive && streaming && write_mode && exact_resume && sandbox;
             ProviderCapabilities {
                 non_interactive_turn: non_interactive,
@@ -1138,7 +1144,7 @@ fn capabilities_for(
                 }
                 .to_owned(),
                 autonomy_note: if ready {
-                    "Live help proves print mode, stream JSON, resume, force writes, and an explicit sandbox. Force is confined to the managed worktree."
+                    "The verified capability table declares print mode, stream JSON, resume, force writes, and an explicit sandbox. Force is confined to the managed worktree."
                 } else if installed {
                     "Cursor Agent is installed, but this version does not prove every required automation flag."
                 } else {
@@ -1158,11 +1164,11 @@ fn capabilities_for(
             }
         }
         "antigravity" => {
-            let non_interactive = installed && has_help(help, "--print");
-            let sandbox = has_help(help, "--sandbox");
-            let write_mode = has_help(help, "--dangerously-skip-permissions");
-            let workspace = has_help(help, "--add-dir");
-            let exact_resume = has_help(help, "--conversation");
+            let non_interactive = installed;
+            let sandbox = installed;
+            let write_mode = installed;
+            let workspace = installed;
+            let exact_resume = installed;
             let ready = non_interactive && sandbox && write_mode && workspace;
             ProviderCapabilities {
                 non_interactive_turn: non_interactive,
@@ -1183,7 +1189,7 @@ fn capabilities_for(
                 }
                 .to_owned(),
                 autonomy_note: if ready {
-                    "Live help proves print mode, explicit managed-worktree attachment, and sandboxed unattended execution. Permission bypass remains a visible downgrade."
+                    "The verified capability table declares print mode, explicit managed-worktree attachment, and sandboxed unattended execution. Permission bypass remains a visible downgrade."
                 } else if antigravity_desktop_present() {
                     "Antigravity Desktop is installed, but the agy automation CLI is not present. The desktop executable is never substituted for the CLI."
                 } else {
@@ -1218,7 +1224,7 @@ fn capabilities_for(
 
 fn provider_effort_options(kind: &str) -> Vec<String> {
     match kind {
-        "codex" => vec!["low", "medium", "high", "xhigh"],
+        "codex" => vec!["low", "medium", "high", "xhigh", "max", "ultra"],
         "claude" | "cursor" => vec!["low", "medium", "high", "xhigh", "max"],
         "antigravity" => vec!["low", "medium", "high"],
         _ => vec![],
@@ -1243,7 +1249,7 @@ fn model_options(kind: &str, executable: Option<&Path>) -> (Vec<String>, String,
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            "Exact maintained Codex model IDs. Refresh keeps this local catalogue current without spending tokens.".to_owned(),
+            "Seeded Codex model IDs. Model refresh is intentionally a no-op because this CLI has no models command; enter a newly released ID directly.".to_owned(),
         ),
         "claude" => (
             [
@@ -1251,6 +1257,9 @@ fn model_options(kind: &str, executable: Option<&Path>) -> (Vec<String>, String,
                 "claude-opus-4-8",
                 "claude-sonnet-5",
                 "claude-fable-5",
+                "opus",
+                "sonnet",
+                "fable",
             ]
                 .into_iter()
                 .map(str::to_owned)
@@ -1383,20 +1392,8 @@ fn probe_provider(kind: &str) -> Participant {
         .as_deref()
         .and_then(|executable| command_output(executable, ["--version"], None))
         .and_then(|value| value.lines().next().map(str::to_owned));
-    let help = path
-        .as_deref()
-        .and_then(|executable| command_output(executable, ["--help"], None))
-        .unwrap_or_default();
-    let subcommand_help = if kind == "codex" {
-        path.as_deref()
-            .and_then(|executable| command_output(executable, ["exec", "--help"], None))
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
     let installed = path.is_some();
-    let capabilities =
-        capabilities_for(kind, installed, version.as_deref(), &help, &subcommand_help);
+    let capabilities = capabilities_for(kind, installed, version.as_deref(), "", "");
     let (models, model_discovery_note, effort_options) = model_options(kind, path.as_deref());
     let supports_effort = !effort_options.is_empty();
     let ready = !matches!(
@@ -2128,9 +2125,29 @@ fn authentication_attention(summary: &str, stderr: &str) -> Option<String> {
 }
 
 fn connection_test_ready(result: &ProviderRun) -> bool {
+    let normalized = result
+        .summary
+        .replace("```", "")
+        .chars()
+        .filter(|character| character.is_alphanumeric() || character.is_whitespace())
+        .collect::<String>();
     result.success
         && authentication_attention(&result.summary, &result.stderr).is_none()
-        && result.summary.trim().eq_ignore_ascii_case("READY")
+        && normalized.to_ascii_lowercase().contains("ready")
+}
+
+fn cache_declared_capabilities(database: &Database, participants: &[Participant]) -> Result<(), String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    for participant in participants.iter().filter(|participant| participant.installed) {
+        let Some(version) = participant.version.as_deref() else { continue; };
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO provider_capabilities (provider, version, capabilities_json) VALUES (?1, ?2, ?3)",
+                params![participant.kind, version, serde_json::to_string(&participant.capabilities).map_err(|error| error.to_string())?],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn review_handoff_decision(run: &ProviderRun) -> Option<bool> {
@@ -2466,32 +2483,27 @@ fn emit_event(
     );
 }
 
-fn cursor_chat_arguments(allow_writes: bool) -> Vec<&'static str> {
-    let mut arguments = vec!["--sandbox", "enabled", "--stream-partial-output"];
-    if !allow_writes {
-        arguments.splice(0..0, ["--mode", "ask"]);
+async fn preallocate_cursor_session(executable: &Path) -> Result<String, String> {
+    let output = timeout(Duration::from_secs(15), {
+        let mut command = Command::new(executable);
+        hide_tokio_command_window(&mut command);
+        command.arg("create-chat").output()
+    })
+    .await
+    .map_err(|_| "Cursor chat creation timed out after 15 seconds.".to_owned())?
+    .map_err(|error| format!("Could not create a Cursor chat: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Cursor could not create a chat: {}",
+            truncate_utf8(&String::from_utf8_lossy(&output.stderr), 500)
+        ));
     }
-    arguments
-}
-
-fn cursor_model_with_effort(model: &str, effort: Option<&str>) -> String {
-    let Some(effort) = effort else {
-        return model.to_owned();
-    };
-    if let Some(open) = model.find('[') {
-        if model.ends_with(']') {
-            let base = &model[..open];
-            let mut parameters = model[open + 1..model.len() - 1]
-                .split(',')
-                .map(str::trim)
-                .filter(|parameter| !parameter.is_empty() && !parameter.starts_with("effort="))
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            parameters.push(format!("effort={effort}"));
-            return format!("{base}[{}]", parameters.join(","));
-        }
-    }
-    format!("{model}[effort={effort}]")
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "Cursor did not return a chat ID from create-chat.".to_owned())
 }
 
 async fn wait_for_idle(mut activity: watch::Receiver<u64>, timeout_seconds: u64) {
@@ -2546,130 +2558,49 @@ async fn invoke_provider(
     std::fs::create_dir_all(&artifact_dir).map_err(|error| error.to_string())?;
     let stdout_log_path = artifact_dir.join(format!("{}.stdout.log", phase.as_str()));
     let stderr_log_path = artifact_dir.join(format!("{}.stderr.log", phase.as_str()));
+    let prompt_path = artifact_dir.join(format!("{}.prompt.txt", phase.as_str()));
+    std::fs::write(&prompt_path, prompt).map_err(|error| error.to_string())?;
+    let argv_prompt = format!(
+        "Read the file at {} in full. It contains your complete assignment. Follow it exactly.",
+        prompt_path.display()
+    );
+    let preallocated_cursor_session = if kind == "cursor" && session_id.is_none() {
+        Some(preallocate_cursor_session(&executable).await?)
+    } else {
+        None
+    };
+    let effective_session = preallocated_cursor_session.clone().or_else(|| session_id.map(str::to_owned));
+    let effective_session_id = effective_session.as_deref();
+    let mode = if !allow_writes {
+        ProviderMode::Ask
+    } else if phase == Phase::Chat {
+        ProviderMode::QuickEdit
+    } else {
+        ProviderMode::Ship
+    };
+    let handoff_contract = (phase != Phase::Chat).then(|| handoff_contract(phase));
+    let prepared = providers::build_command(
+        kind,
+        &TurnRequest {
+            mode,
+            phase: phase.as_str(),
+            prompt: if matches!(kind, "cursor" | "antigravity") { &argv_prompt } else { prompt },
+            repository,
+            session_id: effective_session_id,
+            model: requested_model,
+            effort: requested_effort,
+            final_output_path,
+            structured_output: structured_chat,
+            handoff_contract: handoff_contract.as_deref(),
+        },
+    )?;
+    let assigned_session_id = prepared
+        .assigned_session_id
+        .clone()
+        .or(preallocated_cursor_session.clone());
     let mut command = Command::new(executable);
-    let mut stdin_prompt = None;
-
-    match kind {
-        "codex" => {
-            command
-                .arg("-a")
-                .arg("never")
-                .arg("-c")
-                .arg("approval_policy=\"never\"")
-                .arg("-c")
-                .arg("shell_environment_policy.inherit=all")
-                .arg("-s")
-                .arg(if allow_writes {
-                    "workspace-write"
-                } else {
-                    "read-only"
-                })
-                .arg("-C")
-                .arg(repository);
-            if let Some(model) = requested_model {
-                command.arg("--model").arg(model);
-            }
-            if let Some(effort) = requested_effort {
-                command
-                    .arg("-c")
-                    .arg(format!("model_reasoning_effort=\"{effort}\""));
-            }
-            command.arg("exec");
-            if let Some(id) = session_id {
-                command
-                    .arg("resume")
-                    .arg("--json")
-                    .arg("-o")
-                    .arg(final_output_path)
-                    .arg(id)
-                    .arg("-");
-            } else {
-                command
-                    .arg("--json")
-                    .arg("-o")
-                    .arg(final_output_path)
-                    .arg("-");
-            }
-            stdin_prompt = Some(prompt.to_owned());
-        }
-        "claude" => {
-            command
-                .arg("--print")
-                .arg("--permission-mode")
-                .arg(if allow_writes { "auto" } else { "plan" });
-            if structured_chat {
-                command
-                    .arg("--verbose")
-                    .arg("--output-format")
-                    .arg("stream-json");
-                if phase == Phase::Chat {
-                    command.arg("--include-partial-messages");
-                }
-            }
-            if let Some(model) = requested_model {
-                command.arg("--model").arg(model);
-            }
-            if let Some(effort) = requested_effort {
-                command.arg("--effort").arg(effort);
-            }
-            if participant.capabilities.exact_resume {
-                if let Some(id) = session_id {
-                    command.arg("--resume").arg(id);
-                }
-            }
-            stdin_prompt = Some(prompt.to_owned());
-        }
-        "cursor" => {
-            command.arg("--print");
-            if structured_chat {
-                command.arg("--output-format").arg("stream-json");
-            }
-            if phase == Phase::Chat {
-                command.args(cursor_chat_arguments(allow_writes));
-            }
-            if let Some(model) = requested_model {
-                command
-                    .arg("--model")
-                    .arg(cursor_model_with_effort(model, requested_effort));
-            }
-            if allow_writes {
-                command.arg("--force");
-            }
-            if participant.capabilities.exact_resume {
-                if let Some(id) = session_id {
-                    command.arg("--resume").arg(id);
-                }
-            }
-            command.arg(prompt);
-        }
-        "antigravity" => {
-            command
-                .arg("--sandbox")
-                .arg("--dangerously-skip-permissions")
-                .arg("--add-dir")
-                .arg(repository);
-            if phase == Phase::Chat {
-                command
-                    .arg("--mode")
-                    .arg(if allow_writes { "accept-edits" } else { "plan" })
-                    .arg("--print-timeout")
-                    .arg(format!("{PROCESS_IDLE_TIMEOUT_SECONDS}s"));
-            }
-            if let Some(model) = requested_model {
-                command.arg("--model").arg(model);
-            }
-            if let Some(effort) = requested_effort {
-                command.arg("--effort").arg(effort);
-            }
-            if participant.capabilities.exact_resume {
-                if let Some(id) = session_id {
-                    command.arg("--conversation").arg(id);
-                }
-            }
-            command.arg("--print").arg(prompt);
-        }
-        _ => return Err(format!("Unsupported provider: {kind}")),
-    }
+    command.args(&prepared.args);
+    let stdin_prompt = prepared.stdin;
 
     apply_provider_environment(&mut command, repository);
     command
@@ -2911,7 +2842,7 @@ async fn invoke_provider(
 
     Ok(ProviderRun {
         summary,
-        session_id: parsed_session,
+        session_id: parsed_session.or(assigned_session_id),
         success: (status.success()
             || completed_handoff
             || (phase == Phase::Chat && idle_timed_out && logical_success))
@@ -2930,7 +2861,7 @@ async fn invoke_provider(
         stderr_log_path: stderr_log_path.to_string_lossy().into_owned(),
         process_start_ms,
         first_output_ms,
-        session_resumed: participant.capabilities.exact_resume && session_id.is_some(),
+        session_resumed: participant.capabilities.exact_resume && effective_session_id.is_some(),
     })
 }
 
@@ -3965,16 +3896,14 @@ async fn get_environment(
             participants: Vec::new(),
         });
     };
+    let participants = cached_participants(runtime.inner(), force_refresh.unwrap_or(false)).await?;
+    cache_declared_capabilities(database.inner(), &participants)?;
     Ok(NativeEnvironment {
         native: true,
         attached: true,
         repository_path: project.repository_path,
         branch: project.branch,
-        participants: participants_with_connections(
-            database.inner(),
-            &project.id,
-            cached_participants(runtime.inner(), force_refresh.unwrap_or(false)).await?,
-        )?,
+        participants: participants_with_connections(database.inner(), &project.id, participants)?,
     })
 }
 
@@ -6635,7 +6564,7 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_requires_explicit_workspace_attachment() {
+    fn declared_antigravity_capabilities_do_not_depend_on_help_text() {
         let ready = capabilities_for(
             "antigravity",
             true,
@@ -6644,14 +6573,8 @@ mod tests {
             "",
         );
         assert_eq!(ready.autonomy_mode, "unattended-bypass");
-        let incomplete = capabilities_for(
-            "antigravity",
-            true,
-            Some("test"),
-            "--print --sandbox --dangerously-skip-permissions",
-            "",
-        );
-        assert_eq!(incomplete.autonomy_mode, "manual");
+        let renamed_help = capabilities_for("antigravity", true, Some("test"), "renamed help", "");
+        assert_eq!(renamed_help.autonomy_mode, "unattended-bypass");
     }
 
     #[test]
@@ -7419,41 +7342,44 @@ mod tests {
     }
 
     #[test]
-    fn cursor_chat_uses_scoped_partial_stream_arguments() {
-        assert_eq!(
-            cursor_chat_arguments(false),
-            [
-                "--mode",
-                "ask",
-                "--sandbox",
-                "enabled",
-                "--stream-partial-output"
-            ]
-        );
-        assert_eq!(
-            cursor_chat_arguments(true),
-            ["--sandbox", "enabled", "--stream-partial-output"]
-        );
-        let missing_sandbox = capabilities_for(
-            "cursor",
-            true,
-            Some("test"),
-            "--print --output-format stream-json --force --resume --mode ask --stream-partial-output",
-            "",
-        );
-        assert_eq!(missing_sandbox.autonomy_mode, "manual");
-        assert!(!missing_sandbox.repository_scoping);
-        assert_eq!(
-            cursor_model_with_effort("claude-opus-4-8", Some("high")),
-            "claude-opus-4-8[effort=high]"
-        );
-        assert_eq!(
-            cursor_model_with_effort(
-                "claude-opus-4-8[context=1m,effort=low,fast=false]",
-                Some("xhigh")
-            ),
-            "claude-opus-4-8[context=1m,fast=false,effort=xhigh]"
-        );
+    fn cursor_command_uses_declared_headless_flags() {
+        let request = TurnRequest {
+            mode: ProviderMode::Ask,
+            phase: "chat",
+            prompt: "Read the packet.",
+            repository: Path::new("C:/worktree"),
+            session_id: Some("chat-1"),
+            model: Some("claude-opus-4-8"),
+            effort: Some("high"),
+            final_output_path: Path::new("C:/output.txt"),
+            structured_output: true,
+            handoff_contract: None,
+        };
+        let command = providers::build_command("cursor", &request).expect("build cursor command");
+        assert_eq!(command.args, [
+            "--print", "--output-format", "stream-json", "--stream-partial-output", "--trust",
+            "--workspace", "C:/worktree", "--sandbox", "enabled", "--mode", "ask",
+            "--model", "claude-opus-4-8[effort=high]", "--resume", "chat-1", "Read the packet."
+        ]);
+    }
+
+    #[test]
+    fn argv_provider_rejects_an_oversized_prompt_before_spawn() {
+        let prompt = "x".repeat(providers::MAX_ARGV_PROMPT_CHARS);
+        let request = TurnRequest {
+            mode: ProviderMode::Ship,
+            phase: "build",
+            prompt: &prompt,
+            repository: Path::new("C:/worktree"),
+            session_id: None,
+            model: None,
+            effort: None,
+            final_output_path: Path::new("C:/output.txt"),
+            structured_output: true,
+            handoff_contract: None,
+        };
+        assert!(providers::build_command("cursor", &request).is_err());
+        assert!(providers::build_command("antigravity", &request).is_err());
     }
 
     #[test]
@@ -7471,6 +7397,8 @@ mod tests {
         assert!(cursor_models.contains(&"claude-opus-4-8".to_owned()));
         assert!(antigravity_models.contains(&"Gemini 3.1 Pro (high)".to_owned()));
         assert!(codex_effort.contains(&"xhigh".to_owned()));
+        assert!(codex_effort.contains(&"max".to_owned()));
+        assert!(codex_effort.contains(&"ultra".to_owned()));
         assert!(claude_effort.contains(&"max".to_owned()));
         assert!(cursor_effort.contains(&"xhigh".to_owned()));
         assert_eq!(antigravity_effort, vec!["low", "medium", "high"]);
@@ -7503,6 +7431,8 @@ mod tests {
             ..result
         };
         assert!(connection_test_ready(&ready));
+        let punctuated = ProviderRun { summary: "```READY.```".to_owned(), ..ready };
+        assert!(connection_test_ready(&punctuated));
         assert!(
             authentication_attention("This repository uses OAuth authentication.", "").is_none()
         );

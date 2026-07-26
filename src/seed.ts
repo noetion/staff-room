@@ -39,7 +39,7 @@ export const previewEnvironment: NativeEnvironment = {
       models: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
       modelDiscoveryNote: "Exact maintained Codex model IDs.",
       supportsEffort: true,
-      effortOptions: ["low", "medium", "high", "xhigh"],
+      effortOptions: ["low", "medium", "high", "xhigh", "max", "ultra"],
     },
     {
       kind: "claude",
@@ -62,7 +62,7 @@ export const previewEnvironment: NativeEnvironment = {
         autonomyNote: "Install Claude Code to enable reviewed autonomy.",
         capabilityProof: ["Preview data only"],
       },
-      models: ["claude-opus-5", "claude-opus-4-8", "claude-sonnet-5", "claude-fable-5"],
+      models: ["claude-opus-5", "claude-opus-4-8", "claude-sonnet-5", "claude-fable-5", "opus", "sonnet", "fable"],
       modelDiscoveryNote: "Exact Claude model IDs.",
       supportsEffort: true,
       effortOptions: ["low", "medium", "high", "xhigh", "max"],

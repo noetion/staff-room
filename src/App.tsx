@@ -689,6 +689,11 @@ function ProviderProfileCard({
     })) as typeof drafts);
   }, [profiles]);
 
+  const modelHistory = Array.from(new Set([
+    ...models,
+    ...profiles.flatMap((profile) => profile.model ? [profile.model] : []),
+  ]));
+
   return (
     <article className="participant-card provider-profile-card">
       <div className="participant-row">
@@ -710,21 +715,20 @@ function ProviderProfileCard({
             <strong>{route === "chat" ? "Chat" : route === "build" ? "Builder" : "Reviewer"}</strong>
             <label htmlFor={`model-${participant.kind}-${route}`}>
               <span>Model</span>
-              <select
+              <input
                 id={`model-${participant.kind}-${route}`}
+                list={`models-${participant.kind}`}
                 value={drafts[route].model}
                 onChange={(event) => setDrafts((current) => ({
                   ...current,
                   [route]: { ...current[route], model: event.target.value },
                 }))}
                 disabled={!participant.installed || saving}
-              >
-                <option value="">Default</option>
-                {drafts[route].model && !models.includes(drafts[route].model) && (
-                  <option value={drafts[route].model}>{drafts[route].model}</option>
-                )}
-                {models.map((option) => <option key={option} value={option}>{option}</option>)}
-              </select>
+                placeholder="Default"
+              />
+              <datalist id={`models-${participant.kind}`}>
+                {modelHistory.map((option) => <option key={option} value={option} />)}
+              </datalist>
             </label>
             <label htmlFor={`effort-${participant.kind}-${route}`}>
               <span>Effort</span>
@@ -748,7 +752,11 @@ function ProviderProfileCard({
                 }
               >
                 <option value="">Default</option>
-                {participant.effortOptions.map((option) => (
+                {participant.effortOptions.filter((option) => (
+                  participant.kind !== "codex"
+                  || drafts[route].model === "gpt-5.6-sol"
+                  || !["max", "ultra"].includes(option)
+                )).map((option) => (
                   <option key={option} value={option}>
                     {option[0].toUpperCase() + option.slice(1)}
                   </option>

@@ -1,5 +1,7 @@
 # Plan deviations
 
+- Step 5 | Capability handshake on first provider/version sight | Retained the declared capability table without an automatic minimal turn because the current synchronous provider discovery path has no project/worktree authority and must not launch a billable or write-capable CLI at desktop startup; connection tests remain the explicit live verification path.
+
 - Step 1 | `lib.rs:2774–3178` | Deleted the PTY subsystem by symbol boundary through line 3177 and restored the adjacent `persist_message` Clippy allowance | The specified range clipped a required attribute belonging to the following function.
 - Step 1 | `src/coordination.test.ts` whole file | Reduced the file to four surviving participant-selection tests | The file also protects product behaviour used by later Ask/Quick Edit filtering.
 - Step 1 | Remove `Read` and `AsyncWriteExt` with the PTY code | Retained both imports | They are used by the one-shot process output and stdin paths that remain in v1.

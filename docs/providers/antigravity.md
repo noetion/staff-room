@@ -23,3 +23,6 @@ The installed CLI print surface is text-first. Agent Room does not claim streami
 ## Capability result
 
 `unattended-bypass`: live help proves print mode, sandboxing, permission bypass, and exact conversation resume. Permission bypass remains a visible downgrade and is paired with Antigravity sandbox mode plus Agent Room's managed worktree boundary.
+# Step 5 live verification — 2026-07-26, agy 1.1.7
+
+`agy models` could not return the signed-in model catalogue because the CLI reported that this desktop user is not signed in. The display-name-to-slug check therefore remains deferred to the existing account-backed `agy models` refresh fallback; no speculative slug mapping was added.
