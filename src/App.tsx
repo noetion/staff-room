@@ -248,12 +248,23 @@ function canUseChat(participant: Participant): boolean {
 }
 
 function capabilityChips(participant: Participant): string[] {
+  const chips: string[] = [];
   if (participant.kind === "antigravity") {
-    return ["Ship only · no read-only mode", "cold start per turn", "completion stream, not token deltas", "usage not reported"];
+    chips.push("Ship only · no read-only mode");
   }
-  return participant.kind === "cursor"
-    ? ["sandbox unavailable on Windows, read-only enforced by ask mode", "cold start per turn", "usage not reported"]
-    : [];
+  if (participant.kind === "cursor") {
+    chips.push("sandbox unavailable on Windows, read-only enforced by ask mode");
+  }
+  if (!participant.capabilities.warmSession) {
+    chips.push("cold start per turn");
+  }
+  if (participant.kind === "antigravity") {
+    chips.push("completion stream, not token deltas", "usage not reported");
+  }
+  if (participant.kind === "cursor") {
+    chips.push("usage not reported");
+  }
+  return chips;
 }
 
 function chatAgentFor(
