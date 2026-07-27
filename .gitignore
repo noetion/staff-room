@@ -11,3 +11,6 @@ artifacts/
 run-build.ps1
 docs/BUILD_LOG.txt
 docs/BLOCKED.md
+
+# redesign driver run logs
+docs/redesign/logs/
