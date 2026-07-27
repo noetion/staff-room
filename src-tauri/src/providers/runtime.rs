@@ -341,7 +341,7 @@ pub(crate) fn capabilities_for(
 pub(crate) fn provider_effort_options(kind: &str) -> Vec<String> {
     match kind {
         "codex" => vec!["low", "medium", "high", "xhigh", "max", "ultra"],
-        "claude" | "cursor" => vec!["low", "medium", "high", "xhigh", "max"],
+        "claude" => vec!["low", "medium", "high", "xhigh", "max"],
         "antigravity" => vec!["low", "medium", "high"],
         _ => vec![],
     }
@@ -386,22 +386,8 @@ pub(crate) fn model_options(
             "Exact Claude model IDs, including the model generation and version.".to_owned(),
         ),
         "cursor" => (
-            [
-                "gpt-5.6-sol",
-                "gpt-5.6-terra",
-                "gpt-5.5",
-                "gpt-5.3-codex",
-                "claude-opus-5",
-                "claude-opus-4-8",
-                "claude-sonnet-5",
-                "claude-fable-5",
-                "composer-2.5",
-                "cursor-grok-4.5",
-            ]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            "Base model IDs only. Refresh after signing in; Agent Room groups Cursor's effort and speed presets under each model."
+            vec![],
+            "Refresh after signing in to load exact model identifiers from Cursor Agent. Each identifier already encodes its effort, thinking, and speed preset."
                 .to_owned(),
         ),
         "antigravity" => (
@@ -459,49 +445,6 @@ pub(crate) fn parse_provider_model_list(output: &str) -> Vec<String> {
         }
     }
     models.into_iter().collect()
-}
-
-pub(crate) fn normalize_cursor_model_id(model: &str) -> Option<String> {
-    if model.eq_ignore_ascii_case("auto") {
-        return None;
-    }
-    let mut segments = model.split('-').collect::<Vec<_>>();
-    let mut removed_effort = false;
-    loop {
-        let last = segments.last().copied()?;
-        match last {
-            "fast" => {
-                segments.pop();
-            }
-            "thinking"
-                if removed_effort
-                    || matches!(
-                        segments.get(segments.len().saturating_sub(2)).copied(),
-                        Some("none" | "low" | "medium" | "high" | "xhigh" | "max")
-                    ) =>
-            {
-                segments.pop();
-            }
-            "none" | "low" | "medium" | "high" | "xhigh" | "max" => {
-                segments.pop();
-                if last == "high" && segments.last() == Some(&"extra") {
-                    segments.pop();
-                }
-                removed_effort = true;
-            }
-            _ => break,
-        }
-    }
-    (!segments.is_empty()).then(|| segments.join("-"))
-}
-
-pub(crate) fn parse_cursor_model_list(output: &str) -> Vec<String> {
-    parse_provider_model_list(output)
-        .into_iter()
-        .filter_map(|model| normalize_cursor_model_id(&model))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 pub(crate) fn probe_provider(kind: &str) -> Participant {

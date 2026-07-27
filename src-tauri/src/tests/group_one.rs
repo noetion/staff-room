@@ -268,8 +268,8 @@ fn model_discovery_keeps_selectable_lines_and_skips_headings() {
 }
 
 #[test]
-fn cursor_model_discovery_groups_compound_presets_by_base_model() {
-    let models = parse_cursor_model_list(
+fn cursor_model_discovery_keeps_compound_presets_verbatim() {
+    let models = parse_provider_model_list(
         "Available models\n\
          auto - Auto (current, default)\n\
          claude-opus-5-thinking-high - Opus 5 1M Thinking\n\
@@ -283,11 +283,14 @@ fn cursor_model_discovery_groups_compound_presets_by_base_model() {
     assert_eq!(
         models,
         vec![
-            "claude-opus-4-8".to_owned(),
-            "claude-opus-5".to_owned(),
-            "composer-2.5".to_owned(),
-            "gpt-5.6-terra".to_owned(),
-            "sonnet-4-thinking".to_owned(),
+            "auto".to_owned(),
+            "claude-opus-4-8-thinking-xhigh-fast".to_owned(),
+            "claude-opus-5-low".to_owned(),
+            "claude-opus-5-thinking-high".to_owned(),
+            "claude-opus-5-thinking-high-fast".to_owned(),
+            "composer-2.5-fast".to_owned(),
+            "gpt-5.6-terra-extra-high-fast".to_owned(),
+            "sonnet-4-thinking-fast".to_owned(),
         ]
     );
 }

@@ -92,14 +92,14 @@ fn legacy_provider_profile_migrates_to_every_route_without_overwriting() {
 }
 
 #[test]
-fn cursor_command_omits_sandbox_on_windows_and_keeps_ask_mode() {
+fn cursor_command_passes_the_selected_compound_model_through_unchanged() {
     let request = TurnRequest {
         mode: ProviderMode::Ask,
         phase: "chat",
         prompt: "Read the packet.",
         repository: Path::new("C:/worktree"),
         session_id: Some("chat-1"),
-        model: Some("claude-opus-4-8"),
+        model: Some("cursor-grok-4.5-high"),
         effort: Some("high"),
         final_output_path: Path::new("C:/output.txt"),
         structured_output: true,
@@ -121,7 +121,7 @@ fn cursor_command_omits_sandbox_on_windows_and_keeps_ask_mode() {
         "--mode".to_owned(),
         "ask".to_owned(),
         "--model".to_owned(),
-        "claude-opus-4-8[effort=high]".to_owned(),
+        "cursor-grok-4.5-high".to_owned(),
         "--resume".to_owned(),
         "chat-1".to_owned(),
         "Read the packet.".to_owned(),
@@ -186,13 +186,13 @@ fn every_provider_exposes_exact_models_and_truthful_effort_options() {
     assert!(codex_models.contains(&"gpt-5.6-sol".to_owned()));
     assert!(claude_models.contains(&"claude-opus-4-8".to_owned()));
     assert!(claude_models.contains(&"claude-opus-5".to_owned()));
-    assert!(cursor_models.contains(&"claude-opus-4-8".to_owned()));
+    assert!(cursor_models.is_empty());
     assert!(antigravity_models.contains(&"Gemini 3.1 Pro (high)".to_owned()));
     assert!(codex_effort.contains(&"xhigh".to_owned()));
     assert!(codex_effort.contains(&"max".to_owned()));
     assert!(codex_effort.contains(&"ultra".to_owned()));
     assert!(claude_effort.contains(&"max".to_owned()));
-    assert!(cursor_effort.contains(&"xhigh".to_owned()));
+    assert!(cursor_effort.is_empty());
     assert_eq!(antigravity_effort, vec!["low", "medium", "high"]);
 }
 

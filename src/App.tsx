@@ -856,11 +856,11 @@ function ProviderProfileCard({
                   !participant.installed
                   || saving
                   || !participant.supportsEffort
-                  || (participant.kind === "cursor" && !drafts[route].model)
+                  || participant.kind === "cursor"
                 }
                 title={
-                  participant.kind === "cursor" && !drafts[route].model
-                    ? "Choose a Cursor model before setting effort."
+                  participant.kind === "cursor"
+                    ? "Cursor model identifiers already encode effort."
                     : undefined
                 }
               >
@@ -879,6 +879,11 @@ function ProviderProfileCard({
           </div>
         ))}
       </div>
+      {participant.kind === "cursor" && (
+        <small className="model-discovery-note">
+          Cursor model identifiers already include effort, thinking, and speed. Refresh Models and select an exact identifier.
+        </small>
+      )}
       <small className="model-discovery-note" title={modelDiscoveryDetail ?? participant.modelDiscoveryNote}>
         {modelDiscoveryDetail ?? participant.modelDiscoveryNote}
       </small>

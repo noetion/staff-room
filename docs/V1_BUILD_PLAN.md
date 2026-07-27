@@ -151,8 +151,8 @@ cursor-agent models          # account model list
 | Workspace root | `--workspace <path>`, `--add-dir <path>` | prefer over relying on cwd |
 | Resume | `--resume [chatId]` | |
 | **Pre-allocate session** | `cursor-agent create-chat` → chat ID | **Use this; do not parse the ID out of the stream** |
-| Model + effort | `--model 'base[context=1m,effort=high,fast=false]'` | effort is encoded in the bracket; **there is no `--effort` flag** |
-| Model list | `cursor-agent models` | |
+| Model | `--model <identifier>` | Pass the exact identifier returned by `cursor-agent models` unchanged. This installed version rejects synthesized bracket parameters. |
+| Model list | `cursor-agent models` | Select the returned compound identifiers verbatim. They already encode effort, thinking, and speed, so Cursor has no Effort control. |
 
 **No warm transport exists.** Per-turn spawn is the truthful v1 contract. On Windows, the capability chip reads **"sandbox unavailable on Windows, read-only enforced by ask mode"**: `--mode ask` is Cursor's genuine read-only mode.
 **Do not use:** `-w/--worktree`.

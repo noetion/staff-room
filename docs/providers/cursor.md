@@ -19,6 +19,7 @@ Agent Room searches `PATH` first and then the standard Windows Cursor Agent inst
 - Read-only Ask: `--mode ask`, Cursor's native read-only mode
 - Write mode: `--force`, used only for build/revision inside the managed worktree
 - Review mode: print mode without `--force`
+- Model selection: run `cursor-agent models`, present its returned compound identifiers verbatim, and pass the selected identifier unchanged with `--model`. Do not synthesize bracket parameters: this installed version rejects them. Effort, thinking, and speed are encoded in the identifier, so the Cursor Effort control is disabled.
 - Session resume: `--resume <chat-id>`
 - Project permission rules remain authoritative; deny rules win
 - Cancellation: terminate only the child process owned by the run

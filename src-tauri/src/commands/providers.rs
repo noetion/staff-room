@@ -666,18 +666,14 @@ pub(crate) async fn discover_provider_models(
             if !output.status.success() {
                 return Err(truncate_utf8(&text, 500));
             }
-            let models = if request.participant_kind == "cursor" {
-                parse_cursor_model_list(&text)
-            } else {
-                parse_provider_model_list(&text)
-            };
+            let models = parse_provider_model_list(&text);
             if models.is_empty() {
                 return Err("The CLI returned no selectable models for this account.".to_owned());
             }
             Ok(ModelDiscoveryResult {
                 models,
                 detail: if request.participant_kind == "cursor" {
-                    "Fetched from the signed-in CLI. Effort, thinking, context, and speed variants are grouped under each base model.".to_owned()
+                    "Fetched verbatim from the signed-in CLI. Each Cursor model identifier already encodes its effort, thinking, and speed preset.".to_owned()
                 } else {
                     "Fetched from the signed-in CLI account just now.".to_owned()
                 },
