@@ -62,6 +62,21 @@ $tmpDir    = Join-Path ([System.IO.Path]::GetTempPath()) "agent-room-redesign"
 
 New-Item -ItemType Directory -Force -Path $logDir, $tmpDir | Out-Null
 
+# ----------------------------------------------------------------------- git
+# git writes ordinary notices (CRLF conversion, progress) to stderr. With
+# $ErrorActionPreference = "Stop" a redirected stderr becomes a terminating
+# NativeCommandError and kills the run, so every git call goes through here:
+# stderr is captured as plain text and the exit code decides success.
+function Invoke-Git {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $out = (& git @args 2>&1 | ForEach-Object { "$_" })
+    return @{ Ok = ($LASTEXITCODE -eq 0); Code = $LASTEXITCODE; Out = @($out) }
+  }
+  finally { $ErrorActionPreference = $prev }
+}
+
 # --------------------------------------------------------------------- output
 function Say  ($m, $c = "Gray")  { Write-Host $m -ForegroundColor $c }
 function Head ($m)               { Write-Host ""; Write-Host $m -ForegroundColor White; Write-Host ("-" * 64) -ForegroundColor DarkGray }
@@ -93,6 +108,15 @@ function Test-Tooling {
     if (-not $DryRun) { npm install --prefix $repo 2>&1 | Out-Null }
   }
   Good "dependencies present"
+
+  # Run logs are transient and noisy in a diff; keep them out of the history.
+  $gi = Join-Path $repo ".gitignore"
+  $entry = "docs/redesign/logs/"
+  $giText = if (Test-Path $gi) { Get-Content $gi -Raw -Encoding UTF8 } else { "" }
+  if ($giText -notmatch [regex]::Escape($entry)) {
+    Add-Content -Path $gi -Value "`n# redesign driver run logs`n$entry" -Encoding UTF8
+    Good "added $entry to .gitignore"
+  }
 
   # Design skills are optional but materially improve steps 04-12. They can be
   # repo-local or installed globally for the engine, so check both - a global
@@ -190,33 +214,39 @@ function Initialize-Branch {
   Clear-StaleGitLock
   Push-Location $repo
   try {
-    $current = (git rev-parse --abbrev-ref HEAD).Trim()
-    $dirty   = (git status --porcelain)
+    $current = (Invoke-Git rev-parse --abbrev-ref HEAD).Out[0].Trim()
+    $dirty   = ((Invoke-Git status --porcelain).Out.Count -gt 0)
 
     if ($current -eq $Branch) {
       Good "already on $Branch"
     }
     else {
-      $exists = git rev-parse --verify --quiet "refs/heads/$Branch"
+      $exists = (Invoke-Git rev-parse --verify --quiet "refs/heads/$Branch").Ok
       if ($exists) {
         Say "  switching to existing $Branch" DarkGray
-        if (-not $DryRun) { git checkout $Branch | Out-Null }
+        if (-not $DryRun) { Invoke-Git checkout $Branch | Out-Null }
       }
       else {
         Say "  creating $Branch from $current" DarkGray
         # `checkout -b` carries uncommitted work across, which is what we want:
         # the user's in-flight edits are preserved, then baselined on the new
         # branch so the redesign starts from a clean tree.
-        if (-not $DryRun) { git checkout -b $Branch | Out-Null }
+        if (-not $DryRun) { Invoke-Git checkout -b $Branch | Out-Null }
       }
       Good "on $Branch"
     }
 
     if ($dirty -and -not $DryRun) {
       Say "  baselining pre-existing working-tree changes" DarkGray
-      git add -A | Out-Null
-      git commit -q -m "chore: baseline before Liquid Glass redesign" | Out-Null
-      Good "baseline commit created"
+      $add    = Invoke-Git add -A
+      $commit = Invoke-Git commit -q -m "chore: baseline before Liquid Glass redesign"
+      if ((Invoke-Git status --porcelain).Out.Count -gt 0) {
+        Warn "working tree still dirty after the baseline commit:"
+        ($add.Out + $commit.Out) | Where-Object { $_ } | Select-Object -First 6 |
+          ForEach-Object { Write-Host "    $_" -ForegroundColor DarkYellow }
+        Warn "continuing - your changes will fold into the first step commit"
+      }
+      else { Good "baseline commit created" }
     }
     elseif (-not $dirty) {
       Good "working tree clean"
@@ -550,7 +580,7 @@ function Invoke-Step ($step, $state) {
     # package.json may have changed (step 14 only) - reinstall before gating.
     Push-Location $repo
     try {
-      $pkgChanged = git diff --name-only HEAD -- package.json
+      $pkgChanged = (Invoke-Git diff --name-only HEAD -- package.json).Out.Count -gt 0
       if ($pkgChanged) { Say "    package.json changed - npm install" DarkGray; npm install 2>&1 | Out-Null }
     }
     finally { Pop-Location }
@@ -595,25 +625,25 @@ $failText
   if (-not $DryRun) {
     Push-Location $repo
     try {
-      if (git status --porcelain) {
-        $before = (git rev-parse HEAD).Trim()
-        $addOut = git add -A 2>&1
-        # Commit subjects are ASCII on purpose: PowerShell hands native argv to
-        # git in the console codepage, and a mangled subject is a poor trade for
-        # a typographic dash.
-        $msg = "redesign(step-$($step.Id)): " + ($step.Title -replace '[^\x20-\x7E]', '-')
-        $commitOut = git commit -q -m $msg 2>&1
-        $after = (git rev-parse HEAD).Trim()
+      if ((Invoke-Git status --porcelain).Out.Count -gt 0) {
+        $before = (Invoke-Git rev-parse HEAD).Out[0].Trim()
+        $add    = Invoke-Git add -A
+        # ASCII commit subjects on purpose: PowerShell hands native argv to git
+        # in the console codepage, and a mangled subject is a poor trade for a
+        # typographic dash.
+        $msg    = "redesign(step-$($step.Id)): " + ($step.Title -replace '[^\x20-\x7E]', '-')
+        $commit = Invoke-Git commit -q -m $msg
+        $after  = (Invoke-Git rev-parse HEAD).Out[0].Trim()
 
         if ($after -eq $before) {
           Bad "git did not create a commit for step $($step.Id):"
-          @($addOut) + @($commitOut) | Where-Object { $_ } | Select-Object -First 6 |
+          ($add.Out + $commit.Out) | Where-Object { $_ } | Select-Object -First 6 |
             ForEach-Object { Write-Host "      $_" -ForegroundColor DarkYellow }
           Bad "the step's work is on disk but unversioned - fix git, then re-run with -Resume"
           $sha = ""
         }
         else {
-          $sha = (git rev-parse --short HEAD).Trim()
+          $sha = (Invoke-Git rev-parse --short HEAD).Out[0].Trim()
           Good "committed $sha"
         }
       }
@@ -647,9 +677,9 @@ function Invoke-Critique ($state) {
   if (-not $DryRun) {
     Push-Location $repo
     try {
-      if (git status --porcelain) {
-        git add -A | Out-Null
-        git commit -q -m "redesign: design critique" | Out-Null
+      if ((Invoke-Git status --porcelain).Out.Count -gt 0) {
+        Invoke-Git add -A | Out-Null
+        Invoke-Git commit -q -m "redesign: design critique" | Out-Null
         Good "REVIEW.md committed"
       }
       else { Warn "critique produced no REVIEW.md - step 15 will proceed without findings" }
