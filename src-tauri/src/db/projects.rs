@@ -229,6 +229,14 @@ pub(crate) fn migrate_v1_to_v2(connection: &Connection) -> rusqlite::Result<()> 
         Err(_) => return Ok(()),
     };
     let project_id = project_id_for_root(&root);
+    let canonical_project_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+        [&project_id],
+        |row| row.get(0),
+    )?;
+    if canonical_project_exists {
+        return merge_legacy_project(connection, &project_id);
+    }
     let row_counts = project_row_counts(connection)?;
     connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
     let result = (|| {
@@ -256,6 +264,80 @@ pub(crate) fn migrate_v1_to_v2(connection: &Connection) -> rusqlite::Result<()> 
     })();
     let _ = connection.execute_batch("PRAGMA foreign_keys = ON;");
     result
+}
+
+fn merge_legacy_project(connection: &Connection, project_id: &str) -> rusqlite::Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+
+    for table in ["messages", "runs", "chat_receipts"] {
+        transaction.execute(
+            &format!("UPDATE {table} SET project_id = ?1 WHERE project_id = 'agent-room'"),
+            [project_id],
+        )?;
+    }
+
+    for (table, key) in [
+        ("chat_sessions", "participant_kind"),
+        ("provider_sessions", "participant_kind"),
+        ("provider_profiles", "participant_kind"),
+        ("provider_connections", "participant_kind"),
+    ] {
+        transaction.execute(
+            &format!(
+                "DELETE FROM {table}
+                 WHERE project_id = 'agent-room'
+                   AND {key} IN (
+                       SELECT {key} FROM {table} WHERE project_id = ?1
+                   )"
+            ),
+            [project_id],
+        )?;
+        transaction.execute(
+            &format!("UPDATE {table} SET project_id = ?1 WHERE project_id = 'agent-room'"),
+            [project_id],
+        )?;
+    }
+
+    transaction.execute(
+        "DELETE FROM provider_route_profiles
+         WHERE project_id = 'agent-room'
+           AND (participant_kind, route) IN (
+               SELECT participant_kind, route
+               FROM provider_route_profiles
+               WHERE project_id = ?1
+           )",
+        [project_id],
+    )?;
+    transaction.execute(
+        "UPDATE provider_route_profiles SET project_id = ?1 WHERE project_id = 'agent-room'",
+        [project_id],
+    )?;
+
+    for table in ["project_settings", "verification_config"] {
+        transaction.execute(
+            &format!(
+                "DELETE FROM {table}
+                 WHERE project_id = 'agent-room'
+                   AND EXISTS (
+                       SELECT 1 FROM {table} WHERE project_id = ?1
+                   )"
+            ),
+            [project_id],
+        )?;
+        transaction.execute(
+            &format!("UPDATE {table} SET project_id = ?1 WHERE project_id = 'agent-room'"),
+            [project_id],
+        )?;
+    }
+
+    transaction.execute("DELETE FROM projects WHERE id = 'agent-room'", [])?;
+    transaction.execute(
+        "UPDATE app_state
+         SET value = ?1
+         WHERE key = 'active_project_id' AND value = 'agent-room'",
+        [project_id],
+    )?;
+    transaction.commit()
 }
 
 pub(crate) fn reconcile_interrupted_runs(connection: &Connection) -> rusqlite::Result<usize> {

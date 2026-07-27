@@ -175,6 +175,78 @@ fn v1_project_migration_preserves_project_scoped_row_counts() {
 }
 
 #[test]
+fn v1_project_migration_merges_when_canonical_project_already_exists() {
+    let (root, repository) = test_repository();
+    let connection = Connection::open_in_memory().expect("open fixture database");
+    migrate(&connection).expect("create v1 fixture schema");
+    let repository = std::fs::canonicalize(repository).expect("canonical repository");
+    let project_id = project_id_for_root(&repository);
+    connection
+        .execute(
+            "INSERT INTO projects (id, name, goal, repository_path)
+             VALUES ('agent-room', 'Legacy', 'legacy', ?1),
+                    (?2, 'Current', 'current', ?1)",
+            params![repository.to_string_lossy(), project_id],
+        )
+        .expect("insert duplicate projects");
+    connection
+        .execute(
+            "INSERT INTO messages (id, project_id, sender_kind, message_kind, body)
+             VALUES ('legacy-message', 'agent-room', 'human', 'human', 'preserve me')",
+            [],
+        )
+        .expect("insert legacy message");
+    connection
+        .execute(
+            "INSERT INTO provider_connections
+             (project_id, participant_kind, status, detail)
+             VALUES ('agent-room', 'codex', 'legacy', 'legacy'),
+                    (?1, 'codex', 'current', 'current')",
+            [&project_id],
+        )
+        .expect("insert duplicate provider connections");
+    connection
+        .execute(
+            "INSERT INTO app_state (key, value) VALUES ('active_project_id', 'agent-room')",
+            [],
+        )
+        .expect("set legacy project active");
+
+    migrate(&connection).expect("merge duplicate projects");
+
+    let project_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
+        .expect("count projects");
+    assert_eq!(project_count, 1);
+    let message_project_id: String = connection
+        .query_row(
+            "SELECT project_id FROM messages WHERE id = 'legacy-message'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("load migrated message");
+    assert_eq!(message_project_id, project_id);
+    let connection_detail: String = connection
+        .query_row(
+            "SELECT detail FROM provider_connections
+             WHERE project_id = ?1 AND participant_kind = 'codex'",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .expect("load canonical provider connection");
+    assert_eq!(connection_detail, "current");
+    let active_project_id: String = connection
+        .query_row(
+            "SELECT value FROM app_state WHERE key = 'active_project_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("load active project");
+    assert_eq!(active_project_id, project_id);
+    std::fs::remove_dir_all(root).expect("remove fixture repository");
+}
+
+#[test]
 fn context_packet_is_bounded_and_explicitly_truncated() {
     let oversized = "x".repeat(BUILD_CONTEXT_BUDGET_BYTES * 2);
     let (packet, bytes) =
