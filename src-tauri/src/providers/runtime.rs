@@ -226,10 +226,10 @@ pub(crate) fn capabilities_for(
             let streaming = installed;
             let write_mode = installed;
             let exact_resume = installed;
-            let sandbox = installed;
+            let sandbox = installed && !cfg!(windows);
             let ask_mode = installed;
             let partial_stream = installed;
-            let ready = non_interactive && streaming && write_mode && exact_resume && sandbox;
+            let ready = non_interactive && streaming && write_mode && exact_resume;
             ProviderCapabilities {
                 non_interactive_turn: non_interactive,
                 streaming,
@@ -239,7 +239,7 @@ pub(crate) fn capabilities_for(
                 write_mode,
                 approval_bridge: false,
                 usage_reporting: false,
-                repository_scoping: sandbox,
+                repository_scoping: installed,
                 warm_session: false,
                 autonomy_mode: if ready {
                     "isolated-auto"
@@ -250,7 +250,11 @@ pub(crate) fn capabilities_for(
                 }
                 .to_owned(),
                 autonomy_note: if ready {
-                    "The verified capability table declares print mode, stream JSON, resume, force writes, and an explicit sandbox. Force is confined to the managed worktree."
+                    if cfg!(windows) {
+                        "Cursor sandbox is unavailable on Windows; read-only Chat is enforced by Cursor ask mode. Force writes remain confined to the managed worktree."
+                    } else {
+                        "The verified capability table declares print mode, stream JSON, resume, force writes, and an explicit sandbox. Force is confined to the managed worktree."
+                    }
                 } else if installed {
                     "Cursor Agent is installed, but this version does not prove every required automation flag."
                 } else {
@@ -261,11 +265,15 @@ pub(crate) fn capabilities_for(
                     format!("Version: {version_text}"),
                     format!("print + stream JSON: {}", non_interactive && streaming),
                     format!(
-                        "read-only Chat + partial stream: {}",
-                        ask_mode && sandbox && partial_stream
+                        "read-only Chat (ask mode) + partial stream: {}",
+                        ask_mode && partial_stream
                     ),
                     format!("force write: {write_mode}"),
-                    format!("resume + sandbox: {}", exact_resume && sandbox),
+                    if cfg!(windows) {
+                        "sandbox: unavailable on Windows".to_owned()
+                    } else {
+                        format!("resume + sandbox: {}", exact_resume && sandbox)
+                    },
                 ],
             }
         }

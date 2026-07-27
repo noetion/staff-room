@@ -36,6 +36,20 @@ pub(crate) async fn wait_for_idle(mut activity: watch::Receiver<u64>, timeout_se
     }
 }
 
+async fn stop_for_idle(
+    child: &mut tokio::process::Child,
+) -> Result<(std::process::ExitStatus, bool), String> {
+    if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+        return Ok((status, false));
+    }
+    let _ = child.kill().await;
+    child
+        .wait()
+        .await
+        .map(|status| (status, true))
+        .map_err(|error| error.to_string())
+}
+
 fn cancellation_requested(
     cancellation: &watch::Receiver<bool>,
     changed: Result<(), watch::error::RecvError>,
@@ -334,9 +348,9 @@ pub(crate) async fn invoke_provider(
             child.wait().await.map_err(|error| error.to_string())?
         },
         _ = wait_for_idle(activity_receiver, idle_timeout_seconds(phase)) => {
-            idle_timed_out = true;
-            let _ = child.kill().await;
-            child.wait().await.map_err(|error| error.to_string())?
+            let (result, was_idle_timeout) = stop_for_idle(&mut child).await?;
+            idle_timed_out = was_idle_timeout;
+            result
         },
         changed = completion_receiver.changed() => {
             if changed.is_ok() && *completion_receiver.borrow() {
@@ -436,6 +450,14 @@ pub(crate) fn provider_log_note(run: &ProviderRun) -> String {
 }
 
 pub(crate) fn provider_failure_reason(provider: &str, activity: &str, run: &ProviderRun) -> String {
+    let stderr = run.stderr.trim();
+    if !stderr.is_empty() {
+        return format!(
+            "{provider} could not complete {activity}: {}. {}",
+            truncate_utf8(stderr, 500),
+            provider_log_note(run)
+        );
+    }
     format!(
         "{provider} could not complete {activity}. {}",
         provider_log_note(run)
@@ -454,5 +476,58 @@ mod tests {
         let changed = cancellation.changed().await;
 
         assert!(!cancellation_requested(&cancellation, changed));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn fast_nonzero_exit_with_stderr_is_not_classified_as_idle_timeout() {
+        let mut command = Command::new("cmd");
+        command
+            .args(["/C", "echo sandbox is unavailable 1>&2 & exit /b 1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().expect("spawn fast failing child");
+        let stderr = child.stderr.take().expect("capture stderr");
+        let stderr_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            let mut output = String::new();
+            while let Some(line) = lines.next_line().await.expect("read stderr") {
+                append_capped(&mut output, &line);
+            }
+            output
+        });
+
+        let status = timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("fast child exit")
+            .expect("wait for fast child");
+        assert!(!status.success());
+        let (status, idle_timed_out) = stop_for_idle(&mut child)
+            .await
+            .expect("collect already-exited child");
+        let stderr = stderr_task.await.expect("join stderr task");
+
+        assert!(!status.success());
+        assert!(!idle_timed_out);
+        let run = ProviderRun {
+            summary: String::new(),
+            session_id: None,
+            success: false,
+            stopped: false,
+            timed_out: false,
+            idle_timed_out,
+            stderr,
+            handoff: None,
+            actual_model: None,
+            usage: ProviderUsage::default(),
+            stdout_log_path: "stdout.log".to_owned(),
+            stderr_log_path: "stderr.log".to_owned(),
+            process_start_ms: 0,
+            first_output_ms: None,
+            session_resumed: false,
+        };
+        let reason = provider_failure_reason("Cursor Agent", "the connection test", &run);
+        assert!(reason.contains("sandbox is unavailable"));
+        assert!(!reason.contains("No provider output"));
     }
 }

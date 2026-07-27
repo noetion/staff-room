@@ -92,7 +92,7 @@ fn legacy_provider_profile_migrates_to_every_route_without_overwriting() {
 }
 
 #[test]
-fn cursor_command_uses_declared_headless_flags() {
+fn cursor_command_omits_sandbox_on_windows_and_keeps_ask_mode() {
     let request = TurnRequest {
         mode: ProviderMode::Ask,
         phase: "chat",
@@ -106,27 +106,27 @@ fn cursor_command_uses_declared_headless_flags() {
         handoff_contract: None,
     };
     let command = providers::build_command("cursor", &request).expect("build cursor command");
-    assert_eq!(
-        command.args,
-        [
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--stream-partial-output",
-            "--trust",
-            "--workspace",
-            "C:/worktree",
-            "--sandbox",
-            "enabled",
-            "--mode",
-            "ask",
-            "--model",
-            "claude-opus-4-8[effort=high]",
-            "--resume",
-            "chat-1",
-            "Read the packet."
-        ]
-    );
+    let mut expected = vec![
+        "--print".to_owned(),
+        "--output-format".to_owned(),
+        "stream-json".to_owned(),
+        "--stream-partial-output".to_owned(),
+        "--trust".to_owned(),
+        "--workspace".to_owned(),
+        "C:/worktree".to_owned(),
+    ];
+    #[cfg(not(windows))]
+    expected.extend(["--sandbox".to_owned(), "enabled".to_owned()]);
+    expected.extend([
+        "--mode".to_owned(),
+        "ask".to_owned(),
+        "--model".to_owned(),
+        "claude-opus-4-8[effort=high]".to_owned(),
+        "--resume".to_owned(),
+        "chat-1".to_owned(),
+        "Read the packet.".to_owned(),
+    ]);
+    assert_eq!(command.args, expected);
 }
 
 #[test]

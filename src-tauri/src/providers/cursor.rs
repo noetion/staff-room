@@ -11,8 +11,9 @@ impl ProviderAdapter for Adapter {
             "--print".into(), "--output-format".into(), "stream-json".into(),
             "--stream-partial-output".into(), "--trust".into(),
             "--workspace".into(), request.repository.display().to_string(),
-            "--sandbox".into(), "enabled".into(),
         ];
+        #[cfg(not(windows))]
+        args.extend(["--sandbox".into(), "enabled".into()]);
         if is_read_only(request.mode) { args.extend(["--mode".into(), "ask".into()]); } else { args.push("--force".into()); }
         if let Some(model) = request.model {
             let model = match request.effort {

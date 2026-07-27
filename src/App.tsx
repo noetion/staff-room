@@ -251,7 +251,9 @@ function capabilityChips(participant: Participant): string[] {
   if (participant.kind === "antigravity") {
     return ["Ship only · no read-only mode", "cold start per turn", "completion stream, not token deltas", "usage not reported"];
   }
-  return participant.kind === "cursor" ? ["cold start per turn", "usage not reported"] : [];
+  return participant.kind === "cursor"
+    ? ["sandbox unavailable on Windows, read-only enforced by ask mode", "cold start per turn", "usage not reported"]
+    : [];
 }
 
 function chatAgentFor(

@@ -145,7 +145,7 @@ cursor-agent models          # account model list
 | Structured stream | `--output-format stream-json` | |
 | Token deltas | `--stream-partial-output` | requires `--print` + `stream-json` |
 | Read-only | `--mode ask` (or `--mode plan`) | only `plan` and `ask` are valid; there is no write value |
-| Sandbox | `--sandbox <enabled\|disabled>` | |
+| Sandbox | `--sandbox <enabled\|disabled>` | Available on macOS and Linux. On Windows Cursor Agent `2026.07.23-e383d2b` rejects it, so omit this flag. Do not run `agent sandbox disable` or modify global Cursor configuration. |
 | Write | `-f, --force` (alias `--yolo`) | |
 | **Workspace trust** | `--trust` | **required for headless runs in a fresh worktree** |
 | Workspace root | `--workspace <path>`, `--add-dir <path>` | prefer over relying on cwd |
@@ -154,7 +154,7 @@ cursor-agent models          # account model list
 | Model + effort | `--model 'base[context=1m,effort=high,fast=false]'` | effort is encoded in the bracket; **there is no `--effort` flag** |
 | Model list | `cursor-agent models` | |
 
-**No warm transport exists.** Per-turn spawn is the truthful v1 contract.
+**No warm transport exists.** Per-turn spawn is the truthful v1 contract. On Windows, the capability chip reads **"sandbox unavailable on Windows, read-only enforced by ask mode"**: `--mode ask` is Cursor's genuine read-only mode.
 **Do not use:** `-w/--worktree`.
 
 ### 2.4 Antigravity (`agy`) — **Ship-only tier**
@@ -193,7 +193,7 @@ Go-style flag parser; `--print` **takes the prompt as its value**.
 | Session ID | parse from stream | **we assign** | **pre-allocate** | parse / `--continue` |
 | Token deltas | yes | yes | yes | **no** |
 | Usage reported | yes | yes | **no** | **no** |
-| Read-only mechanism | `-s read-only` | `--tools` allowlist + `plan` | `--mode ask --sandbox enabled` | **none — not offered for Ask** |
+| Read-only mechanism | `-s read-only` | `--tools` allowlist + `plan` | `--mode ask` (Windows; sandbox unavailable) | **none — not offered for Ask** |
 | Schema output | `--output-schema` | `--json-schema` | markers | markers |
 | Model list command | none | none | `models` | `models` |
 
@@ -829,7 +829,7 @@ These could not be resolved statically. Resolve each with a live test before the
 | 1 | Is `codex app-server` stable enough in 0.144.4 for warm turns and thread resume? | Step 7 | Run `codex app-server --stdio`, capture the handshake, attempt one turn + resume. If not, fall back to `exec resume` or evaluate `codex mcp-server`. |
 | 2 | Does `agy --sandbox --mode plan` complete a **review** without `--dangerously-skip-permissions`, or hang on a prompt? | Step 8 (non-blocking) | Run it against a worktree and observe. If it hangs, Antigravity keeps the bypass for Review and relies solely on Step 9's mutation guard — note this in the capability chip. This no longer blocks Ask, because Antigravity is Ship-only (§2.0). |
 | 3 | Does `cursor-agent` read a prompt from stdin when no positional prompt is given? | Step 5 | Test `echo "hi" \| cursor-agent -p`. If yes, prefer stdin over the prompt-file workaround for Cursor. |
-| 4 | Does `--sandbox enabled` block writes that `--force` is meant to allow in Cursor? | Step 8 | Run a Quick Edit with both flags in a scratch worktree and check whether the file changed. |
+| 4 | **Resolved 2026-07-27, Cursor Agent `2026.07.23-e383d2b`:** Windows rejects `--sandbox enabled` before execution because sandboxing requires macOS or Linux. Cursor invocations omit the flag on Windows; read-only Ask is enforced by `--mode ask`. | — | Do not run `agent sandbox disable` and never mutate the user's global Cursor configuration. |
 | 5 | Does `codex exec resume` accept `--json`/`-o` before the session ID? | Step 5 | Run `codex exec resume --help` and confirm argument order. |
 | 6 | Do Windows notifications fire from an unpackaged dev build? | Step 12 | Trigger one and observe. The in-app banner is required regardless. |
 
