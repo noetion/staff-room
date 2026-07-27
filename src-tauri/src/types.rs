@@ -289,6 +289,10 @@ pub(crate) struct ConnectionTestRequest {
     pub(crate) project_id: String,
     pub(crate) repository_path: String,
     pub(crate) participant_kind: String,
+    #[serde(default)]
+    pub(crate) model: Option<String>,
+    #[serde(default)]
+    pub(crate) effort: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]

@@ -152,6 +152,8 @@ export async function testProviderConnection(request: {
   projectId: string;
   repositoryPath: string;
   participantKind: AgentKind;
+  model: string;
+  effort: string;
 }): Promise<Participant> {
   return invoke<Participant>("test_provider_connection", { request });
 }

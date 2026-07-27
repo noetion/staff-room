@@ -573,7 +573,16 @@ pub(crate) async fn test_provider_connection(
     if !participant.installed {
         return Err(format!("{} CLI is not installed.", participant.name));
     }
-    let profile = provider_profile(database, &request.project_id, &participant.kind, "chat")?;
+    let profile = if request.model.is_some() || request.effort.is_some() {
+        ProviderProfile {
+            participant_kind: participant.kind.clone(),
+            route: "chat".to_owned(),
+            model: request.model.filter(|value| !value.trim().is_empty()),
+            effort: request.effort.filter(|value| !value.trim().is_empty()),
+        }
+    } else {
+        provider_profile(database, &request.project_id, &participant.kind, "chat")?
+    };
     let run_id = format!("connection-{}", Uuid::new_v4());
     let output_path = run_artifact_directory(&app, &run_id)?.join("connection-test.final.txt");
     let (cancel_sender, cancellation) = watch::channel(false);

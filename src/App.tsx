@@ -80,6 +80,40 @@ import {
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 type PrimaryView = "rooms" | "activity" | "settings";
+type ProviderRoute = "chat" | "build" | "review";
+
+export interface ProviderDraft {
+  model: string;
+  effort: string;
+}
+
+export function providerModelOptions(
+  models: string[],
+  profiles: ProviderProfile[],
+  hasAuthoritativeCatalog: boolean,
+) {
+  const catalogue = new Set(models);
+  const savedModels = profiles.flatMap((profile) => profile.model ? [profile.model] : []);
+  const unavailableSavedModels = hasAuthoritativeCatalog
+    ? savedModels.filter((model) => !catalogue.has(model))
+    : [];
+
+  return Array.from(new Set([...models, ...(!hasAuthoritativeCatalog ? savedModels : unavailableSavedModels)]))
+    .map((value) => ({
+      value,
+      unavailable: hasAuthoritativeCatalog && !catalogue.has(value),
+      label: hasAuthoritativeCatalog && !catalogue.has(value)
+        ? `${value} (Unavailable: not in the current catalogue)`
+        : value,
+    }));
+}
+
+export function connectionTestDraft(draft: ProviderDraft): ProviderDraft {
+  return {
+    model: draft.model.trim(),
+    effort: draft.effort,
+  };
+}
 
 const detachedProject: Project = {
   id: "",
@@ -754,7 +788,7 @@ function ActivityView({ messages, query }: { messages: RoomMessage[]; query: str
   );
 }
 
-function ProviderProfileCard({
+export function ProviderProfileCard({
   participant,
   profiles,
   saving,
@@ -762,6 +796,7 @@ function ProviderProfileCard({
   testing,
   onTest,
   models,
+  hasAuthoritativeCatalog,
   discoveringModels,
   modelDiscoveryDetail,
   onRefreshModels,
@@ -771,17 +806,15 @@ function ProviderProfileCard({
   saving: boolean;
   onSave: (profiles: ProviderProfile[]) => Promise<void>;
   testing: boolean;
-  onTest: (kind: AgentKind) => void;
+  onTest: (kind: AgentKind, draft: ProviderDraft) => void;
   models: string[];
+  hasAuthoritativeCatalog: boolean;
   discoveringModels: boolean;
   modelDiscoveryDetail?: string;
   onRefreshModels: (kind: AgentKind) => void;
 }) {
-  const routes = ["chat", "build", "review"] as const;
-  const [drafts, setDrafts] = useState<Record<(typeof routes)[number], {
-    model: string;
-    effort: string;
-  }>>({
+  const routes: ProviderRoute[] = ["chat", "build", "review"];
+  const [drafts, setDrafts] = useState<Record<ProviderRoute, ProviderDraft>>({
     chat: { model: "", effort: "" },
     build: { model: "", effort: "" },
     review: { model: "", effort: "" },
@@ -797,10 +830,7 @@ function ProviderProfileCard({
     })) as typeof drafts);
   }, [profiles]);
 
-  const modelHistory = Array.from(new Set([
-    ...models,
-    ...profiles.flatMap((profile) => profile.model ? [profile.model] : []),
-  ]));
+  const modelOptions = providerModelOptions(models, profiles, hasAuthoritativeCatalog);
 
   return (
     <article className="participant-card provider-profile-card">
@@ -840,7 +870,9 @@ function ProviderProfileCard({
                 placeholder="Default"
               />
               <datalist id={`models-${participant.kind}`}>
-                {modelHistory.map((option) => <option key={option} value={option} />)}
+                {modelOptions.map((option) => (
+                  <option key={option.value} value={option.value} label={option.label} />
+                ))}
               </datalist>
             </label>
             <label htmlFor={`effort-${participant.kind}-${route}`}>
@@ -919,7 +951,7 @@ function ProviderProfileCard({
           className="secondary-button"
           aria-label={`Test ${participant.name} connection`}
           disabled={!participant.installed || testing}
-          onClick={() => onTest(participant.kind)}
+          onClick={() => onTest(participant.kind, connectionTestDraft(drafts.chat))}
         >
           {testing ? "Testing" : "Test"}
         </button>
@@ -962,7 +994,7 @@ function SettingsView({
   onRefresh: () => void;
   onSaveProfile: (profiles: ProviderProfile[]) => Promise<void>;
   testingKind?: AgentKind;
-  onTestConnection: (kind: AgentKind) => void;
+  onTestConnection: (kind: AgentKind, draft: ProviderDraft) => void;
   modelCatalog: Partial<Record<AgentKind, string[]>>;
   discoveringModelsKind?: AgentKind;
   modelDiscoveryDetails: Partial<Record<AgentKind, string>>;
@@ -1096,6 +1128,7 @@ function SettingsView({
             testing={testingKind === participant.kind}
             onTest={onTestConnection}
             models={modelCatalog[participant.kind] ?? participant.models}
+            hasAuthoritativeCatalog={modelCatalog[participant.kind] !== undefined}
             discoveringModels={discoveringModelsKind === participant.kind}
             modelDiscoveryDetail={modelDiscoveryDetails[participant.kind]}
             onRefreshModels={onRefreshModels}
@@ -1804,7 +1837,7 @@ export function App() {
     }
   }
 
-  async function handleTestConnection(kind: AgentKind) {
+  async function handleTestConnection(kind: AgentKind, draft: ProviderDraft) {
     if (!native) {
       setUiError("Connection tests are available in the Tauri desktop app.");
       return;
@@ -1816,6 +1849,8 @@ export function App() {
         projectId: project.id,
         repositoryPath: project.repositoryPath,
         participantKind: kind,
+        model: draft.model,
+        effort: draft.effort,
       });
       setEnvironment((current) => ({
         ...current,
@@ -1840,9 +1875,33 @@ export function App() {
       const result = await discoverProviderModels(kind);
       setModelCatalog((current) => ({ ...current, [kind]: result.models }));
       setModelDiscoveryDetails((current) => ({ ...current, [kind]: result.detail }));
+      const staleProfiles = profiles.filter((profile) => (
+        profile.participantKind === kind
+        && Boolean(profile.model)
+        && !result.models.includes(profile.model!)
+      ));
+      if (staleProfiles.length > 0) {
+        setSavingProfileKind(kind);
+        await Promise.all(staleProfiles.map((profile) => saveProviderProfile(project.id, {
+          ...profile,
+          model: undefined,
+          effort: profile.participantKind === "cursor" ? undefined : profile.effort,
+        })));
+        const staleRoutes = new Set(staleProfiles.map((profile) => profile.route));
+        setProfiles((current) => current.map((profile) => (
+          profile.participantKind === kind && staleRoutes.has(profile.route)
+            ? {
+              ...profile,
+              model: undefined,
+              effort: profile.participantKind === "cursor" ? undefined : profile.effort,
+            }
+            : profile
+        )));
+      }
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
     } finally {
+      setSavingProfileKind(undefined);
       setDiscoveringModelsKind(undefined);
     }
   }
