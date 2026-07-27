@@ -576,7 +576,12 @@ pub(crate) async fn test_provider_connection(
     let profile = provider_profile(database, &request.project_id, &participant.kind, "chat")?;
     let run_id = format!("connection-{}", Uuid::new_v4());
     let output_path = run_artifact_directory(&app, &run_id)?.join("connection-test.final.txt");
-    let (_, cancellation) = watch::channel(false);
+    let (cancel_sender, cancellation) = watch::channel(false);
+    runtime
+        .cancellations
+        .lock()
+        .await
+        .insert(run_id.clone(), cancel_sender);
     let result = invoke_provider(
         &app,
         &run_id,
@@ -591,7 +596,9 @@ pub(crate) async fn test_provider_connection(
         &output_path,
         cancellation,
     )
-    .await?;
+    .await;
+    runtime.cancellations.lock().await.remove(&run_id);
+    let result = result?;
     let ready = connection_test_ready(&result);
     let authentication_detail = authentication_attention(&result.summary, &result.stderr);
     let connection = if ready {

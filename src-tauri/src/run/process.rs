@@ -36,6 +36,13 @@ pub(crate) async fn wait_for_idle(mut activity: watch::Receiver<u64>, timeout_se
     }
 }
 
+fn cancellation_requested(
+    cancellation: &watch::Receiver<bool>,
+    changed: Result<(), watch::error::RecvError>,
+) -> bool {
+    changed.is_ok() && *cancellation.borrow()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn invoke_provider(
     app: &AppHandle,
@@ -314,9 +321,11 @@ pub(crate) async fn invoke_provider(
     let mut completed_handoff = false;
     let status = tokio::select! {
         result = child.wait() => result.map_err(|error| error.to_string())?,
-        _ = cancellation.changed() => {
-            stopped = true;
-            let _ = child.kill().await;
+        changed = cancellation.changed() => {
+            if cancellation_requested(&cancellation, changed) {
+                stopped = true;
+                let _ = child.kill().await;
+            }
             child.wait().await.map_err(|error| error.to_string())?
         },
         _ = sleep(Duration::from_secs(PROCESS_TIMEOUT_SECONDS)) => {
@@ -431,4 +440,19 @@ pub(crate) fn provider_failure_reason(provider: &str, activity: &str, run: &Prov
         "{provider} could not complete {activity}. {}",
         provider_log_note(run)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropped_cancellation_sender_does_not_mark_run_stopped() {
+        let (sender, mut cancellation) = watch::channel(false);
+        drop(sender);
+
+        let changed = cancellation.changed().await;
+
+        assert!(!cancellation_requested(&cancellation, changed));
+    }
 }
