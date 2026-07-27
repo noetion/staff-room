@@ -4,6 +4,8 @@ mod antigravity;
 mod claude;
 mod codex;
 mod cursor;
+mod parse;
+mod runtime;
 
 pub const MAX_ARGV_PROMPT_CHARS: usize = 8_000;
 
@@ -65,3 +67,6 @@ fn assert_argv_prompt(prompt: &str) -> Result<(), String> {
 fn is_read_only(mode: Mode) -> bool {
     mode == Mode::Ask
 }
+
+pub(crate) use parse::*;
+pub(crate) use runtime::*;

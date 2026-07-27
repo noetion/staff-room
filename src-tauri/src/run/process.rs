@@ -1,0 +1,434 @@
+use crate::*;
+
+pub(crate) async fn preallocate_cursor_session(executable: &Path) -> Result<String, String> {
+    let output = timeout(Duration::from_secs(15), {
+        let mut command = Command::new(executable);
+        hide_tokio_command_window(&mut command);
+        command.arg("create-chat").output()
+    })
+    .await
+    .map_err(|_| "Cursor chat creation timed out after 15 seconds.".to_owned())?
+    .map_err(|error| format!("Could not create a Cursor chat: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Cursor could not create a chat: {}",
+            truncate_utf8(&String::from_utf8_lossy(&output.stderr), 500)
+        ));
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "Cursor did not return a chat ID from create-chat.".to_owned())
+}
+
+pub(crate) async fn wait_for_idle(mut activity: watch::Receiver<u64>, timeout_seconds: u64) {
+    loop {
+        tokio::select! {
+            changed = activity.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            _ = sleep(Duration::from_secs(timeout_seconds)) => return,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn invoke_provider(
+    app: &AppHandle,
+    run_id: &str,
+    participant: &Participant,
+    phase: Phase,
+    mode: ProviderMode,
+    prompt: &str,
+    repository: &Path,
+    session_id: Option<&str>,
+    requested_model: Option<&str>,
+    requested_effort: Option<&str>,
+    final_output_path: &Path,
+    mut cancellation: watch::Receiver<bool>,
+) -> Result<ProviderRun, String> {
+    let kind = participant.kind.as_str();
+    let executable = find_provider_executable(kind)
+        .ok_or_else(|| format!("{} CLI is not installed.", provider_names(kind).0))?;
+    let structured_chat = phase != Phase::Chat || participant.capabilities.structured_output;
+    if phase != Phase::Chat
+        && matches!(
+            participant.capabilities.autonomy_mode.as_str(),
+            "manual" | "unavailable"
+        )
+    {
+        return Err(format!(
+            "{} cannot prove a safe unattended mode: {}",
+            participant.name, participant.capabilities.autonomy_note
+        ));
+    }
+    let artifact_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("runs")
+        .join(run_id);
+    std::fs::create_dir_all(&artifact_dir).map_err(|error| error.to_string())?;
+    let stdout_log_path = artifact_dir.join(format!("{}.stdout.log", phase.as_str()));
+    let stderr_log_path = artifact_dir.join(format!("{}.stderr.log", phase.as_str()));
+    let prompt_path = artifact_dir.join(format!("{}.prompt.txt", phase.as_str()));
+    std::fs::write(&prompt_path, prompt).map_err(|error| error.to_string())?;
+    let argv_prompt = format!(
+        "Read the file at {} in full. It contains your complete assignment. Follow it exactly.",
+        prompt_path.display()
+    );
+    let preallocated_cursor_session = if kind == "cursor" && session_id.is_none() {
+        Some(preallocate_cursor_session(&executable).await?)
+    } else {
+        None
+    };
+    let effective_session = preallocated_cursor_session
+        .clone()
+        .or_else(|| session_id.map(str::to_owned));
+    let effective_session_id = effective_session.as_deref();
+    let handoff_contract = (phase != Phase::Chat).then(|| handoff_contract(phase));
+    let prepared = providers::build_command(
+        kind,
+        &TurnRequest {
+            mode,
+            phase: phase.as_str(),
+            prompt: if matches!(kind, "cursor" | "antigravity") {
+                &argv_prompt
+            } else {
+                prompt
+            },
+            repository,
+            session_id: effective_session_id,
+            model: requested_model,
+            effort: requested_effort,
+            final_output_path,
+            structured_output: structured_chat,
+            handoff_contract: handoff_contract.as_deref(),
+        },
+    )?;
+    let assigned_session_id = prepared
+        .assigned_session_id
+        .clone()
+        .or(preallocated_cursor_session.clone());
+    let mut command = Command::new(executable);
+    command.args(&prepared.args);
+    let stdin_prompt = prepared.stdin;
+
+    apply_provider_environment(&mut command, repository);
+    command
+        .current_dir(repository)
+        .kill_on_drop(true)
+        .stdin(if stdin_prompt.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let provider_started = Instant::now();
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to start {}: {error}", provider_names(kind).0))?;
+    let process_start_ms = provider_started.elapsed().as_millis() as u64;
+
+    if let Some(content) = stdin_prompt {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(content.as_bytes())
+                .await
+                .map_err(|error| format!("Failed to send the context packet: {error}"))?;
+            let _ = stdin.shutdown().await;
+        }
+    }
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Provider stdout was unavailable.".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Provider stderr was unavailable.".to_owned())?;
+
+    let stdout_app = app.clone();
+    let stdout_run = run_id.to_owned();
+    let stdout_phase = phase.as_str().to_owned();
+    let stdout_agent = kind.to_owned();
+    let (activity_sender, activity_receiver) = watch::channel(0_u64);
+    let (completion_sender, mut completion_receiver) = watch::channel(false);
+    let stdout_activity = activity_sender.clone();
+    let completion_phase = phase;
+    let stdout_started = provider_started;
+    let stdout_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut session_id = None;
+        let mut result_text = String::new();
+        let mut chat_stream = ChatStreamBuffer::default();
+        let mut raw = String::new();
+        let mut actual_model = None;
+        let mut usage = ProviderUsage::default();
+        let mut activity_emitted = false;
+        let mut first_output_ms = None;
+        let mut stream_flush = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(50),
+            Duration::from_millis(50),
+        );
+        loop {
+            let line = tokio::select! {
+                line = lines.next_line() => match line {
+                    Ok(line) => line,
+                    Err(_) => break,
+                },
+                _ = stream_flush.tick(), if completion_phase == Phase::Chat => {
+                    flush_chat_stream(
+                        &stdout_app,
+                        &stdout_run,
+                        &stdout_phase,
+                        &stdout_agent,
+                        &mut chat_stream,
+                    );
+                    continue;
+                }
+            };
+            let Some(line) = line else {
+                break;
+            };
+            first_output_ms.get_or_insert_with(|| stdout_started.elapsed().as_millis() as u64);
+            stdout_activity.send_modify(|value| *value = value.saturating_add(1));
+            append_capped(&mut raw, &line);
+            if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                session_id = session_id.or_else(|| parse_session_id(&value));
+                actual_model = actual_model.or_else(|| reported_model(&value));
+                merge_usage(&mut usage, &value);
+                let thinking_fragment = (completion_phase == Phase::Chat)
+                    .then(|| provider_thinking_fragment(&stdout_agent, &value))
+                    .flatten();
+                if let Some(fragment) = thinking_fragment {
+                    chat_stream.push_thinking(fragment);
+                    activity_emitted = true;
+                } else if let Some((title, detail)) = provider_activity(&stdout_agent, &value) {
+                    emit_event(
+                        &stdout_app,
+                        &stdout_run,
+                        "stream",
+                        &stdout_phase,
+                        "running",
+                        Some(&stdout_agent),
+                        &title,
+                        &detail,
+                        None,
+                    );
+                    activity_emitted = true;
+                }
+                if completion_phase == Phase::Chat {
+                    if let Some(fragment) = provider_chat_fragment(&stdout_agent, &value) {
+                        chat_stream.push_fragment(&fragment);
+                    } else if let Some(text) = provider_chat_text(&stdout_agent, &value) {
+                        chat_stream.replace_snapshot(text);
+                    } else if let Some(text) = parse_result_text(&value) {
+                        chat_stream.replace_snapshot(text);
+                    }
+                } else if let Some(text) = parse_result_text(&value) {
+                    result_text = text;
+                }
+            } else if completion_phase == Phase::Chat && !structured_chat {
+                chat_stream.push_fragment(&format!("{line}\n"));
+            }
+            if raw.contains(HANDOFF_END) && extract_phase_handoff(&raw, completion_phase).is_ok() {
+                completion_sender.send_replace(true);
+            }
+            if completion_phase == Phase::Chat {
+                if chat_stream.result_text.trim().is_empty() && !activity_emitted {
+                    emit_event(
+                        &stdout_app,
+                        &stdout_run,
+                        "stream",
+                        &stdout_phase,
+                        "running",
+                        Some(&stdout_agent),
+                        "Chat activity",
+                        &format!(
+                            "{} is working in the attached repository.",
+                            provider_names(&stdout_agent).0
+                        ),
+                        None,
+                    );
+                    activity_emitted = true;
+                }
+            } else if !line.trim_start().starts_with('{') {
+                emit_event(
+                    &stdout_app,
+                    &stdout_run,
+                    "stream",
+                    &stdout_phase,
+                    "running",
+                    Some(&stdout_agent),
+                    "Provider activity",
+                    &truncate_utf8(&line, 2 * 1024),
+                    None,
+                );
+            }
+        }
+        if completion_phase == Phase::Chat {
+            flush_chat_stream(
+                &stdout_app,
+                &stdout_run,
+                &stdout_phase,
+                &stdout_agent,
+                &mut chat_stream,
+            );
+        }
+        (
+            session_id,
+            if completion_phase == Phase::Chat {
+                chat_stream.result_text
+            } else {
+                result_text
+            },
+            raw,
+            actual_model,
+            usage,
+            first_output_ms,
+        )
+    });
+
+    let stderr_activity = activity_sender;
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut raw = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            stderr_activity.send_modify(|value| *value = value.saturating_add(1));
+            append_capped(&mut raw, &line);
+        }
+        raw
+    });
+
+    let mut stopped = false;
+    let mut timed_out = false;
+    let mut idle_timed_out = false;
+    let mut completed_handoff = false;
+    let status = tokio::select! {
+        result = child.wait() => result.map_err(|error| error.to_string())?,
+        _ = cancellation.changed() => {
+            stopped = true;
+            let _ = child.kill().await;
+            child.wait().await.map_err(|error| error.to_string())?
+        },
+        _ = sleep(Duration::from_secs(PROCESS_TIMEOUT_SECONDS)) => {
+            timed_out = true;
+            let _ = child.kill().await;
+            child.wait().await.map_err(|error| error.to_string())?
+        },
+        _ = wait_for_idle(activity_receiver, idle_timeout_seconds(phase)) => {
+            idle_timed_out = true;
+            let _ = child.kill().await;
+            child.wait().await.map_err(|error| error.to_string())?
+        },
+        changed = completion_receiver.changed() => {
+            if changed.is_ok() && *completion_receiver.borrow() {
+                completed_handoff = true;
+                let _ = child.kill().await;
+            }
+            child.wait().await.map_err(|error| error.to_string())?
+        }
+    };
+
+    let (parsed_session, parsed_result, raw_stdout, actual_model, usage, first_output_ms) =
+        stdout_task.await.map_err(|error| error.to_string())?;
+    let raw_stderr = stderr_task.await.map_err(|error| error.to_string())?;
+    std::fs::write(&stdout_log_path, &raw_stdout).map_err(|error| error.to_string())?;
+    std::fs::write(&stderr_log_path, &raw_stderr).map_err(|error| error.to_string())?;
+    let file_result = std::fs::read_to_string(final_output_path).unwrap_or_default();
+    let raw_result = if !file_result.trim().is_empty() {
+        file_result.trim().to_owned()
+    } else if !parsed_result.trim().is_empty() {
+        parsed_result.trim().to_owned()
+    } else if phase != Phase::Chat || !structured_chat {
+        raw_stdout.trim().to_owned()
+    } else {
+        String::new()
+    };
+    let (handoff, schema_error) = if phase == Phase::Chat {
+        (None, None)
+    } else {
+        match extract_phase_handoff(&raw_result, phase) {
+            Ok(handoff) => (Some(handoff), None),
+            Err(error) => (None, Some(error)),
+        }
+    };
+    let summary = handoff
+        .as_ref()
+        .map(|value| value.summary.clone())
+        .unwrap_or_else(|| {
+            if phase == Phase::Chat {
+                raw_result.clone()
+            } else {
+                truncate_utf8(&raw_result, SOURCE_BUDGET_BYTES)
+            }
+        });
+    let logical_success = if phase == Phase::Chat {
+        chat_response_is_complete(&raw_result)
+    } else {
+        handoff.as_ref().is_some_and(|value| match phase {
+            Phase::Build | Phase::Revise => value.status == "completed",
+            Phase::Review | Phase::FinalReview => {
+                matches!(value.status.as_str(), "approved" | "changes_required")
+            }
+            Phase::Chat => false,
+        })
+    };
+    let diagnostic = [
+        raw_stderr.trim(),
+        schema_error.as_deref().unwrap_or_default(),
+    ]
+    .into_iter()
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    let session_resumed = participant.capabilities.exact_resume
+        && effective_session_id.is_some()
+        && parsed_session.as_deref() == effective_session_id;
+    Ok(ProviderRun {
+        summary,
+        session_id: parsed_session.or(assigned_session_id),
+        success: (status.success()
+            || completed_handoff
+            || (phase == Phase::Chat && idle_timed_out && logical_success))
+            && !stopped
+            && !timed_out
+            && (!idle_timed_out || (phase == Phase::Chat && logical_success))
+            && logical_success,
+        stopped,
+        timed_out,
+        idle_timed_out,
+        stderr: diagnostic,
+        handoff,
+        actual_model,
+        usage,
+        stdout_log_path: stdout_log_path.to_string_lossy().into_owned(),
+        stderr_log_path: stderr_log_path.to_string_lossy().into_owned(),
+        process_start_ms,
+        first_output_ms,
+        session_resumed,
+    })
+}
+
+pub(crate) fn provider_log_note(run: &ProviderRun) -> String {
+    format!(
+        "Durable logs:\nstdout: {}\nstderr: {}",
+        run.stdout_log_path, run.stderr_log_path
+    )
+}
+
+pub(crate) fn provider_failure_reason(provider: &str, activity: &str, run: &ProviderRun) -> String {
+    format!(
+        "{provider} could not complete {activity}. {}",
+        provider_log_note(run)
+    )
+}
