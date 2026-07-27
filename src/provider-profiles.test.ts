@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   connectionTestDraft,
   providerModelOptions,
-} from "./App";
+} from "./lib/provider-profiles";
 import type { ProviderProfile } from "./model";
 
 describe("provider model profiles", () => {

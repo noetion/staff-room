@@ -1,5 +1,4 @@
 import {
-  Activity,
   ArrowRight,
   Bot,
   Braces,
@@ -7,21 +6,14 @@ import {
   ChevronRight,
   CircleAlert,
   CircleStop,
-  Copy,
   Gauge,
   GitBranch,
   HardDrive,
   History,
-  Minus,
-  PanelRight,
   Play,
   RefreshCw,
-  Search,
-  Settings,
   ShieldCheck,
-  Square,
   Sparkles,
-  TerminalSquare,
   Workflow,
   X,
 } from "lucide-react";
@@ -38,18 +30,40 @@ import type {
   ExecutionReceipt,
   NativeEnvironment,
   Participant,
-  ProviderProfile,
   Project,
   ProjectSettings,
+  ProviderProfile,
   QuickEditResult,
   RoomMessage,
   Run,
   RunState,
-  StoredRun,
-  VerificationResult,
   VerificationConfig,
 } from "./model";
+import { AttentionCard, EvidenceCard, MarkdownBody, VerificationList } from "./components/conversation";
 import { agentNames } from "./model";
+import {
+  connectionTestDraft,
+  providerModelOptions,
+  type ProviderDraft,
+} from "./lib/provider-profiles";
+import {
+  contextLabel,
+  elapsedTime,
+  initials,
+  latencyLabel,
+  millisecondsLabel,
+  relativeTime,
+  usageLabel,
+} from "./lib/format";
+import {
+  autonomyLabel,
+  canUseChat,
+  capabilityChips,
+  chatAgentFor,
+  connectionLabel,
+  isRunnableParticipant,
+} from "./lib/participants";
+import { asRunState, hydrateRun } from "./lib/runs";
 import {
   getEnvironment,
   discoverProviderModels,
@@ -77,43 +91,13 @@ import {
   testProviderConnection,
   type RunEvent,
 } from "./native";
+import { NavRail, TitleBar } from "./components/chrome";
+import { Conversation } from "./components/conversation";
+import { Monogram } from "./components/primitives";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 type PrimaryView = "rooms" | "activity" | "settings";
 type ProviderRoute = "chat" | "build" | "review";
-
-export interface ProviderDraft {
-  model: string;
-  effort: string;
-}
-
-export function providerModelOptions(
-  models: string[],
-  profiles: ProviderProfile[],
-  hasAuthoritativeCatalog: boolean,
-) {
-  const catalogue = new Set(models);
-  const savedModels = profiles.flatMap((profile) => profile.model ? [profile.model] : []);
-  const unavailableSavedModels = hasAuthoritativeCatalog
-    ? savedModels.filter((model) => !catalogue.has(model))
-    : [];
-
-  return Array.from(new Set([...models, ...(!hasAuthoritativeCatalog ? savedModels : unavailableSavedModels)]))
-    .map((value) => ({
-      value,
-      unavailable: hasAuthoritativeCatalog && !catalogue.has(value),
-      label: hasAuthoritativeCatalog && !catalogue.has(value)
-        ? `${value} (Unavailable: not in the current catalogue)`
-        : value,
-    }));
-}
-
-export function connectionTestDraft(draft: ProviderDraft): ProviderDraft {
-  return {
-    model: draft.model.trim(),
-    effort: draft.effort,
-  };
-}
 
 const detachedProject: Project = {
   id: "",
@@ -153,170 +137,11 @@ const activeStates: RunState[] = [
   "promoting",
 ];
 
-const validStates: RunState[] = [
-  "ready",
-  "selecting",
-  "working",
-  "verifying",
-  "reviewing",
-  "revising",
-  "promoting",
-  "waiting",
-  "complete",
-  "failed",
-  "stopped",
-  "abandoned",
-];
-
-function asRunState(value: string): RunState {
-  return validStates.includes(value as RunState) ? (value as RunState) : "working";
-}
-
-function initials(kind?: AgentKind): string {
-  if (!kind) return "AR";
-  return { codex: "CX", claude: "CL", cursor: "CU", antigravity: "AG" }[kind];
-}
-
-function relativeTime(timestamp: string): string {
-  const normalized = timestamp.includes("T") ? timestamp : `${timestamp.replace(" ", "T")}Z`;
-  const minutes = Math.max(0, Math.round((Date.now() - new Date(normalized).getTime()) / 60_000));
-  if (minutes < 1) return "now";
-  if (minutes < 60) return `${minutes}m`;
-  return `${Math.floor(minutes / 60)}h`;
-}
-
-function elapsedTime(timestamp: string): string {
-  const started = new Date(timestamp).getTime();
-  if (!started || Number.isNaN(started)) return "just started";
-  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
-  return seconds < 60 ? `${seconds}s elapsed` : `${Math.floor(seconds / 60)}m ${seconds % 60}s elapsed`;
-}
-
-function contextLabel(bytes = 0, budgetBytes = 0): string {
-  if (!bytes) return "Packet not assembled";
-  const usage = `${Math.max(1, Math.round(bytes / 1024))} KiB`;
-  return budgetBytes ? `${usage} / ${Math.round(budgetBytes / 1024)} KiB` : usage;
-}
-
-function usageLabel(receipt: ExecutionReceipt): string {
-  const { inputTokens, cachedInputTokens, outputTokens, totalCostUsd, numTurns } = receipt.usage;
-  const parts = [
-    inputTokens !== undefined ? `${inputTokens.toLocaleString()} in` : undefined,
-    cachedInputTokens !== undefined ? `${cachedInputTokens.toLocaleString()} cached` : undefined,
-    outputTokens !== undefined ? `${outputTokens.toLocaleString()} out` : undefined,
-    totalCostUsd !== undefined ? `$${totalCostUsd.toFixed(4)}` : undefined,
-    numTurns !== undefined ? `${numTurns} turns` : undefined,
-  ].filter(Boolean);
-  return parts.length ? parts.join(" · ") : "Not reported";
-}
-
-function latencyLabel(receipt: ExecutionReceipt): string | undefined {
-  if (receipt.totalMs === undefined) return undefined;
-  const total = (receipt.totalMs / 1000).toFixed(2);
-  const first = receipt.firstOutputMs === undefined
-    ? "first output unavailable"
-    : `${(receipt.firstOutputMs / 1000).toFixed(2)}s to first output`;
-  const preflight = receipt.preflightMs === undefined
-    ? undefined
-    : `${(receipt.preflightMs / 1000).toFixed(2)}s preflight`;
-  return [`${total}s total`, first, preflight].filter(Boolean).join(" · ");
-}
-
-function millisecondsLabel(value: number | undefined): string {
-  return value === undefined ? "—" : `${value.toLocaleString()} ms`;
-}
-
-function autonomyLabel(mode: Participant["capabilities"]["autonomyMode"]): string {
-  return {
-    "isolated-auto": "Isolated auto",
-    "reviewed-auto": "Reviewed auto",
-    "unattended-bypass": "Sandbox bypass",
-    manual: "Manual",
-    unavailable: "Unavailable",
-  }[mode];
-}
-
-function connectionLabel(status: Participant["connectionStatus"]): string {
-  return {
-    connected: "Connected",
-    "sign-in-required": "Sign in required",
-    unverified: "Test connection",
-    "not-installed": "Not installed",
-    failed: "Connection failed",
-  }[status];
-}
-
-function hydrateRun(stored: StoredRun): Run {
-  return {
-    id: stored.id,
-    objective: stored.objective,
-    state: stored.state,
-    currentOwner: stored.currentOwner,
-    route: stored.route,
-    reviewCount: stored.reviewCount,
-    revisionCount: stored.revisionCount,
-    startedAt: stored.startedAt,
-    stopReason: stored.stopReason,
-    nativeSessionId: stored.nativeSessionId,
-    writer: stored.writer,
-    reviewer: stored.reviewer,
-    degradedReview: stored.degradedReview,
-    worktreePath: stored.worktreePath,
-    branch: stored.branch,
-    contextBytes: stored.contextBytes,
-    artifactPath: stored.artifactPath,
-    instructionFiles: stored.instructionFiles,
-    skillFiles: stored.skillFiles,
-    recoveryCount: stored.recoveryCount,
-  };
-}
-
-function isRunnableParticipant(participant: Participant): boolean {
-  return participant.installed
-    && participant.connectionStatus === "connected"
-    && !["manual", "unavailable"].includes(participant.capabilities.autonomyMode);
-}
-
-function canUseChat(participant: Participant): boolean {
-  return participant.kind !== "antigravity" && participant.installed && participant.capabilities.nonInteractiveTurn;
-}
-
-function capabilityChips(participant: Participant): string[] {
-  const chips: string[] = [];
-  if (participant.kind === "antigravity") {
-    chips.push("Ship only · no read-only mode");
-  }
-  if (participant.kind === "cursor") {
-    chips.push("sandbox unavailable on Windows, read-only enforced by ask mode");
-  }
-  if (!participant.capabilities.warmSession) {
-    chips.push("cold start per turn");
-  }
-  if (participant.kind === "antigravity") {
-    chips.push("completion stream, not token deltas", "usage not reported");
-  }
-  if (participant.kind === "cursor") {
-    chips.push("usage not reported");
-  }
-  return chips;
-}
-
-function chatAgentFor(
-  objective: string,
-  participants: Participant[],
-  replyTarget?: AgentKind,
-): AgentKind | undefined {
-  const mentioned = objective.match(/@(codex|claude|cursor|antigravity)\b/i)?.[1]?.toLowerCase() as AgentKind | undefined;
-  if (mentioned) return participants.find((participant) => participant.kind === mentioned && canUseChat(participant))?.kind;
-  if (replyTarget) return participants.find((participant) => participant.kind === replyTarget && canUseChat(participant))?.kind;
-  return participants.find(canUseChat)?.kind;
-}
-
 function ParticipantMark({ participant }: { participant: Participant }) {
   return (
-    <span className={`participant-mark participant-${participant.kind}`} aria-hidden="true">
+    <Monogram label={participant.name} aria-hidden="true">
       {initials(participant.kind)}
-    </span>
+    </Monogram>
   );
 }
 
@@ -459,73 +284,25 @@ function RunLens({
   );
 }
 
-function VerificationList({ verification }: { verification: VerificationResult[] }) {
-  if (!verification.length) return null;
+function TimelineMessageContent({ message }: { message: RoomMessage }) {
+  const reason = message.reason;
+
   return (
-    <div className="verification-list">
-      {verification.map((result) => (
-        <div className={`verification-row verification-${result.status}`} key={result.label}>
-          {result.status === "passed" ? <Check size={13} /> : <CircleAlert size={13} />}
-          <span>
-            <strong>{result.label}</strong>
-            <small>{result.status}</small>
-          </span>
+    <>
+      <MarkdownBody body={message.body} />
+      {reason && (
+        <div className="reason-line">
+          <Braces size={14} />
+          <span>{reason}</span>
         </div>
-      ))}
-    </div>
-  );
-}
-
-function InlineMarkdown({ text }: { text: string }) {
-  return text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, index) => {
-    if (part.startsWith("`") && part.endsWith("`")) return <code key={index}>{part.slice(1, -1)}</code>;
-    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
-    return part;
-  });
-}
-
-function MarkdownBody({ body }: { body: string }) {
-  const [copiedBlock, setCopiedBlock] = useState<number>();
-  const blocks = body.split(/```([^\n`]*)\n?([\s\S]*?)```/g);
-
-  async function copyCode(index: number, code: string) {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopiedBlock(index);
-    } catch {
-      setCopiedBlock(undefined);
-    }
-  }
-
-  return (
-    <div className="markdown-body">
-      {blocks.map((block, index) => {
-        if (index % 3 === 1) return null;
-        if (index % 3 === 2) {
-          const language = blocks[index - 1].trim() || "text";
-          return (
-            <pre key={index}>
-              <div className="code-toolbar">
-                <span>{language}</span>
-                <button type="button" onClick={() => void copyCode(index, block)}>
-                  <Copy size={12} /> {copiedBlock === index ? "Copied" : "Copy"}
-                </button>
-              </div>
-              <code>{block}</code>
-            </pre>
-          );
-        }
-        return block.split(/\n{2,}/).filter(Boolean).map((paragraph, paragraphIndex) => (
-          <p key={`${index}-${paragraphIndex}`}><InlineMarkdown text={paragraph} /></p>
-        ));
-      })}
-    </div>
+      )}
+      {(message.changedFiles?.length || message.verification?.length) ? <EvidenceCard changedFiles={message.changedFiles ?? []} label="Run evidence" verification={message.verification ?? []} /> : null}
+    </>
   );
 }
 
 function TimelineEntry({ message }: { message: RoomMessage }) {
   const isHuman = message.kind === "human";
-  const reason = message.reason;
   const senderName =
     message.sender === "human"
       ? "You"
@@ -553,21 +330,7 @@ function TimelineEntry({ message }: { message: RoomMessage }) {
           <span>{relativeTime(message.createdAt)}</span>
           <span className="entry-kind">{message.kind}</span>
         </header>
-        <MarkdownBody body={message.body} />
-        {reason && (
-          <div className="reason-line">
-            <Braces size={14} />
-            <span>{reason}</span>
-          </div>
-        )}
-        {message.changedFiles?.length ? (
-          <div className="file-list">
-            {message.changedFiles.map((file) => (
-              <code key={file}>{file}</code>
-            ))}
-          </div>
-        ) : null}
-        <VerificationList verification={message.verification ?? []} />
+        <TimelineMessageContent message={message} />
       </div>
     </article>
   );
@@ -612,119 +375,6 @@ function LiveActivity({
         </small>
       </div>
     </article>
-  );
-}
-
-function WindowControls({ native }: { native: boolean }) {
-  return (
-    <div className="window-controls" role="group" aria-label="Window controls">
-      <button
-        type="button"
-        className="window-control"
-        aria-label="Minimize window"
-        disabled={!native}
-        title={native ? "Minimize window" : "Inert in browser preview mode"}
-        onClick={() => {
-          if (native) void getCurrentWindow().minimize();
-        }}
-      >
-        <Minus size={14} strokeWidth={1.7} />
-      </button>
-      <button
-        type="button"
-        className="window-control"
-        aria-label="Maximize or restore window"
-        disabled={!native}
-        title={native ? "Maximize or restore window" : "Inert in browser preview mode"}
-        onClick={() => {
-          if (native) void getCurrentWindow().toggleMaximize();
-        }}
-      >
-        <Square size={11} strokeWidth={1.7} />
-      </button>
-      <button
-        type="button"
-        className="window-control window-close"
-        aria-label="Close Agent Room"
-        disabled={!native}
-        title={native ? "Close Agent Room" : "Inert in browser preview mode"}
-        onClick={() => {
-          if (native) void getCurrentWindow().close();
-        }}
-      >
-        <X size={14} strokeWidth={1.7} />
-      </button>
-    </div>
-  );
-}
-
-function ProjectRail({
-  activeView,
-  onNavigate,
-  projects,
-  activeProjectId,
-  onSelectProject,
-  onAttachProject,
-}: {
-  activeView: PrimaryView;
-  onNavigate: (view: PrimaryView) => void;
-  projects: Project[];
-  activeProjectId: string;
-  onSelectProject: (id: string) => void;
-  onAttachProject: () => void;
-}) {
-  return (
-    <aside className="project-rail">
-      <nav className="primary-nav" aria-label="Primary">
-        <button
-          type="button"
-          className={`nav-button ${activeView === "rooms" ? "active" : ""}`}
-          aria-current={activeView === "rooms" ? "page" : undefined}
-          onClick={() => onNavigate("rooms")}
-        >
-          <TerminalSquare size={19} />
-          <span>Rooms</span>
-        </button>
-        <button
-          type="button"
-          className={`nav-button ${activeView === "activity" ? "active" : ""}`}
-          aria-current={activeView === "activity" ? "page" : undefined}
-          onClick={() => onNavigate("activity")}
-        >
-          <Activity size={19} />
-          <span>Activity</span>
-        </button>
-        <button
-          type="button"
-          className={`nav-button ${activeView === "settings" ? "active" : ""}`}
-          aria-current={activeView === "settings" ? "page" : undefined}
-          onClick={() => onNavigate("settings")}
-        >
-          <Settings size={19} />
-          <span>Settings</span>
-        </button>
-      </nav>
-      <div className="rail-projects" aria-label="Projects">
-        {projects.map((project) => (
-          <button
-            key={project.id}
-            type="button"
-            className={`rail-project ${project.id === activeProjectId ? "active" : ""}`}
-            onClick={() => onSelectProject(project.id)}
-            title={project.repositoryPath}
-          >
-            {project.name.slice(0, 2).toUpperCase()}
-          </button>
-        ))}
-        <button type="button" className="rail-project rail-project-add" onClick={onAttachProject} aria-label="Attach repository">
-          +
-        </button>
-      </div>
-      <div className="rail-foot">
-        <span className="local-indicator" />
-        <span>Local</span>
-      </div>
-    </aside>
   );
 }
 
@@ -2250,96 +1900,35 @@ export function App() {
       <a className="skip-link" href="#room-main">
         Skip to room
       </a>
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">
-            <span />
-          </span>
-          <strong>Agent Room</strong>
-        </div>
-        <button
-          type="button"
-          className="project-switch"
-          onClick={() => {
-            setActiveView("rooms");
-            openInspector("Repository");
-          }}
-          aria-label={`Open ${project.name} repository details`}
-        >
-          <span className="project-monogram small">AR</span>
-          <span>
-            <strong>{project.name}</strong>
-            <small>{project.branch}</small>
-          </span>
-          <ChevronRight size={15} />
-        </button>
-        {searchOpen ? (
-          <div className="search-field" role="search">
-            <Search size={16} aria-hidden="true" />
-            <input
-              ref={searchInputRef}
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Search rooms and evidence"
-              aria-label="Search rooms and evidence"
-            />
-            <button
-              type="button"
-              className="search-close"
-              onClick={() => {
-                setSearchOpen(false);
-                setSearchQuery("");
-              }}
-              aria-label="Close search"
-            >
-              <X size={15} />
-            </button>
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="search-button"
-            onClick={() => {
-              setSearchOpen(true);
-              requestAnimationFrame(() => searchInputRef.current?.focus());
-            }}
-          >
-            <Search size={16} />
-            <span>Search rooms and evidence</span>
-            <kbd>Ctrl K</kbd>
-          </button>
-        )}
-        <div
-          className="titlebar-drag"
-          data-tauri-drag-region
-          onDoubleClick={() => {
-            if (native) void getCurrentWindow().toggleMaximize();
-          }}
-          aria-hidden="true"
-        />
-        <div className="topbar-status">
-          <span className={native ? "online" : ""} />
-          {native
-            ? projectSettings.autonomousShipEnabled
-              ? "Autonomy armed"
-              : "Local runtime"
-            : "Read-only preview"}
-        </div>
-        <button
-          ref={contextToggleRef}
-          type="button"
-          className="icon-button context-toggle"
-          aria-label={inspectorOpen ? "Close context" : "Open context"}
-          aria-expanded={inspectorOpen}
-          aria-controls="room-context"
-          onClick={() => setInspectorOpen((open) => !open)}
-        >
-          <PanelRight size={18} />
-        </button>
-        <WindowControls native={native} />
-      </header>
+      <TitleBar
+        project={project}
+        native={native}
+        autonomousShipEnabled={projectSettings.autonomousShipEnabled}
+        searchOpen={searchOpen}
+        searchQuery={searchQuery}
+        searchInputRef={searchInputRef}
+        inspectorOpen={inspectorOpen}
+        contextToggleRef={contextToggleRef}
+        onOpenRepository={() => {
+          setActiveView("rooms");
+          openInspector("Repository");
+        }}
+        onSearchOpen={() => {
+          setSearchOpen(true);
+          requestAnimationFrame(() => searchInputRef.current?.focus());
+        }}
+        onSearchClose={() => {
+          setSearchOpen(false);
+          setSearchQuery("");
+        }}
+        onSearchQueryChange={setSearchQuery}
+        onInspectorToggle={() => setInspectorOpen((open) => !open)}
+        onToggleMaximize={() => {
+          if (native) void getCurrentWindow().toggleMaximize();
+        }}
+      />
 
-      <ProjectRail
+      <NavRail
         activeView={activeView}
         onNavigate={showView}
         projects={projects}
@@ -2401,33 +1990,27 @@ export function App() {
           </div>
         </div>
 
-        {attention && (
-          <aside className="attention-banner" role="alert">
-            <CircleAlert size={16} />
-            <span><strong>{attention.title}</strong>{attention.detail}</span>
-            <button type="button" onClick={() => setAttention(undefined)} aria-label="Dismiss attention notice"><X size={14} /></button>
-          </aside>
-        )}
-
-        <div className="timeline" ref={timelineRef} role="feed" aria-label="Room timeline">
-          <div className="timeline-date">
-            <span>Durable room</span>
-          </div>
-          {hasMoreMessages && !searchQuery && (
-            <button
-              type="button"
-              className="load-older-messages"
-              onClick={() => void loadOlderMessages()}
-              disabled={loadingOlderMessages}
-            >
-              {loadingOlderMessages ? "Loading earlier messages…" : "Load earlier messages"}
-            </button>
-          )}
-          {visibleMessages.map((message) => (
-            <TimelineEntry key={message.id} message={message} />
-          ))}
-          {searchQuery && !visibleMessages.length && (
-            <p className="empty-state">No room activity matches this search.</p>
+        <Conversation
+          ref={timelineRef}
+          messages={messages}
+          streaming={{
+            active: chatSending || activeStates.includes(run.state),
+            participant:
+              environment.participants.find((participant) => streamTitle.startsWith(participant.name))?.kind
+              ?? activeShipAgent,
+            runId: chatSending ? chatRunRef.current : run.id || undefined,
+          }}
+          hasMore={hasMoreMessages}
+          loadingOlder={loadingOlderMessages}
+          onLoadOlder={() => void loadOlderMessages()}
+          query={searchQuery}
+          run={run}
+          receipts={receipts}
+          renderMessage={(message) => <TimelineMessageContent message={message} />}
+          onResume={handleResume}
+        >
+          {attention && (
+            <AttentionCard title={attention.title} detail={attention.detail} onDismiss={() => setAttention(undefined)} />
           )}
           {run.state !== "ready" && !searchQuery && (
             <RunLens
@@ -2444,7 +2027,7 @@ export function App() {
           {run.state === "ready" && activity.length > 0 && (
             <LiveActivity title={streamTitle} activity={activity} />
           )}
-        </div>
+        </Conversation>
 
         {quickEdit && (
           <section className="quick-edit-preview" aria-label="Quick Edit preview">
