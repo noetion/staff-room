@@ -4,11 +4,9 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
-  CircleStop,
   GitBranch,
   HardDrive,
   History,
-  Play,
   RefreshCw,
   ShieldCheck,
   Sparkles,
@@ -93,6 +91,7 @@ import { StatusPill } from "./components/chrome/StatusPill";
 import { Conversation } from "./components/conversation";
 import { RunProgressCard } from "./components/conversation/RunProgressCard";
 import { Monogram } from "./components/primitives";
+import { Composer } from "./components/composer";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 type PrimaryView = "rooms" | "activity" | "settings";
@@ -1849,165 +1848,74 @@ export function App() {
           )}
         </Conversation>
 
-        {quickEdit && (
-          <section className="quick-edit-preview" aria-label="Quick Edit preview">
-            <p><strong>{agentNames[quickEdit.participant]}</strong>: {quickEdit.summary}</p>
-            <pre>{quickEdit.diff || "No file changes were produced."}</pre>
-            <div className="composer-actions">
-              <button type="button" className="send-button" onClick={() => void applyQuickEdit()} disabled={!quickEdit.diff}>
-                <Check size={15} /> Apply edit
-              </button>
-              <button type="button" className="danger-button" onClick={() => void discardQuickEdit()}>
-                <X size={15} /> Discard
-              </button>
-            </div>
-          </section>
-        )}
-        <form className="composer" onSubmit={submitComposer}>
-          <div className="composer-context">
-            <label className="composer-label" htmlFor="room-objective">
-              {composerMode === "ask"
-                ? sideChatAvailable
-                  ? "Ask about active Ship run"
-                  : "Ask a question"
-                : composerMode === "quick-edit"
-                  ? "Quick Edit"
+        <Composer
+          busy={chatSending}
+          canSelectParticipant={(participant) =>
+            sideChatAvailable
+              ? participant.kind === activeShipAgent
+              : composerMode === "ask" || composerMode === "quick-edit"
+                ? canUseChat(participant)
+                : run.state !== "promoting" && isRunnableParticipant(participant)
+          }
+          contextualLabel={
+            composerMode === "ask"
+              ? sideChatAvailable ? "Ask about active Ship run" : "Ask a question"
+              : composerMode === "quick-edit"
+                ? "Quick edit"
                 : run.state === "promoting"
                   ? "Promoting verified work"
-                  : sideChatAvailable
-                  ? "Ask about active Ship run"
-                  : "Engineering objective"}
-            </label>
-            <div className="composer-mode" role="group" aria-label="Message route">
-              <button
-                type="button"
-                className={composerMode === "ask" ? "active" : ""}
-                onClick={() => setComposerMode("ask")}
-                aria-pressed={composerMode === "ask"}
-              >
-                Ask
-              </button>
-              <button
-                type="button"
-                className={composerMode === "quick-edit" ? "active" : ""}
-                onClick={() => setComposerMode("quick-edit")}
-                aria-pressed={composerMode === "quick-edit"}
-                disabled={sideChatAvailable || run.state === "promoting" || Boolean(quickEdit)}
-              >
-                Quick Edit
-              </button>
-              <button
-                type="button"
-                className={composerMode === "ship" ? "active" : ""}
-                onClick={() => setComposerMode("ship")}
-                aria-pressed={composerMode === "ship"}
-                disabled={sideChatAvailable || run.state === "promoting"}
-              >
-                Ship
-              </button>
-            </div>
-          </div>
-          <textarea
-            id="room-objective"
-            value={objective}
-            onChange={(event) => setObjective(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-            placeholder={
-              composerMode === "ask"
-                ? sideChatAvailable
-                  ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
-                  : "Ask a question..."
-                : composerMode === "quick-edit"
-                  ? "Describe a small, bounded edit..."
+                  : sideChatAvailable ? "Ask about active Ship run" : "Engineering objective"
+          }
+          error={uiError}
+          inputDescribedBy={uiError ? "composer-error" : undefined}
+          mode={composerMode}
+          onModeChange={setComposerMode}
+          onObjectiveChange={setObjective}
+          onParticipantSelect={(participant) =>
+            setObjective((current) => `@${participant.kind} ${current.replace(/^@\w+\s*/, "")}`)
+          }
+          onStop={() => void handleStopChat()}
+          onSubmit={submitComposer}
+          participants={environment.participants}
+          placeholder={
+            composerMode === "ask"
+              ? sideChatAvailable
+                ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
+                : "Ask a question..."
+              : composerMode === "quick-edit"
+                ? "Describe a small, bounded edit..."
                 : run.state === "promoting"
                   ? "Promotion is finishing safely..."
                   : sideChatAvailable
-                  ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
-                  : "@codex State the objective once..."
-            }
-            aria-describedby={uiError ? "composer-error" : undefined}
-            rows={2}
-          />
-          <div className="composer-actions">
-            <div className="mention-list">
-              {environment.participants
-                .filter((participant) => composerMode === "ship" || participant.kind !== "antigravity")
-                .map((participant) => (
-                <button
-                  type="button"
-                  key={participant.kind}
-                  disabled={
-                    sideChatAvailable
-                      ? participant.kind !== activeShipAgent
-                      : composerMode === "ask"
-                      ? !canUseChat(participant)
-                      : composerMode === "quick-edit"
-                        ? !canUseChat(participant)
-                      : run.state === "promoting"
-                        ? true
-                        : sideChatAvailable
-                        ? participant.kind !== activeShipAgent
-                        : !isRunnableParticipant(participant)
-                  }
-                  onClick={() =>
-                    setObjective(
-                      (current) => `@${participant.kind} ${current.replace(/^@\w+\s*/, "")}`,
-                    )
-                  }
-                  title={
-                    (composerMode === "ask"
-                      ? canUseChat(participant)
-                      : composerMode === "quick-edit"
-                        ? canUseChat(participant)
-                        : isRunnableParticipant(participant))
-                      ? `${autonomyLabel(participant.capabilities.autonomyMode)}: ${participant.capabilities.autonomyNote}`
-                      : participant.capabilities.autonomyNote
-                  }
-                >
-                  <ParticipantMark participant={participant} />
-                  <span>{participant.name}</span>
+                    ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
+                    : "@codex State the objective once..."
+          }
+          promoting={run.state === "promoting"}
+          quickEditDisabled={sideChatAvailable || run.state === "promoting" || Boolean(quickEdit)}
+          quickEditPreview={quickEdit && (
+            <>
+              <p><strong>{agentNames[quickEdit.participant]}</strong>: {quickEdit.summary}</p>
+              <pre>{quickEdit.diff || "No file changes were produced."}</pre>
+              <div className="composer-preview-actions">
+                <button type="button" className="composer-preview-apply" onClick={() => void applyQuickEdit()} disabled={!quickEdit.diff}>
+                  <Check size={15} /> Apply edit
                 </button>
-              ))}
-            </div>
-            {chatSending ? (
-              <button type="button" className="danger-button chat-stop" onClick={handleStopChat}>
-                <CircleStop size={15} />
-                Stop response
-              </button>
-            ) : (
-              <button
-                type="submit"
-                className="send-button"
-                disabled={!objective.trim() || (composerMode === "ship" && run.state === "promoting")}
-                aria-busy={composerMode === "ask" || composerMode === "quick-edit" ? chatSending : false}
-              >
-                {composerMode === "ask" || composerMode === "quick-edit" ? <Sparkles size={15} /> : <Play size={15} fill="currentColor" />}
-                {composerMode === "ask"
-                  ? sideChatAvailable
-                    ? "Ask active run"
-                    : "Ask"
-                  : composerMode === "quick-edit"
-                    ? "Preview edit"
-                  : run.state === "promoting"
-                    ? "Promoting"
-                    : sideChatAvailable
-                    ? "Ask active run"
-                    : "Run autonomously"}
-                <kbd>Enter</kbd>
-              </button>
-            )}
-          </div>
-          {uiError && (
-            <p className="composer-error" id="composer-error" role="alert">
-              {uiError}
-            </p>
+                <button type="button" className="danger-button" onClick={() => void discardQuickEdit()}>
+                  <X size={15} /> Discard
+                </button>
+              </div>
+            </>
           )}
-        </form>
+          renderParticipantMark={(participant) => <ParticipantMark participant={participant} />}
+          shipDisabled={sideChatAvailable || run.state === "promoting"}
+          sideChatAvailable={sideChatAvailable}
+          titleForParticipant={(participant) =>
+            (composerMode === "ask" || composerMode === "quick-edit" ? canUseChat(participant) : isRunnableParticipant(participant))
+              ? `${autonomyLabel(participant.capabilities.autonomyMode)}: ${participant.capabilities.autonomyNote}`
+              : participant.capabilities.autonomyNote
+          }
+          value={objective}
+        />
           </>
         )}
       </main>
