@@ -32,6 +32,18 @@ const SHOT_WIDTHS = [720, 1280];
 const THEMES = ["light", "dark"];
 const VIEWS = ["rooms", "activity", "settings"];
 
+// One representative selector per component stylesheet. If a sheet is never
+// imported its rules are simply absent - no error, no failed request, no
+// visual failure. This is the only check that notices.
+const REQUIRED_SELECTORS = [
+  ".primitive-segmented",   // primitives.css
+  ".chrome-titlebar",       // chrome.css
+  ".message-bubble",        // conversation.css
+  ".composer",              // composer.css
+  ".inspector-sheet",       // inspector.css
+  ".settings-view",         // settings.css
+];
+
 const findings = [];
 let checks = 0;
 
@@ -63,16 +75,10 @@ async function launch() {
     process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ||
     process.env.CHROME_PATH ||
     undefined;
-  const options = {
+  return chromium.launch({
     executablePath,
     args: ["--force-color-profile=srgb", "--disable-lcd-text"],
-  };
-  try {
-    return await chromium.launch(options);
-  } catch (error) {
-    if (executablePath) throw error;
-    return chromium.launch({ ...options, channel: process.env.PLAYWRIGHT_BROWSER_CHANNEL || "chrome" });
-  }
+  });
 }
 
 async function newPage(browser, { width, theme, reducedMotion, forcedColors, reducedTransparency }) {
@@ -119,11 +125,15 @@ async function gotoView(page, base, view, theme) {
 
 async function settle(page) {
   await page.waitForTimeout(600);
-  await page.evaluate(() =>
-    Promise.all(
-      document.getAnimations().map((a) => a.finished.catch(() => {})),
-    ).catch(() => {}),
-  );
+  await page.evaluate(() => {
+    const finiteAnimations = document
+      .getAnimations()
+      .filter((animation) => Number.isFinite(animation.effect?.getComputedTiming().endTime));
+    return Promise.race([
+      Promise.all(finiteAnimations.map((animation) => animation.finished.catch(() => {}))),
+      new Promise((resolve) => setTimeout(resolve, 1_200)),
+    ]);
+  });
 }
 
 // ---------------------------------------------------------------- the checks
@@ -183,6 +193,16 @@ async function checkAxe(page, label, axe) {
       });
     }
   } else ok(`axe ${label}`);
+
+  // Never discard these again. axe reports a case it cannot resolve as
+  // `incomplete`, and a coloured parent with a re-coloured descendant is
+  // precisely such a case. checkTextContrast() is the hard gate; these are the
+  // pointers.
+  for (const v of results.incomplete || []) {
+    warn("axe-incomplete", `${label}: ${v.id} needs review — ${v.help}`, {
+      nodes: v.nodes.slice(0, 3).map((n) => n.target.join(" ")),
+    });
+  }
 }
 
 async function checkFocusVisibility(page, label) {
@@ -222,6 +242,118 @@ async function checkFocusVisibility(page, label) {
       elements: offenders.slice(0, 8),
     });
   } else ok(`focus-visible ${label} (${seen.size} stops)`);
+}
+
+async function checkStylesheetsLoaded(page, label, required) {
+  // A component stylesheet that is never imported produces no error, no failed
+  // request and no visual test failure - the components just render unstyled.
+  // Assert the rules are actually in the document.
+  const missing = await page.evaluate((selectors) => {
+    const present = new Set();
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try { rules = sheet.cssRules; } catch { continue; }
+      const walk = (list) => {
+        for (const rule of list) {
+          if (rule.selectorText) present.add(rule.selectorText);
+          if (rule.cssRules) walk(rule.cssRules);
+        }
+      };
+      walk(rules);
+    }
+    const joined = [...present].join(" | ");
+    return selectors.filter((sel) => !joined.includes(sel));
+  }, required);
+
+  if (missing.length) {
+    fail("stylesheets", `${label}: ${missing.length} stylesheet(s) not loaded`, {
+      elements: missing,
+    });
+  } else ok(`stylesheets ${label}`);
+}
+
+async function checkTextContrast(page, label) {
+  // Deterministic, and independent of axe's confidence. For every visible text
+  // node, composite the real painted background down the ancestor chain and
+  // measure. This is the check that catches a bubble whose descendant resets
+  // its own colour back to the page ink.
+  const bad = await page.evaluate(() => {
+    const lum = (c) => {
+      const f = (v) => {
+        v /= 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]);
+    };
+    const parse = (s) => {
+      const m = String(s).match(/rgba?\(([^)]+)\)/);
+      if (!m) return null;
+      const p = m[1].split(",").map((x) => parseFloat(x));
+      return [p[0], p[1], p[2], p.length > 3 ? p[3] : 1];
+    };
+    const over = (fg, bg) => {
+      const a = fg[3];
+      return [
+        fg[0] * a + bg[0] * (1 - a),
+        fg[1] * a + bg[1] * (1 - a),
+        fg[2] * a + bg[2] * (1 - a),
+        1,
+      ];
+    };
+    const paintedBg = (el) => {
+      let acc = null;
+      let node = el;
+      while (node && node !== document.documentElement.parentNode) {
+        const c = parse(getComputedStyle(node).backgroundColor);
+        if (c && c[3] > 0) acc = acc ? over(acc, c) : c;
+        if (acc && acc[3] >= 1) return acc;
+        node = node.parentElement;
+      }
+      return acc || [255, 255, 255, 1];
+    };
+    const ratio = (a, b) => {
+      const [x, y] = [lum(a), lum(b)].sort((m, n) => n - m);
+      return (x + 0.05) / (y + 0.05);
+    };
+
+    const out = [];
+    for (const el of document.querySelectorAll("*")) {
+      if (el.closest(":disabled, [aria-disabled='true']")) continue;
+      const hasOwnText = [...el.childNodes].some(
+        (n) => n.nodeType === 3 && n.textContent.trim().length > 1,
+      );
+      if (!hasOwnText) continue;
+      const s = getComputedStyle(el);
+      if (s.visibility === "hidden" || s.display === "none" || parseFloat(s.opacity) === 0) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) continue;
+
+      const fg = parse(s.color);
+      if (!fg) continue;
+      const bg = paintedBg(el);
+      const composited = fg[3] < 1 ? over(fg, bg) : fg;
+      const size = parseFloat(s.fontSize);
+      const bold = parseInt(s.fontWeight, 10) >= 700;
+      const large = size >= 24 || (size >= 18.66 && bold);
+      const need = large ? 3 : 4.5;
+      const got = ratio(composited, bg);
+      if (got < need) {
+        out.push({
+          sel: el.tagName.toLowerCase() + "." + String(el.className || "").split(" ")[0],
+          ratio: Math.round(got * 100) / 100,
+          need,
+          text: el.textContent.trim().slice(0, 40),
+        });
+      }
+    }
+    return out;
+  });
+
+  if (bad.length) {
+    fail("text-contrast", `${label}: ${bad.length} text element(s) below threshold`, {
+      elements: bad.slice(0, 8).map((b) => `${b.sel} ${b.ratio}:1 (needs ${b.need}) "${b.text}"`),
+    });
+  } else ok(`text-contrast ${label}`);
 }
 
 async function checkReducedMotion(page, label) {
@@ -373,6 +505,8 @@ async function main() {
           if (width === 1280 || width === 720) {
             await checkAxe(page, label, axe);
             await checkFocusVisibility(page, label);
+            await checkTextContrast(page, label);
+            await checkStylesheetsLoaded(page, label, REQUIRED_SELECTORS);
           }
           if (SHOT_WIDTHS.includes(width)) {
             await page.screenshot({

@@ -14,7 +14,6 @@ impl ProviderAdapter for Adapter {
             "--output-format".into(),
             "stream-json".into(),
             "--stream-partial-output".into(),
-            "--trust".into(),
             "--workspace".into(),
             request.repository.display().to_string(),
         ];

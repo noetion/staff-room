@@ -1,3 +1,5 @@
+import "./primitives.css";
+
 export { Surface, type SurfaceProps } from "./Surface";
 export { Button, type ButtonProps } from "./Button";
 export { IconButton, type IconButtonProps } from "./IconButton";

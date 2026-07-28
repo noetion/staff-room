@@ -21,7 +21,8 @@
 .composer-contextual-label {
   overflow: hidden;
   color: var(--ink-faint);
-  font: var(--t-micro);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -40,7 +41,9 @@
   border: 0;
   color: var(--ink);
   background: transparent;
-  font: var(--t-body);
+  font-family: var(--font-body);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
 }
 
 .composer textarea::placeholder { color: var(--ink-faint); }
@@ -65,12 +68,54 @@
   color: var(--ink-muted);
   background: transparent;
   cursor: pointer;
-  font: var(--t-compact);
+  font-size: var(--t-compact);
+  line-height: var(--lh-compact);
 }
 
 .composer-targets button { padding: var(--s-1) var(--s-2) var(--s-1) var(--s-1); }
 .composer-targets button:hover:not(:disabled), .composer-targets button:focus-visible { color: var(--ink); background: var(--surface-sunken); }
 .composer-targets button:disabled, .mention-list button:disabled { opacity: 0.38; cursor: not-allowed; }
+
+.composer-voice {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-1);
+  min-height: calc(var(--s-6) + var(--s-2));
+  padding-inline: var(--s-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-capsule);
+  color: var(--ink-muted);
+  background: var(--surface-raised);
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: var(--t-compact);
+  font-weight: var(--weight-control);
+  line-height: var(--lh-compact);
+}
+.composer-voice { position: relative; overflow: hidden; }
+.composer-voice svg { width: 15px; height: 15px; }
+.composer-voice-meter {
+  position: absolute;
+  inset-block-end: 0;
+  inset-inline-start: 0;
+  block-size: 2px;
+  inline-size: 100%;
+  border-radius: var(--r-capsule);
+  background: var(--state-bad);
+  opacity: 0;
+  transform: scaleX(var(--voice-level, 0));
+  transform-origin: left center;
+  transition: transform var(--dur-1) var(--ease-out);
+}
+.composer-voice[data-state="recording"] .composer-voice-meter { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .composer-voice-meter { transition: none; }
+}
+.composer-voice:hover:not(:disabled), .composer-voice:focus-visible { color: var(--ink); border-color: var(--hairline-strong); }
+.composer-voice[data-state="recording"] { color: var(--state-bad); border-color: var(--state-bad); background: color-mix(in srgb, var(--state-bad) 9%, var(--surface-raised)); }
+.composer-voice[data-state="transcribing"] { cursor: wait; }
+.composer-voice:disabled { cursor: not-allowed; opacity: .45; }
 
 .mention-list {
   position: absolute;
@@ -101,7 +146,8 @@
   color: var(--action-ink);
   background: transparent;
   cursor: pointer;
-  font: var(--t-compact);
+  font-size: var(--t-compact);
+  line-height: var(--lh-compact);
   font-weight: 500;
 }
 
@@ -121,18 +167,20 @@
 .composer-send-label { transition: opacity var(--dur-2) var(--ease-spring); }
 .composer-send:disabled { opacity: 0.4; cursor: not-allowed; }
 .composer-send:focus-visible { outline: 2px solid var(--hairline-strong); outline-offset: var(--s-1); }
-.composer-send kbd { color: inherit; font: var(--t-micro); opacity: 0.72; }
+.composer-send kbd { color: inherit; font-size: var(--t-micro); line-height: var(--lh-micro); opacity: 0.72; }
 
-.quick-edit-preview { min-width: 0; }
-.quick-edit-preview pre { max-block-size: calc(var(--s-8) * 2); overflow: auto; }
-.quick-edit-preview p { margin: 0; color: var(--ink-muted); font: var(--t-compact); }
-.quick-edit-preview .composer-preview-actions { display: flex; gap: var(--s-2); margin-top: var(--s-2); }
-.quick-edit-preview .composer-preview-actions button { border-radius: var(--r-capsule); }
-.quick-edit-preview .composer-preview-apply { color: var(--action-ink); background: var(--action); }
+.quick-edit-preview { display: grid; min-width: 0; gap: var(--s-2); padding: var(--s-3); border: 1px solid var(--hairline); border-radius: var(--r-lg); background: var(--surface-raised); box-shadow: var(--e-rest); }
+.quick-edit-preview pre { max-block-size: calc(var(--s-8) * 2); margin: 0; padding: var(--s-2); overflow: auto; border-radius: var(--r-sm); color: var(--ink); background: var(--surface-sunken); font-family: var(--font-mono); font-size: var(--t-micro); line-height: var(--lh-micro); white-space: pre; }
+.quick-edit-preview p { margin: 0; color: var(--ink-muted); font-size: var(--t-compact); line-height: var(--lh-compact); }
+.quick-edit-preview .composer-preview-context { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s-2); color: var(--ink-faint); font-family: var(--font-mono); font-size: var(--t-label); line-height: var(--lh-label); }
+.quick-edit-preview .composer-preview-actions { display: flex; justify-content: flex-end; gap: var(--s-2); }
+.quick-edit-preview .composer-preview-actions button { min-height: var(--s-6); padding-inline: var(--s-3); border: 1px solid var(--hairline); border-radius: var(--r-capsule); font-family: var(--font-body); font-size: var(--t-compact); line-height: var(--lh-compact); cursor: pointer; }
+.quick-edit-preview .composer-preview-actions button:disabled { cursor: wait; opacity: .55; }
+.quick-edit-preview .composer-preview-apply { border-color: var(--action); color: var(--action-ink); background: var(--action); }
 
-.composer-error { margin: 0; color: var(--state-bad); font: var(--t-compact); }
+.composer-error { margin: 0; color: var(--state-bad); font-size: var(--t-compact); line-height: var(--lh-compact); }
 
-.danger-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: var(--s-6); padding-inline: var(--s-3); border: 1px solid var(--state-bad); border-radius: var(--r-capsule); color: var(--state-bad); background: color-mix(in srgb, var(--state-bad) 8%, transparent); cursor: pointer; font: var(--t-compact); }
+.danger-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: var(--s-6); padding-inline: var(--s-3); border: 1px solid var(--state-bad); border-radius: var(--r-capsule); color: var(--state-bad); background: color-mix(in srgb, var(--state-bad) 8%, transparent); cursor: pointer; font-size: var(--t-compact); line-height: var(--lh-compact); }
 .danger-button:hover { background: color-mix(in srgb, var(--state-bad) 14%, transparent); }
 
 @media (max-width: 720px) {
@@ -140,4 +188,5 @@
   .composer-targets button > span { display: none; }
   .composer-send { min-width: calc(var(--s-8) + var(--s-5)); }
   .composer-send kbd { display: none; }
+  .composer-voice span { display: none; }
 }

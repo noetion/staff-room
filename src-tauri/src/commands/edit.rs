@@ -8,9 +8,14 @@ pub(crate) async fn quick_edit_start(
     request: QuickEditRequest,
 ) -> Result<QuickEditResult, String> {
     let database = database.inner();
-    let repository = PathBuf::from(&request.repository_path);
-    git_static(&repository, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
+    consume_operation_id(
+        runtime.inner(),
+        &request.edit_id,
+        &request.project_id,
+        "quick-edit",
+    )
+    .await?;
+    let repository = project_repository(database, &request.project_id)?;
     let message = request.message.trim();
     if message.is_empty() {
         return Err("Enter a Quick Edit request before sending.".to_owned());
@@ -40,6 +45,7 @@ pub(crate) async fn quick_edit_start(
     }
     let worktree = create_quick_edit_worktree(&app, &repository, &request.edit_id)?;
     let state = QuickEditState {
+        project_id: request.project_id.clone(),
         repository,
         worktree: worktree.clone(),
     };
@@ -52,11 +58,23 @@ pub(crate) async fn quick_edit_start(
     let artifact_dir = run_artifact_directory(&app, &request.edit_id)?;
     let output_path = artifact_dir.join("quick-edit.final.txt");
     let (cancel_sender, cancel_receiver) = watch::channel(false);
-    runtime
+    if runtime
         .cancellations
         .lock()
         .await
-        .insert(request.edit_id.clone(), cancel_sender);
+        .insert(
+            request.edit_id.clone(),
+            CancellationEntry {
+                project_id: request.project_id.clone(),
+                sender: cancel_sender,
+            },
+        )
+        .is_some()
+    {
+        runtime.quick_edits.lock().await.remove(&request.edit_id);
+        let _ = remove_quick_edit_worktree(&state.repository, &state.worktree);
+        return Err("This operation ID is already active.".to_owned());
+    }
     let prompt = truncate_utf8(&format!(
         "You are in Quick Edit mode inside an isolated worktree. Make only the requested bounded edit. \
          Do not modify the user's attached checkout, create another worktree, run broad verification, or start Ship. \
@@ -109,7 +127,7 @@ pub(crate) async fn quick_edit_apply(
     app: AppHandle,
     runtime: State<'_, RuntimeState>,
     request: QuickEditActionRequest,
-) -> Result<(), String> {
+) -> Result<QuickEditActionResult, String> {
     let state = runtime
         .quick_edits
         .lock()
@@ -117,6 +135,9 @@ pub(crate) async fn quick_edit_apply(
         .get(&request.edit_id)
         .cloned()
         .ok_or_else(|| "This Quick Edit is no longer available.".to_owned())?;
+    if state.project_id != request.project_id {
+        return Err("This Quick Edit belongs to another project.".to_owned());
+    }
     let diff = quick_edit_diff(&state.worktree)?;
     if diff.trim().is_empty() {
         return Err("The Quick Edit produced no changes to apply.".to_owned());
@@ -149,16 +170,17 @@ pub(crate) async fn quick_edit_apply(
     })();
     let _ = std::fs::remove_file(&patch);
     apply_result?;
-    remove_quick_edit_worktree(&state.repository, &state.worktree)?;
     runtime.quick_edits.lock().await.remove(&request.edit_id);
-    Ok(())
+    Ok(QuickEditActionResult {
+        cleanup_warning: remove_quick_edit_worktree(&state.repository, &state.worktree).err(),
+    })
 }
 
 #[tauri::command]
 pub(crate) async fn quick_edit_discard(
     runtime: State<'_, RuntimeState>,
     request: QuickEditActionRequest,
-) -> Result<(), String> {
+) -> Result<QuickEditActionResult, String> {
     let state = runtime
         .quick_edits
         .lock()
@@ -166,7 +188,12 @@ pub(crate) async fn quick_edit_discard(
         .get(&request.edit_id)
         .cloned()
         .ok_or_else(|| "This Quick Edit is no longer available.".to_owned())?;
+    if state.project_id != request.project_id {
+        return Err("This Quick Edit belongs to another project.".to_owned());
+    }
     remove_quick_edit_worktree(&state.repository, &state.worktree)?;
     runtime.quick_edits.lock().await.remove(&request.edit_id);
-    Ok(())
+    Ok(QuickEditActionResult {
+        cleanup_warning: None,
+    })
 }

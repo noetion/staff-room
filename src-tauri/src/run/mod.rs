@@ -17,14 +17,14 @@ pub(crate) async fn execute_room_run(
     request: StartRunRequest,
 ) -> Result<StartRunResult, String> {
     let (cancel_sender, cancel_receiver) = watch::channel(false);
-    runtime
-        .cancellations
-        .lock()
-        .await
-        .insert(request.run_id.clone(), cancel_sender);
-    let base_repository = PathBuf::from(&request.repository_path);
-    git_static(&base_repository, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
+    runtime.cancellations.lock().await.insert(
+        request.run_id.clone(),
+        CancellationEntry {
+            project_id: request.project_id.clone(),
+            sender: cancel_sender,
+        },
+    );
+    let base_repository = project_repository(database, &request.project_id)?;
 
     let participants = participants_with_connections(
         database,
@@ -67,8 +67,8 @@ pub(crate) async fn execute_room_run(
                 "SELECT objective, state, worktree_path, branch, base_head, base_branch,
                         snapshot_head, isolation_kind, workspace_fingerprint, writer,
                         native_session_id, recovery_count
-                 FROM runs WHERE id = ?1",
-                [&request.run_id],
+                 FROM runs WHERE id = ?1 AND project_id = ?2",
+                params![request.run_id, request.project_id],
                 |row| {
                     Ok((
                         row.get(0)?,
@@ -229,13 +229,6 @@ pub(crate) async fn execute_room_run(
         let connection = database.0.lock().map_err(|error| error.to_string())?;
         let transaction = connection
             .unchecked_transaction()
-            .map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO projects (id, name, goal, repository_path)
-                 VALUES (?1, 'Agent Room', 'Remove manual context transfer between coding agents.', ?2)",
-                params![request.project_id, request.repository_path],
-            )
             .map_err(|error| error.to_string())?;
         transaction
             .execute(
@@ -754,7 +747,7 @@ pub(crate) async fn execute_room_run(
         &request.run_id,
         reviewer,
         Phase::Review,
-        ProviderMode::Ship,
+        ProviderMode::Review,
         &review_packet,
         &worktree,
         None,
@@ -1241,7 +1234,7 @@ pub(crate) async fn execute_room_run(
             &request.run_id,
             reviewer,
             Phase::FinalReview,
-            ProviderMode::Ship,
+            ProviderMode::Review,
             &final_packet,
             &worktree,
             review_result.session_id.as_deref(),
@@ -1269,7 +1262,7 @@ pub(crate) async fn execute_room_run(
                 &request.run_id,
                 reviewer,
                 Phase::FinalReview,
-                ProviderMode::Ship,
+                ProviderMode::Review,
                 &full_final_packet,
                 &worktree,
                 None,
@@ -1472,6 +1465,120 @@ pub(crate) async fn execute_room_run(
         });
     }
 
+    let has_changes = git_static(&worktree, &["rev-parse", "HEAD"])? != snapshot_head;
+    if has_changes && !project_settings(database, &request.project_id)?.autonomous_ship_enabled {
+        let reviewed_fingerprint = review_mutation_guard(&worktree)?;
+        database
+            .0
+            .lock()
+            .map_err(|error| error.to_string())?
+            .execute(
+                "UPDATE runs SET reviewed_fingerprint = ?1 WHERE id = ?2 AND project_id = ?3",
+                params![reviewed_fingerprint, request.run_id, request.project_id],
+            )
+            .map_err(|error| error.to_string())?;
+        let reason =
+            "Verification and review passed. Inspect the evidence, then choose Promote or Abandon."
+                .to_owned();
+        update_run(
+            database,
+            &request.run_id,
+            "awaiting-promotion",
+            None,
+            review_count,
+            revision_count,
+            build_result.session_id.as_deref(),
+            max_context_bytes,
+            Some(&reason),
+            false,
+        )?;
+        persist_message(
+            database,
+            &request.project_id,
+            &request.run_id,
+            "system",
+            "decision",
+            "Verified work is ready for human promotion.",
+            &files,
+            &verification,
+            Some(&reason),
+        )?;
+        emit_event(
+            &app,
+            &request.run_id,
+            "attention",
+            "promote",
+            "awaiting-promotion",
+            None,
+            "Promotion approval required",
+            &reason,
+            Some(max_context_bytes),
+        );
+        runtime.cancellations.lock().await.remove(&request.run_id);
+        return Ok(StartRunResult {
+            run_id: request.run_id,
+            state: "awaiting-promotion".to_owned(),
+            summary: final_review_summary,
+            builder: builder.kind.clone(),
+            reviewer: reviewer.kind.clone(),
+            degraded_review,
+            session_id: build_result.session_id,
+            changed_files: files,
+            git_status: git_status(&worktree),
+            verification,
+            stopped: false,
+            promoted: false,
+            worktree_path: Some(worktree.to_string_lossy().into_owned()),
+            branch,
+            context_bytes: max_context_bytes,
+            artifact_path: Some(artifact_dir.to_string_lossy().into_owned()),
+            instruction_files,
+            skill_files,
+            recovery_count,
+            attention_reason: Some(reason),
+        });
+    }
+
+    if *cancel_receiver.borrow() {
+        let reason =
+            "Cancellation was requested before promotion. Verified work was preserved.".to_owned();
+        final_failure(
+            &app,
+            database,
+            &request.project_id,
+            &request.run_id,
+            "stopped",
+            &reason,
+            Some(&worktree),
+            review_count,
+            revision_count,
+            max_context_bytes,
+        )?;
+        runtime.cancellations.lock().await.remove(&request.run_id);
+        return Ok(StartRunResult {
+            run_id: request.run_id,
+            state: "stopped".to_owned(),
+            summary: final_review_summary,
+            builder: builder.kind.clone(),
+            reviewer: reviewer.kind.clone(),
+            degraded_review,
+            session_id: build_result.session_id,
+            changed_files: files,
+            git_status: git_status(&worktree),
+            verification,
+            stopped: true,
+            promoted: false,
+            worktree_path: Some(worktree.to_string_lossy().into_owned()),
+            branch,
+            context_bytes: max_context_bytes,
+            artifact_path: Some(artifact_dir.to_string_lossy().into_owned()),
+            instruction_files,
+            skill_files,
+            recovery_count,
+            attention_reason: Some(reason),
+        });
+    }
+
     update_run(
         database,
         &request.run_id,
@@ -1495,7 +1602,6 @@ pub(crate) async fn execute_room_run(
         "Agent Room is checking that the base checkout has not changed.",
         Some(max_context_bytes),
     );
-    let has_changes = git_static(&worktree, &["rev-parse", "HEAD"])? != snapshot_head;
     let (promoted, promotion_mode, cleanup_warning) = if has_changes {
         match promote_worktree(&base_repository, &isolation, &managed_root) {
             Ok(result) => (true, Some(result.mode), result.cleanup_warning),

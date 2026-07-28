@@ -418,6 +418,7 @@ pub fn run() {
             project_list,
             project_select,
             project_active,
+            allocate_operation_id,
             load_project_settings,
             save_project_settings,
             load_verification_config,
@@ -432,8 +433,14 @@ pub fn run() {
             quick_edit_apply,
             quick_edit_discard,
             start_room_run,
+            approve_run_promotion,
             stop_run,
-            abandon_run
+            abandon_run,
+            voice_status,
+            voice_pick_model,
+            voice_pick_engine,
+            voice_start,
+            voice_stop
         ])
         .run(tauri::generate_context!())
         .expect("error while running Agent Room");

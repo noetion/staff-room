@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn autonomous_ship_setting_is_project_scoped() {
+fn autonomous_ship_setting_is_fail_closed_until_acceptance() {
     let connection = Connection::open_in_memory().expect("open test database");
     migrate(&connection).expect("migrate test database");
     connection
@@ -22,7 +22,7 @@ fn autonomous_ship_setting_is_project_scoped() {
     let database = Database(Mutex::new(connection));
 
     assert!(
-        project_settings(&database, "armed")
+        !project_settings(&database, "armed")
             .expect("armed settings")
             .autonomous_ship_enabled
     );
@@ -111,7 +111,6 @@ fn cursor_command_passes_the_selected_compound_model_through_unchanged() {
         "--output-format".to_owned(),
         "stream-json".to_owned(),
         "--stream-partial-output".to_owned(),
-        "--trust".to_owned(),
         "--workspace".to_owned(),
         "C:/worktree".to_owned(),
     ];
@@ -132,7 +131,7 @@ fn cursor_command_passes_the_selected_compound_model_through_unchanged() {
 #[test]
 fn antigravity_review_uses_plan_without_permission_bypass() {
     let request = TurnRequest {
-        mode: ProviderMode::Ship,
+        mode: ProviderMode::Review,
         phase: "review",
         prompt: "Review the diff.",
         repository: Path::new("C:/worktree"),
@@ -153,6 +152,45 @@ fn antigravity_review_uses_plan_without_permission_bypass() {
         .args
         .iter()
         .any(|arg| arg == "--dangerously-skip-permissions"));
+}
+
+#[test]
+fn every_review_adapter_is_prepared_read_only() {
+    for kind in ["codex", "claude", "cursor", "antigravity"] {
+        let request = TurnRequest {
+            mode: ProviderMode::Review,
+            phase: "review",
+            prompt: "Review without editing.",
+            repository: Path::new("C:/worktree"),
+            session_id: None,
+            model: None,
+            effort: None,
+            final_output_path: Path::new("C:/output.txt"),
+            structured_output: true,
+            handoff_contract: None,
+        };
+        let command = providers::build_command(kind, &request).expect("build review command");
+        let joined = command.args.join(" ");
+        match kind {
+            "codex" => assert!(joined.contains("-s read-only")),
+            "claude" => {
+                assert!(joined.contains("--permission-mode plan"));
+                assert!(joined.contains("--tools Read,Grep,Glob"));
+            }
+            "cursor" => {
+                assert!(joined.contains("--mode ask"));
+                assert!(!command
+                    .args
+                    .iter()
+                    .any(|value| value == "--force" || value == "--trust"));
+            }
+            "antigravity" => {
+                assert!(joined.contains("--mode plan"));
+                assert!(!joined.contains("--dangerously-skip-permissions"));
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]
@@ -227,7 +265,7 @@ fn connection_test_rejects_onboarding_output_even_when_the_process_succeeds() {
         summary: "```READY.```".to_owned(),
         ..ready
     };
-    assert!(connection_test_ready(&punctuated));
+    assert!(!connection_test_ready(&punctuated));
     assert!(authentication_attention("This repository uses OAuth authentication.", "").is_none());
     assert!(authentication_attention("", "OAuth authentication required").is_some());
 }

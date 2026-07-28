@@ -51,7 +51,10 @@ import {
 } from "./lib/participants";
 import { asRunState, hydrateRun } from "./lib/runs";
 import {
+  approveRunPromotion,
+  allocateOperationId,
   getEnvironment,
+  getVoiceStatus,
   discoverProviderModels,
   isNativeApp,
   loadProviderProfiles,
@@ -59,11 +62,14 @@ import {
   loadVerificationConfig,
   loadRoom,
   onRunEvent,
+  onVoiceLevel,
   projectActive,
   projectAttach,
   projectList,
   projectPick,
   projectSelect,
+  pickVoiceEngine,
+  pickVoiceModel,
   quickEditApply,
   abandonRun,
   quickEditDiscard,
@@ -73,16 +79,19 @@ import {
   saveVerificationConfig,
   startRoomChat,
   startRoomRun,
+  startVoiceCapture,
   stopRun,
+  stopVoiceCapture,
   testProviderConnection,
   type RunEvent,
+  type VoiceStatus,
 } from "./native";
 import { NavRail, TitleBar } from "./components/chrome";
 import { StatusPill } from "./components/chrome/StatusPill";
 import { Conversation } from "./components/conversation";
 import { RunProgressCard } from "./components/conversation/RunProgressCard";
 import { Aurora, Monogram, RefractionFilter, Wordmark } from "./components/primitives";
-import { ActivityView, AttachProjectView, EmptyState, RoomHeader } from "./components/views";
+import { ActivityView, AttachProjectView, EmptyState, ErrorState, RoomHeader } from "./components/views";
 import { SettingsView } from "./components/settings";
 export { ProviderProfileCard } from "./components/settings";
 import { Composer } from "./components/composer";
@@ -108,6 +117,22 @@ const detachedEnvironment: NativeEnvironment = {
   contextBudgetBytes: 0,
 };
 
+/// Module scope keeps this reference stable, so the meter subscription is created once
+/// per recording rather than on every render of a very large component.
+async function subscribeVoiceLevel(
+  handler: (level: number) => void,
+): Promise<() => void> {
+  if (!isNativeApp()) return () => {};
+  return onVoiceLevel(handler);
+}
+
+const unavailableVoice: VoiceStatus = {
+  available: false,
+  recording: false,
+  detail: "Local voice dictation is available in the Tauri desktop app.",
+  maxSeconds: 30,
+};
+
 const emptyRun: Run = {
   id: "",
   objective: "",
@@ -119,6 +144,7 @@ const emptyRun: Run = {
 };
 type ComposerMode = "ask" | "quick-edit" | "ship";
 type LiveActivityItem = { title: string; detail: string };
+type QuickEditPreview = QuickEditResult & { projectId: string; projectName: string };
 
 const activeStates: RunState[] = [
   "selecting",
@@ -775,6 +801,7 @@ export function App() {
     enabled: true,
     commands: [],
   });
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>(unavailableVoice);
   const [savingProjectSettings, setSavingProjectSettings] = useState(false);
   const [modelCatalog, setModelCatalog] = useState<Partial<Record<AgentKind, string[]>>>({});
   const [modelDiscoveryDetails, setModelDiscoveryDetails] = useState<Partial<Record<AgentKind, string>>>({});
@@ -783,7 +810,11 @@ export function App() {
   const [objective, setObjective] = useState("");
   const [composerMode, setComposerMode] = useState<ComposerMode>("ask");
   const [chatSending, setChatSending] = useState(false);
-  const [quickEdit, setQuickEdit] = useState<QuickEditResult>();
+  const [quickEdit, setQuickEdit] = useState<QuickEditPreview>();
+  const [quickEditAction, setQuickEditAction] = useState<"apply" | "discard">();
+  const [bootState, setBootState] = useState<"loading" | "ready" | "error">("loading");
+  const [bootError, setBootError] = useState("");
+  const [bootAttempt, setBootAttempt] = useState(0);
   const [activity, setActivity] = useState<LiveActivityItem[]>([]);
   const [streamTitle, setStreamTitle] = useState("Provider events");
   const [activeView, setActiveView] = useState<PrimaryView>("rooms");
@@ -800,6 +831,8 @@ export function App() {
   const loadingOlderMessagesRef = useRef(false);
   const runRef = useRef(run);
   const chatRunRef = useRef<string | undefined>(undefined);
+  const activeProjectIdRef = useRef(project.id);
+  const activationGenerationRef = useRef(0);
   const streamTextBufferRef = useRef("");
   const streamFrameRef = useRef<number | undefined>(undefined);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -810,9 +843,26 @@ export function App() {
     runRef.current = run;
   }, [run]);
 
+  useEffect(() => {
+    activeProjectIdRef.current = project.id;
+  }, [project.id]);
+
+  useEffect(() => {
+    if (!native) return;
+    void getVoiceStatus()
+      .then(setVoiceStatus)
+      .catch((error) => {
+        setVoiceStatus({
+          ...unavailableVoice,
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, [native]);
+
   async function refreshRoom(projectId = project.id) {
     if (!native) return;
     const snapshot = await loadRoom(projectId);
+    if (projectId !== activeProjectIdRef.current) return;
     setMessages(snapshot.messages);
     setHasMoreMessages(snapshot.hasMore);
     setRun(snapshot.latestRun ? hydrateRun(snapshot.latestRun) : emptyRun);
@@ -820,6 +870,7 @@ export function App() {
   }
 
   async function activateProject(nextProject: Project, knownEnvironment?: NativeEnvironment) {
+    const generation = ++activationGenerationRef.current;
     const nextEnvironment = knownEnvironment ?? await getEnvironment();
     const [snapshot, nextProfiles, nextSettings, nextVerificationConfig, nextProjects] = await Promise.all([
       loadRoom(nextProject.id),
@@ -828,6 +879,8 @@ export function App() {
       loadVerificationConfig(nextProject.id),
       projectList(),
     ]);
+    if (generation !== activationGenerationRef.current) return;
+    activeProjectIdRef.current = nextProject.id;
     setProject(nextProject);
     setProjects(nextProjects);
     setEnvironment(nextEnvironment);
@@ -838,6 +891,9 @@ export function App() {
     setProfiles(nextProfiles);
     setProjectSettings(nextSettings);
     setVerificationConfig(nextVerificationConfig);
+    setQuickEdit(undefined);
+    setActivity([]);
+    setAttention(undefined);
     setActiveView("rooms");
     setUiError("");
   }
@@ -851,10 +907,15 @@ export function App() {
           setEnvironment(previewEnvironment);
           setMessages(seedMessages);
           setRun(seedRun);
+          setBootState("ready");
         });
+      } else {
+        setBootState("ready");
       }
       return;
     }
+    setBootState("loading");
+    setBootError("");
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
@@ -866,11 +927,17 @@ export function App() {
         if (!nextEnvironment.attached || !nextProject) {
           setEnvironment(nextEnvironment);
           setProjects(nextProjects);
+          setBootState("ready");
           return;
         }
         await activateProject(nextProject, nextEnvironment);
+        if (!disposed) setBootState("ready");
       })
-      .catch((error) => console.error("Failed to inspect native environment", error));
+      .catch((error) => {
+        if (disposed) return;
+        setBootError(error instanceof Error ? error.message : String(error));
+        setBootState("error");
+      });
 
     onRunEvent((event: RunEvent) => {
       if (event.eventType === "stream" || event.eventType === "text-delta") {
@@ -973,8 +1040,6 @@ export function App() {
           ]);
           chatRunRef.current = undefined;
           setChatSending(false);
-        } else if (event.eventType === "complete") {
-          setChatSending(false);
         }
         return;
       }
@@ -1007,7 +1072,8 @@ export function App() {
         };
       });
       if (event.runId === runRef.current.id) {
-        void refreshRoom(project.id).catch(() => undefined);
+        const activeProjectId = activeProjectIdRef.current;
+        if (activeProjectId) void refreshRoom(activeProjectId).catch(() => undefined);
       }
     }).then((dispose) => {
       if (disposed) dispose();
@@ -1021,7 +1087,7 @@ export function App() {
         cancelAnimationFrame(streamFrameRef.current);
       }
     };
-  }, [native]);
+  }, [native, bootAttempt]);
 
   useEffect(() => {
     if (loadingOlderMessagesRef.current) {
@@ -1114,6 +1180,10 @@ export function App() {
   }
 
   async function handleAttachProject() {
+    if (chatSending || quickEdit) {
+      setUiError("Finish or discard the active Chat or Quick Edit before switching projects.");
+      return;
+    }
     if (!native) {
       setUiError("Repository attachment is available in the Tauri desktop app.");
       return;
@@ -1130,6 +1200,10 @@ export function App() {
 
   async function handleSelectProject(id: string) {
     if (!native || id === project.id) return;
+    if (chatSending || quickEdit) {
+      setUiError("Finish or discard the active Chat or Quick Edit before switching projects.");
+      return;
+    }
     try {
       await activateProject(await projectSelect(id));
     } catch (error) {
@@ -1213,7 +1287,6 @@ export function App() {
     try {
       const participant = await testProviderConnection({
         projectId: project.id,
-        repositoryPath: project.repositoryPath,
         participantKind: kind,
         model: draft.model,
         effort: draft.effort,
@@ -1282,8 +1355,17 @@ export function App() {
     const writer = environment.participants.find(
       (participant) => participant.kind === requestedWriter && isRunnableParticipant(participant),
     )?.kind;
+    let operationId: string = crypto.randomUUID();
+    if (native) {
+      try {
+        operationId = await allocateOperationId(project.id, "ship");
+      } catch (error) {
+        setUiError(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
     const nextRun: Run = {
-      id: crypto.randomUUID(),
+      id: operationId,
       objective: text,
       state: "selecting",
       currentOwner: writer,
@@ -1337,7 +1419,6 @@ export function App() {
         runId: nextRun.id,
         projectId: project.id,
         objective: text,
-        repositoryPath: project.repositoryPath,
         requestedAgent: writer,
       });
       await refreshRoom(project.id);
@@ -1367,6 +1448,10 @@ export function App() {
   async function submitObjective() {
     const text = objective.trim();
     if (!text) return;
+    if (run.state === "awaiting-promotion") {
+      setUiError("Promote or abandon the verified Ship result before starting another objective.");
+      return;
+    }
     if (run.state === "promoting") {
       setUiError("Promotion is finishing now. Side chat will reopen when this Ship run completes.");
       return;
@@ -1387,7 +1472,15 @@ export function App() {
     const participant = activeShip && activeShipAgent
       ? activeShipAgent
       : chatAgentFor(text, environment.participants, priorAgent);
-    const chatRunId = crypto.randomUUID();
+    let chatRunId: string = crypto.randomUUID();
+    if (native) {
+      try {
+        chatRunId = await allocateOperationId(project.id, "chat");
+      } catch (error) {
+        setUiError(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
     setUiError("");
     setObjective("");
     setActivity([]);
@@ -1444,7 +1537,6 @@ export function App() {
         runId: chatRunId,
         projectId: project.id,
         message: text,
-        repositoryPath: project.repositoryPath,
         requestedAgent: participant,
         activeRunId: activeShip ? run.id : undefined,
       });
@@ -1460,8 +1552,10 @@ export function App() {
       setUiError(detail);
       await refreshRoom(project.id).catch(() => undefined);
     } finally {
-      setChatSending(false);
-      chatRunRef.current = undefined;
+      if (chatRunRef.current === chatRunId) {
+        setChatSending(false);
+        chatRunRef.current = undefined;
+      }
     }
   }
 
@@ -1476,18 +1570,24 @@ export function App() {
       setUiError(participant ? "Quick Edit is available in the Tauri desktop app." : "No Full-tier participant can perform a Quick Edit.");
       return;
     }
-    const editId = crypto.randomUUID();
+    let editId: string;
+    try {
+      editId = await allocateOperationId(project.id, "quick-edit");
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+      return;
+    }
     setUiError("");
     setObjective("");
     setChatSending(true);
     try {
-      setQuickEdit(await quickEditStart({
+      const result = await quickEditStart({
         editId,
         projectId: project.id,
         message: text,
-        repositoryPath: project.repositoryPath,
         requestedAgent: participant,
-      }));
+      });
+      setQuickEdit({ ...result, projectId: project.id, projectName: project.name });
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1497,24 +1597,72 @@ export function App() {
 
   async function applyQuickEdit() {
     if (!quickEdit) return;
+    if (quickEdit.projectId !== project.id) {
+      setUiError("This Quick Edit belongs to another project and cannot be applied here.");
+      return;
+    }
     setUiError("");
+    setQuickEditAction("apply");
     try {
-      await quickEditApply(quickEdit.editId);
+      const result = await quickEditApply(project.id, quickEdit.editId);
       setQuickEdit(undefined);
+      if (result.cleanupWarning) {
+        setUiError(`The edit was applied, but temporary isolation cleanup needs attention: ${result.cleanupWarning}`);
+      }
       await refreshRoom(project.id);
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setQuickEditAction(undefined);
+    }
+  }
+
+  async function handlePickVoiceEngine() {
+    setUiError("");
+    try {
+      await pickVoiceEngine();
+      setVoiceStatus(await getVoiceStatus());
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handlePickVoiceModel() {
+    setUiError("");
+    try {
+      await pickVoiceModel();
+      setVoiceStatus(await getVoiceStatus());
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handleVoiceStart() {
+    setUiError("");
+    await startVoiceCapture();
+    setVoiceStatus((current) => ({ ...current, recording: true }));
+  }
+
+  async function handleVoiceStop(cancel = false) {
+    try {
+      const result = await stopVoiceCapture(cancel);
+      return result.text;
+    } finally {
+      setVoiceStatus((current) => ({ ...current, recording: false }));
     }
   }
 
   async function discardQuickEdit() {
     if (!quickEdit) return;
     setUiError("");
+    setQuickEditAction("discard");
     try {
-      await quickEditDiscard(quickEdit.editId);
+      await quickEditDiscard(project.id, quickEdit.editId);
       setQuickEdit(undefined);
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setQuickEditAction(undefined);
     }
   }
 
@@ -1530,9 +1678,11 @@ export function App() {
     const chatRunId = chatRunRef.current;
     if (!chatRunId) return;
     try {
-      await stopRun(chatRunId);
-      setChatSending(false);
-      chatRunRef.current = undefined;
+      await stopRun(project.id, chatRunId);
+      if (chatRunRef.current === chatRunId) {
+        setChatSending(false);
+        chatRunRef.current = undefined;
+      }
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
     }
@@ -1541,7 +1691,7 @@ export function App() {
   async function handleStop() {
     if (native) {
       try {
-        const result = await stopRun(runRef.current.id);
+        const result = await stopRun(project.id, runRef.current.id);
         if (!result.cancelled) {
           setUiError(result.reason);
           return;
@@ -1566,10 +1716,25 @@ export function App() {
     if (!window.confirm("Abandon this Ship run and delete its preserved worktree? This cannot be undone.")) return;
     setUiError("");
     try {
-      await abandonRun(run.id);
+      await abandonRun(project.id, run.id);
       await refreshRoom(project.id);
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function handlePromote() {
+    if (!native || run.state !== "awaiting-promotion" || !run.worktreePath) return;
+    if (!window.confirm("Promote this reviewed and verified change into the attached checkout?")) return;
+    setUiError("");
+    setRun((current) => ({ ...current, state: "promoting", stopReason: undefined }));
+    try {
+      await approveRunPromotion(project.id, run.id);
+      await refreshRoom(project.id);
+      setEnvironment(await getEnvironment());
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+      await refreshRoom(project.id).catch(() => undefined);
     }
   }
 
@@ -1578,6 +1743,7 @@ export function App() {
       !native ||
       !run.worktreePath ||
       activeStates.includes(run.state) ||
+      run.state === "awaiting-promotion" ||
       (run.recoveryCount ?? 0) >= 2
     ) {
       return;
@@ -1598,7 +1764,6 @@ export function App() {
         runId: run.id,
         projectId: project.id,
         objective: run.objective,
-        repositoryPath: project.repositoryPath,
         requestedAgent: run.writer,
       });
       await refreshRoom(project.id);
@@ -1609,6 +1774,33 @@ export function App() {
       setRun((current) => ({ ...current, state: "failed", stopReason: detail }));
       await refreshRoom(project.id).catch(() => undefined);
     }
+  }
+
+  if (bootState === "loading") {
+    return (
+      <main className="boot-screen" aria-busy="true">
+        <span className="eyebrow">Local workspace</span>
+        <h1>Opening Agent Room</h1>
+        <p>Loading projects, provider state, and the latest room evidence.</p>
+      </main>
+    );
+  }
+
+  if (bootState === "error") {
+    return (
+      <main className="boot-screen">
+        <span className="eyebrow">Startup stopped</span>
+        <h1>Agent Room could not open</h1>
+        <ErrorState
+          cause={bootError}
+          action={(
+            <button type="button" className="secondary-button" onClick={() => setBootAttempt((attempt) => attempt + 1)}>
+              Retry startup
+            </button>
+          )}
+        />
+      </main>
+    );
   }
 
   return (
@@ -1669,7 +1861,7 @@ export function App() {
             size="calc(var(--s-8) * 3 + var(--s-2))"
           />
         )}
-        {(activeStates.includes(run.state) || ["waiting", "failed", "stopped"].includes(run.state)) && (
+        {(activeStates.includes(run.state) || ["awaiting-promotion", "waiting", "failed", "stopped"].includes(run.state)) && (
           <StatusPill
             state={run.state}
             stage={run.route.find((step) => step.state === "current")?.label ?? "Ship run"}
@@ -1691,6 +1883,7 @@ export function App() {
             profiles={profiles}
             projectSettings={projectSettings}
             verificationConfig={verificationConfig}
+            voiceStatus={voiceStatus}
             savingProjectSettings={savingProjectSettings}
             savingKind={savingProfileKind}
             refreshing={refreshingProviders}
@@ -1705,6 +1898,8 @@ export function App() {
             modelDiscoveryDetails={modelDiscoveryDetails}
             onRefreshModels={handleRefreshModels}
             onAutonomousShipChange={handleAutonomousShipChange}
+            onPickVoiceEngine={() => void handlePickVoiceEngine()}
+            onPickVoiceModel={() => void handlePickVoiceModel()}
             onVerificationConfigChange={setVerificationConfig}
             onSaveVerificationConfig={handleSaveVerificationConfig}
           />
@@ -1751,6 +1946,7 @@ export function App() {
               activity={activity}
               limits={`${run.revisionCount}/1 revise · ${run.reviewCount}/2 review · ${run.recoveryCount ?? 0}/2 recover`}
               onStop={handleStop}
+              onPromote={handlePromote}
               onResume={handleResume}
               onAbandon={handleAbandon}
             />
@@ -1785,6 +1981,10 @@ export function App() {
           }
           onStop={() => void handleStopChat()}
           onSubmit={submitComposer}
+          onVoiceError={setUiError}
+          onVoiceStart={handleVoiceStart}
+          onVoiceStop={handleVoiceStop}
+          subscribeVoiceLevel={subscribeVoiceLevel}
           participants={environment.participants}
           placeholder={
             composerMode === "ask"
@@ -1800,23 +2000,27 @@ export function App() {
                     : "@codex State the objective once..."
           }
           promoting={run.state === "promoting"}
-          quickEditDisabled={sideChatAvailable || run.state === "promoting" || Boolean(quickEdit)}
+          quickEditDisabled={sideChatAvailable || ["awaiting-promotion", "promoting"].includes(run.state) || Boolean(quickEdit)}
           quickEditPreview={quickEdit && (
             <>
+              <div className="composer-preview-context">
+                <span>{quickEdit.projectName}</span>
+                <span>{quickEdit.editId}</span>
+              </div>
               <p><strong>{agentNames[quickEdit.participant]}</strong>: {quickEdit.summary}</p>
               <pre>{quickEdit.diff || "No file changes were produced."}</pre>
               <div className="composer-preview-actions">
-                <button type="button" className="composer-preview-apply" onClick={() => void applyQuickEdit()} disabled={!quickEdit.diff}>
-                  <Check size={15} /> Apply edit
+                <button type="button" className="composer-preview-apply" onClick={() => void applyQuickEdit()} disabled={!quickEdit.diff || Boolean(quickEditAction)}>
+                  <Check size={15} /> {quickEditAction === "apply" ? "Applying..." : "Apply edit"}
                 </button>
-                <button type="button" className="danger-button" onClick={() => void discardQuickEdit()}>
-                  <X size={15} /> Discard
+                <button type="button" className="danger-button" onClick={() => void discardQuickEdit()} disabled={Boolean(quickEditAction)}>
+                  <X size={15} /> {quickEditAction === "discard" ? "Discarding..." : "Discard"}
                 </button>
               </div>
             </>
           )}
           renderParticipantMark={(participant) => <ParticipantMark participant={participant} />}
-          shipDisabled={sideChatAvailable || run.state === "promoting"}
+          shipDisabled={sideChatAvailable || ["awaiting-promotion", "promoting"].includes(run.state)}
           sideChatAvailable={sideChatAvailable}
           titleForParticipant={(participant) =>
             (composerMode === "ask" || composerMode === "quick-edit" ? canUseChat(participant) : isRunnableParticipant(participant))
@@ -1824,6 +2028,9 @@ export function App() {
               : participant.capabilities.autonomyNote
           }
           value={objective}
+          voiceAvailable={native && voiceStatus.available}
+          voiceDetail={voiceStatus.detail}
+          voiceDisabled={chatSending || run.state === "promoting" || Boolean(quickEditAction)}
         />
           </>
         )}

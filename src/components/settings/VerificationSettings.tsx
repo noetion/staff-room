@@ -11,6 +11,6 @@ export function VerificationSettings({ config, disabled, onChange, onSave }: { c
       <label className="switch-control"><input type="checkbox" checked={command.enabled} disabled={disabled} onChange={(event) => onChange({ ...config, commands: config.commands.map((value, valueIndex) => valueIndex === index ? { ...value, enabled: event.target.checked } : value) })} /><span>Run</span></label>
       <button type="button" className="secondary-button" aria-label={`Remove verification command ${index + 1}`} disabled={disabled} onClick={() => onChange({ ...config, commands: config.commands.filter((_, valueIndex) => valueIndex !== index) })}>Remove</button>
     </div>)}</div>
-    <div className="verification-actions"><button type="button" className="secondary-button" disabled={disabled || config.commands.length >= 4} onClick={() => onChange({ ...config, commands: [...config.commands, { label: "Project check", command: "", enabled: true }] })}>Add check</button><button type="button" className="primary-button" disabled={disabled} onClick={onSave}>{disabled ? "Savingâ€¦" : "Save verification"}</button></div>
+    <div className="verification-actions"><button type="button" className="secondary-button" disabled={disabled || config.commands.length >= 4} onClick={() => onChange({ ...config, commands: [...config.commands, { label: "Project check", command: "", enabled: true }] })}>Add check</button><button type="button" className="primary-button" disabled={disabled} onClick={onSave}>{disabled ? "Saving…" : "Save verification"}</button></div>
   </section>;
 }

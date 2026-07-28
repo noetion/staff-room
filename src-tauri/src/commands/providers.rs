@@ -415,6 +415,7 @@ pub(crate) fn stored_run_route(
         "reviewing" if review_count > 1 => 4,
         "reviewing" => 2,
         "revising" => 3,
+        "awaiting-promotion" => 5,
         "promoting" => 5,
         "complete" => phases.len(),
         _ => 0,
@@ -440,11 +441,19 @@ pub(crate) fn stored_run_route(
 #[tauri::command]
 pub(crate) async fn stop_run(
     runtime: State<'_, RuntimeState>,
-    run_id: String,
+    request: ProjectRunRequest,
 ) -> Result<StopRunResult, String> {
-    let sender = runtime.cancellations.lock().await.get(&run_id).cloned();
-    match sender {
-        Some(sender) if sender.send(true).is_ok() => Ok(StopRunResult {
+    let entry = runtime
+        .cancellations
+        .lock()
+        .await
+        .get(&request.run_id)
+        .cloned();
+    match entry {
+        Some(entry) if entry.project_id != request.project_id => {
+            Err("This operation does not belong to the selected project.".to_owned())
+        }
+        Some(entry) if entry.sender.send(true).is_ok() => Ok(StopRunResult {
             cancelled: true,
             reason: "Cancellation requested. Agent Room will preserve recoverable work.".to_owned(),
         }),
@@ -463,34 +472,24 @@ pub(crate) async fn stop_run(
 pub(crate) fn abandon_run(
     app: AppHandle,
     database: State<'_, Database>,
-    run_id: String,
+    request: ProjectRunRequest,
 ) -> Result<(), String> {
-    type AbandonRow = (String, Option<String>, String, String, String);
+    type AbandonRow = (String, Option<String>, String, String);
     let database = database.inner();
     let row = {
         let connection = database.0.lock().map_err(|error| error.to_string())?;
         connection
             .query_row(
-                "SELECT runs.state, runs.worktree_path, runs.branch, runs.isolation_kind,
-                        projects.repository_path
-                 FROM runs JOIN projects ON projects.id = runs.project_id
-                 WHERE runs.id = ?1",
-                [&run_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
+                "SELECT state, worktree_path, branch, isolation_kind
+                 FROM runs WHERE id = ?1 AND project_id = ?2",
+                params![request.run_id, request.project_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "The Ship run could not be found.".to_owned())?
     };
-    let (state, worktree_path, branch, isolation_kind, repository_path): AbandonRow = row;
+    let (state, worktree_path, branch, isolation_kind): AbandonRow = row;
     if run_state_allows_side_chat(&state) || state == "promoting" || state == "selecting" {
         return Err("An active Ship run cannot be abandoned. Stop it first.".to_owned());
     }
@@ -515,12 +514,13 @@ pub(crate) fn abandon_run(
         isolation_kind,
         workspace_fingerprint: None,
     };
-    if let Some(error) = discard_isolation(Path::new(&repository_path), &isolation, &managed_root) {
+    let repository = project_repository(database, &request.project_id)?;
+    if let Some(error) = discard_isolation(&repository, &isolation, &managed_root) {
         return Err(format!("Could not remove the preserved isolation: {error}"));
     }
     update_run(
         database,
-        &run_id,
+        &request.run_id,
         "abandoned",
         None,
         0,
@@ -535,13 +535,13 @@ pub(crate) fn abandon_run(
         .lock()
         .map_err(|error| error.to_string())?
         .execute(
-            "UPDATE runs SET worktree_path = NULL WHERE id = ?1",
-            [&run_id],
+            "UPDATE runs SET worktree_path = NULL WHERE id = ?1 AND project_id = ?2",
+            params![request.run_id, request.project_id],
         )
         .map_err(|error| error.to_string())?;
     emit_event(
         &app,
-        &run_id,
+        &request.run_id,
         "complete",
         "ship",
         "abandoned",
@@ -561,9 +561,7 @@ pub(crate) async fn test_provider_connection(
     request: ConnectionTestRequest,
 ) -> Result<Participant, String> {
     let database = database.inner();
-    let repository = PathBuf::from(&request.repository_path);
-    git_static(&repository, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
+    let repository = project_repository(database, &request.project_id)?;
     let participant = probe_provider(&request.participant_kind);
     runtime
         .provider_cache
@@ -583,20 +581,22 @@ pub(crate) async fn test_provider_connection(
     } else {
         provider_profile(database, &request.project_id, &participant.kind, "chat")?
     };
-    let run_id = format!("connection-{}", Uuid::new_v4());
+    let run_id = Uuid::new_v4().to_string();
     let output_path = run_artifact_directory(&app, &run_id)?.join("connection-test.final.txt");
     let (cancel_sender, cancellation) = watch::channel(false);
-    runtime
-        .cancellations
-        .lock()
-        .await
-        .insert(run_id.clone(), cancel_sender);
+    runtime.cancellations.lock().await.insert(
+        run_id.clone(),
+        CancellationEntry {
+            project_id: request.project_id.clone(),
+            sender: cancel_sender,
+        },
+    );
     let result = invoke_provider(
         &app,
         &run_id,
         &participant,
         Phase::Chat,
-        ProviderMode::Ask,
+        ProviderMode::Probe,
         "This is an Agent Room connection test. Reply with exactly READY. Do not inspect or modify files.",
         &repository,
         None,

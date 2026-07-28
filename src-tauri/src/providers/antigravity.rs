@@ -8,14 +8,14 @@ impl ProviderAdapter for Adapter {
     }
 
     fn build_command(&self, request: &TurnRequest<'_>) -> Result<PreparedCommand, String> {
-        if request.phase == "chat" {
+        if request.phase == "chat" && request.mode != super::Mode::Probe {
             return Err(
                 "Antigravity is available for Ship only because it has no true read-only mode."
                     .into(),
             );
         }
         assert_argv_prompt(request.prompt)?;
-        let review = matches!(request.phase, "review" | "final-review");
+        let review = matches!(request.mode, super::Mode::Probe | super::Mode::Review);
         let mut args = vec![
             "--sandbox".into(),
             "--add-dir".into(),

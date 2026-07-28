@@ -6,9 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check": "npm test && npm run build && node scripts/check-design.mjs && cargo test --manifest-path src-tauri/Cargo.toml && npm run qa:visual:acceptance",
     "test": "vitest run",
     "tauri": "tauri",
-    "qa:visual": "node scripts/qa/visual-qa.mjs"
+    "qa:visual": "node scripts/qa/visual-qa.mjs",
+    "qa:visual:acceptance": "node scripts/qa/visual-qa.mjs --skip-perf"
   },
   "dependencies": {
     "@fontsource-variable/onest": "^5.2.6",

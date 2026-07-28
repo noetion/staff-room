@@ -9,12 +9,13 @@ pub(crate) async fn start_room_chat(
 ) -> Result<ChatResult, String> {
     let chat_started = Instant::now();
     let database = database.inner();
-    let (cancel_sender, cancel_receiver) = watch::channel(false);
-    runtime
-        .cancellations
-        .lock()
-        .await
-        .insert(request.run_id.clone(), cancel_sender);
+    consume_operation_id(
+        runtime.inner(),
+        &request.run_id,
+        &request.project_id,
+        "chat",
+    )
+    .await?;
     let active_run = if let Some(active_run_id) = request.active_run_id.as_deref() {
         let connection = database.0.lock().map_err(|error| error.to_string())?;
         connection
@@ -62,9 +63,7 @@ pub(crate) async fn start_room_chat(
     let repository = active_run
         .as_ref()
         .map(|(repository, _)| repository.clone())
-        .unwrap_or_else(|| PathBuf::from(&request.repository_path));
-    git_static(&repository, &["rev-parse", "--show-toplevel"])
-        .map_err(|_| "The attached path is not a Git repository.".to_owned())?;
+        .map_or_else(|| project_repository(database, &request.project_id), Ok)?;
     let message = request.message.trim();
     if message.is_empty() {
         return Err("Enter a message before sending.".to_owned());
@@ -169,6 +168,22 @@ pub(crate) async fn start_room_chat(
     let prompt = truncate_utf8(&prompt, Phase::Chat.context_budget_bytes());
     let artifact_dir = run_artifact_directory(&app, &request.run_id)?;
     let output_path = artifact_dir.join("chat.final.txt");
+    let (cancel_sender, cancel_receiver) = watch::channel(false);
+    if runtime
+        .cancellations
+        .lock()
+        .await
+        .insert(
+            request.run_id.clone(),
+            CancellationEntry {
+                project_id: request.project_id.clone(),
+                sender: cancel_sender,
+            },
+        )
+        .is_some()
+    {
+        return Err("This operation ID is already active.".to_owned());
+    }
     let preflight_ms = chat_started.elapsed().as_millis() as u64;
     let first_result = invoke_provider(
         &app,

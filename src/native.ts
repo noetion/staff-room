@@ -57,6 +57,34 @@ export async function projectActive(): Promise<Project | undefined> {
   return invoke<Project | undefined>("project_active");
 }
 
+export interface VoiceStatus {
+  available: boolean;
+  recording: boolean;
+  modelPath?: string;
+  detail: string;
+  maxSeconds: number;
+}
+
+export interface VoiceLevel {
+  level: number;
+}
+
+export interface VoiceTranscription {
+  text: string;
+  durationMs: number;
+}
+
+export interface QuickEditActionResult {
+  cleanupWarning?: string;
+}
+
+export async function allocateOperationId(
+  projectId: string,
+  kind: "chat" | "quick-edit" | "ship",
+): Promise<string> {
+  return invoke<string>("allocate_operation_id", { request: { projectId, kind } });
+}
+
 export async function loadRoom(
   projectId: string,
   before?: MessageCursor,
@@ -108,7 +136,6 @@ export async function startRoomRun(
     runId: string;
     projectId: string;
     objective: string;
-    repositoryPath: string;
     requestedAgent?: AgentKind;
   },
 ): Promise<StartRunResult> {
@@ -120,7 +147,6 @@ export async function startRoomChat(
     runId: string;
     projectId: string;
     message: string;
-    repositoryPath: string;
     requestedAgent?: AgentKind;
     activeRunId?: string;
   },
@@ -133,24 +159,22 @@ export async function quickEditStart(
     editId: string;
     projectId: string;
     message: string;
-    repositoryPath: string;
     requestedAgent?: AgentKind;
   },
 ): Promise<QuickEditResult> {
   return invoke<QuickEditResult>("quick_edit_start", { request });
 }
 
-export async function quickEditApply(editId: string): Promise<void> {
-  return invoke("quick_edit_apply", { request: { editId } });
+export async function quickEditApply(projectId: string, editId: string): Promise<QuickEditActionResult> {
+  return invoke<QuickEditActionResult>("quick_edit_apply", { request: { projectId, editId } });
 }
 
-export async function quickEditDiscard(editId: string): Promise<void> {
-  return invoke("quick_edit_discard", { request: { editId } });
+export async function quickEditDiscard(projectId: string, editId: string): Promise<QuickEditActionResult> {
+  return invoke<QuickEditActionResult>("quick_edit_discard", { request: { projectId, editId } });
 }
 
 export async function testProviderConnection(request: {
   projectId: string;
-  repositoryPath: string;
   participantKind: AgentKind;
   model: string;
   effort: string;
@@ -166,12 +190,42 @@ export async function discoverProviderModels(
   });
 }
 
-export async function stopRun(runId: string): Promise<StopRunResult> {
-  return invoke<StopRunResult>("stop_run", { runId });
+export async function stopRun(projectId: string, runId: string): Promise<StopRunResult> {
+  return invoke<StopRunResult>("stop_run", { request: { projectId, runId } });
 }
 
-export async function abandonRun(runId: string): Promise<void> {
-  return invoke("abandon_run", { runId });
+export async function abandonRun(projectId: string, runId: string): Promise<void> {
+  return invoke("abandon_run", { request: { projectId, runId } });
+}
+
+export async function approveRunPromotion(projectId: string, runId: string): Promise<void> {
+  return invoke("approve_run_promotion", { request: { projectId, runId } });
+}
+
+export async function getVoiceStatus(): Promise<VoiceStatus> {
+  return invoke<VoiceStatus>("voice_status");
+}
+
+export async function pickVoiceModel(): Promise<VoiceStatus> {
+  return invoke<VoiceStatus>("voice_pick_model");
+}
+
+export async function pickVoiceEngine(): Promise<VoiceStatus> {
+  return invoke<VoiceStatus>("voice_pick_engine");
+}
+
+export async function startVoiceCapture(): Promise<void> {
+  return invoke("voice_start");
+}
+
+export async function stopVoiceCapture(cancel = false): Promise<VoiceTranscription> {
+  return invoke<VoiceTranscription>("voice_stop", { cancel });
+}
+
+export async function onVoiceLevel(
+  callback: (level: number) => void,
+): Promise<UnlistenFn> {
+  return listen<VoiceLevel>("voice-level", (event) => callback(event.payload.level));
 }
 
 export async function onRunEvent(

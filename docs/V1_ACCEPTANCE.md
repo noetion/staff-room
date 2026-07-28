@@ -1,84 +1,61 @@
-# V1 acceptance run
+# Human-gated v1 acceptance
 
-**Date:** 2026-07-27
-**Target:** Windows development machine, `<repo>`
-**Result:** **FAIL — release acceptance is not complete.** The automated checks below passed, but this repository has no desktop or provider end-to-end acceptance harness and the required interactive observations were not performed in this run. A failed row means the specified behaviour was not observed, not that the product has been proven to behave incorrectly.
+**Scope:** Windows-first, personal-use, assisted operation
 
-## Tooling recorded on the target
+**Status:** Implementation complete; final packaged and live-provider audit pending
 
-| Tool | Version |
+**Autonomy:** Not accepted and fail-closed
+**Voice:** Implemented; packaged microphone round trip requires a configured local whisper.cpp CLI and model
+
+This record does not treat autonomous behavior as part of the assisted v1. The original autonomous matrix is retained as a separate, stricter contract in `AUTONOMOUS_ACCEPTANCE_CONTRACT.md`.
+
+## Automated contract
+
+| Contract | Required evidence | Current implementation |
+| --- | --- | --- |
+| Renderer build | TypeScript and Vite production build | `npm run build` |
+| Local logic | Frontend and Rust tests | `npm test`; `cargo test --manifest-path src-tauri/Cargo.toml` |
+| Design system | No forbidden typography shorthand or unowned design literals | `node scripts/check-design.mjs` |
+| Rendered UI | Required styles load; supported widths/themes; direct contrast; Axe serious/critical findings | `npm run qa:visual:acceptance` |
+| One local gate | All preceding checks run without a paid provider | `npm run check` |
+| Project authority | Mutation requests contain `projectId`, not renderer repository paths | `project_repository` reloads, canonicalizes, and identity-checks SQLite state |
+| Operation identity | New Chat, Quick Edit, and Ship IDs are Rust-issued, project-bound, one-time leases | `allocate_operation_id` and `consume_operation_id` |
+| Artifact containment | Operation artifact directories accept canonical UUIDs only | `run_artifact_directory` |
+| Review immutability | Review and Final Review use explicit read-only adapter mode plus mutation guard | `ProviderMode::Review` |
+| Connection truth | Probe mode does not write and succeeds only for exact `READY` | `ProviderMode::Probe`; `connection_test_ready` |
+| Human promotion | Reviewed changes stop at `awaiting-promotion`; Promote requires confirmation and an unchanged reviewed Git fingerprint | `approve_run_promotion` |
+| Promotion serialization | Only one promotion per project can run | `active_promotions` project lock |
+| Migration backup | Online SQLite backup, integrity check, atomic finalize | `backup_v1_database` |
+| Voice custody | Rust microphone capture; 30-second capture and two-minute inference bounds; temporary audio deletion on every exit | `commands/voice.rs` |
+| Voice authorization | Transcript inserts at caret; no auto-submit or action authorization | `Composer.insertTranscript` and hold-to-talk control |
+
+## Local evidence recorded 2026-07-28
+
+- `npm test`: 12 tests passed.
+- `npm run build`: production TypeScript and Vite build passed.
+- `node scripts/check-design.mjs`: 80 source files passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml`: 51 tests passed.
+- `npm run qa:visual:acceptance`: equivalent direct invocation passed 84 checks with 0 failures across light and dark themes, 720, 1024, 1280, 1440, and 1800 pixel widths, reduced motion, forced colours, reduced transparency, focus visibility, text contrast, stylesheet presence, and selected Axe rules.
+- `git diff --check`: passed.
+
+The scroll-performance check is intentionally deferred to the final audit. No paid provider or live CLI run was used for this evidence.
+
+## Required final observations
+
+These are deliberately left for the final audit and must not be claimed from unit tests:
+
+| Observation | Pass condition |
 | --- | --- |
-| Node.js | v22.14.0 |
-| npm | 10.9.2 |
-| Cargo | 1.97.1 |
-| Rust | 1.97.1 |
-| Codex CLI | 0.144.4 |
-| Claude Code | 2.1.220 |
-| Cursor Agent | 2026.07.23-e383d2b |
-| Antigravity (`agy`) | 1.1.7 |
+| Fresh packaged launch | Attach view opens, a repository attaches, and no fabricated native data appears |
+| Two-project isolation | Switching projects during or after async work never displays or applies another project's result |
+| Human Ship | A verified change reaches `awaiting-promotion`; base checkout is unchanged before Promote; confirmed Promote applies only the reviewed delta |
+| Quick Edit | Diff stays visible until Apply or Discard; project switch and cleanup behavior are correct |
+| Provider matrix | Each installed provider's Ask, Quick Edit, Build, Review, cancellation, and connection claims match observed CLI behavior |
+| Packaged voice | Microphone capture works with configured local assets and inserts an editable transcript at the caret |
+| Voice denial/failure | Missing permission, device, engine, model, silence, or inference failure leaves typed text usable and unchanged |
+| Voice retention | Temporary WAV and transcript output files are deleted after success and failure |
+| Installer/migration | A pre-v1 database produces a verified `.v1.bak` and retains project data |
 
-## Required build gates
+## Release verdict rule
 
-| Gate | Result | Evidence |
-| --- | --- | --- |
-| `npm test` | PASS | 1 Vitest test passed. |
-| `npm run build` | PASS | TypeScript compilation and Vite production build passed. |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | PASS | 45 Rust tests passed. |
-| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` | PASS | Completed with no denied warnings. |
-
-## Acceptance checklist
-
-| # | Result | Observation |
-| --- | --- | --- |
-| 1 | FAIL | Fresh-install attach-screen behaviour was not observed in a desktop build. |
-| 2 | FAIL | Two independent repositories were not exercised end-to-end. |
-| 3 | FAIL | A shipped UI was not inspected for absolute paths. |
-| 4 | FAIL | A real pre-v1 database migration was not run. |
-| 5 | FAIL | A two-turn Claude timing receipt was not captured. |
-| 6 | FAIL | A cold application launch with cached capability records was not observed. |
-| 7 | FAIL | Provider acknowledgement latency was not measured. |
-| 8 | FAIL | A resumed same-provider packet capture was not taken. |
-| 9 | FAIL | Revision and review packet-byte baselines were not measured. |
-| 10 | FAIL | A cross-provider dependent follow-up was not run. |
-| 11 | FAIL | An unattended Ship run was not completed on JavaScript and Rust repositories. |
-| 12 | PASS | Rust test `empty_verification_config_cannot_pass` confirms an empty verification configuration cannot auto-promote. |
-| 13 | FAIL | A two-CLI independent review was not observed. |
-| 14 | FAIL | Cancellation was not exercised at every phase. |
-| 15 | FAIL | The app was not closed mid-run and Task Manager was not inspected for orphaned processes. |
-| 16 | PASS | Rust test `interrupted_runs_become_recoverable_on_restart` passed. |
-| 17 | FAIL | Resume limit and third-attempt refusal were not exercised on a live run. |
-| 18 | FAIL | Abandon cleanup was not exercised on a live run. |
-| 19 | FAIL | Promotion interruption and auto-resume availability were not observed. |
-| 20 | FAIL | Ask immutability was not proven for all Full-tier providers. |
-| 21 | FAIL | Quick Edit was not exercised through Apply. |
-| 22 | FAIL | Permission boundaries were not observed for every provider and route. |
-| 23 | PASS | Rust test `review_mutation_guard_detects_a_review_write` passed. |
-| 24 | PASS | Rust tests for detached HEAD, branch switch, and dirty checkout promotion guards passed. |
-| 25 | FAIL | A 500-message room reload was not observed. |
-| 26 | FAIL | A 20 KiB streamed answer was not rendered. |
-| 27 | FAIL | Failure-state recovery actions were not inspected in the UI. |
-| 28 | FAIL | Desktop layouts at 1024, 1280, 1440, and 1800 px were not inspected. |
-| 29 | FAIL | Ship-only provider labelling and route exclusion were not exercised in the UI. |
-
-## Four-provider matrix
-
-No provider behaviour was executed in this run. The capability-limit cells below are product requirements rather than observed results; each must be visibly represented in the shipped UI before release.
-
-| Capability | Codex | Claude | Cursor | Antigravity |
-| --- | --- | --- | --- | --- |
-| Tier | FAIL — not observed | FAIL — not observed | FAIL — not observed | FAIL — not observed |
-| Ask turn, read-only proven | FAIL — not observed | FAIL — not observed | FAIL — not observed | Capability limit: Ship-only, not offered |
-| Quick Edit → diff → apply | FAIL — not observed | FAIL — not observed | FAIL — not observed | Capability limit: Ship-only, not offered |
-| Token-delta streaming | FAIL — not observed | FAIL — not observed | FAIL — not observed | Capability limit: completion stream |
-| Warm process, turn 2 | FAIL — not observed | FAIL — not observed | Capability limit: per-turn spawn | Capability limit: per-turn spawn |
-| Two turns, native session resumed | FAIL — not observed | FAIL — not observed | FAIL — not observed | FAIL — not observed |
-| Ship as builder, end to end | FAIL — not observed | FAIL — not observed | FAIL — not observed | FAIL — not observed |
-| Ship as reviewer | FAIL — not observed | FAIL — not observed | FAIL — not observed | FAIL — not observed |
-| Reviewer mutation guard fires on a forced write | FAIL — not observed | FAIL — not observed | FAIL — not observed | FAIL — not observed |
-| Cancel mid-turn, no orphan | FAIL — not observed | FAIL — not observed | FAIL — not observed | FAIL — not observed |
-| Usage reported | FAIL — not observed | FAIL — not observed | Capability limit: not exposed | Capability limit: not exposed |
-| 48 KiB packet delivered | FAIL — not observed | FAIL — not observed | FAIL — not observed | FAIL — not observed |
-
-## Evidence retained by the automated suite
-
-The Rust suite additionally passed fixture or unit coverage for capability discovery, bounded context packets, handoffs, warm capability caching, model profiles, token-delta stream coalescing, project-scoped settings, recovery state, review mutation protection, worktree preservation, and promotion checks. Those checks are not substitutes for the end-to-end observations above.
+Human-gated v1 can be marked accepted only when `npm run check` passes and every final observation above is recorded as PASS on the target packaged build. Autonomous mode cannot inherit that verdict.

@@ -175,15 +175,9 @@ pub(crate) fn authentication_attention(summary: &str, stderr: &str) -> Option<St
 }
 
 pub(crate) fn connection_test_ready(result: &ProviderRun) -> bool {
-    let normalized = result
-        .summary
-        .replace("```", "")
-        .chars()
-        .filter(|character| character.is_alphanumeric() || character.is_whitespace())
-        .collect::<String>();
     result.success
         && authentication_attention(&result.summary, &result.stderr).is_none()
-        && normalized.to_ascii_lowercase().contains("ready")
+        && result.summary.trim() == "READY"
 }
 
 pub(crate) fn cache_declared_capabilities(

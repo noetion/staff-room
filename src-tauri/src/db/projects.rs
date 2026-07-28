@@ -180,8 +180,32 @@ pub(crate) fn backup_v1_database(connection: &Connection) -> Result<(), String> 
         return Ok(());
     }
     if !backup.exists() {
-        std::fs::copy(&path, &backup)
-            .map_err(|error| format!("Failed to back up v1 database: {error}"))?;
+        let temporary = path.with_extension(format!("v1-{}.backup.tmp", Uuid::new_v4()));
+        connection
+            .backup(rusqlite::DatabaseName::Main, &temporary, None)
+            .map_err(|error| {
+                format!("Failed to create a consistent v1 database backup: {error}")
+            })?;
+        let backup_connection = Connection::open(&temporary)
+            .map_err(|error| format!("Failed to verify the v1 database backup: {error}"))?;
+        let integrity: String = backup_connection
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))
+            .map_err(|error| format!("Failed to verify the v1 database backup: {error}"))?;
+        drop(backup_connection);
+        if integrity != "ok" {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!(
+                "The v1 database backup failed its integrity check: {integrity}"
+            ));
+        }
+        if let Err(error) = std::fs::rename(&temporary, &backup) {
+            let _ = std::fs::remove_file(&temporary);
+            if !backup.exists() {
+                return Err(format!(
+                    "Failed to finalize the v1 database backup: {error}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -264,6 +288,29 @@ pub(crate) fn migrate_v1_to_v2(connection: &Connection) -> rusqlite::Result<()> 
     })();
     let _ = connection.execute_batch("PRAGMA foreign_keys = ON;");
     result
+}
+
+pub(crate) fn project_repository(database: &Database, project_id: &str) -> Result<PathBuf, String> {
+    let stored_path = {
+        let connection = database.0.lock().map_err(|error| error.to_string())?;
+        connection
+            .query_row(
+                "SELECT repository_path FROM projects WHERE id = ?1",
+                [project_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "The selected project is no longer attached.".to_owned())?
+    };
+    let repository = canonical_repository_root(Path::new(&stored_path))?;
+    if project_id_for_root(&repository) != project_id {
+        return Err(
+            "The selected project's repository identity no longer matches its stored record. Reattach the repository before running an agent."
+                .to_owned(),
+        );
+    }
+    Ok(repository)
 }
 
 fn merge_legacy_project(connection: &Connection, project_id: &str) -> rusqlite::Result<()> {

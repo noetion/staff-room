@@ -24,14 +24,30 @@ pub(crate) struct Database(pub(crate) Mutex<Connection>);
 
 #[derive(Default)]
 pub(crate) struct RuntimeState {
-    pub(crate) cancellations: AsyncMutex<HashMap<String, watch::Sender<bool>>>,
+    pub(crate) cancellations: AsyncMutex<HashMap<String, CancellationEntry>>,
     pub(crate) active_ship_runs: AsyncMutex<HashSet<String>>,
     pub(crate) provider_cache: AsyncMutex<HashMap<String, Participant>>,
     pub(crate) quick_edits: AsyncMutex<HashMap<String, QuickEditState>>,
+    pub(crate) issued_operations: AsyncMutex<HashMap<String, IssuedOperation>>,
+    pub(crate) active_promotions: AsyncMutex<HashSet<String>>,
+    pub(crate) voice_capture: AsyncMutex<Option<VoiceCaptureSession>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CancellationEntry {
+    pub(crate) project_id: String,
+    pub(crate) sender: watch::Sender<bool>,
+}
+
+#[derive(Clone)]
+pub(crate) struct IssuedOperation {
+    pub(crate) project_id: String,
+    pub(crate) kind: String,
 }
 
 #[derive(Clone)]
 pub(crate) struct QuickEditState {
+    pub(crate) project_id: String,
     pub(crate) repository: PathBuf,
     pub(crate) worktree: PathBuf,
 }
@@ -125,6 +141,64 @@ pub(crate) struct StopRunResult {
     pub(crate) reason: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AllocateOperationRequest {
+    pub(crate) project_id: String,
+    pub(crate) kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProjectRunRequest {
+    pub(crate) project_id: String,
+    pub(crate) run_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PromotionActionResult {
+    pub(crate) promoted: bool,
+    pub(crate) cleanup_warning: Option<String>,
+}
+
+pub(crate) struct VoiceCaptureSession {
+    pub(crate) stop: std::sync::mpsc::Sender<()>,
+    pub(crate) result: tokio::sync::oneshot::Receiver<Result<CapturedAudio, String>>,
+    pub(crate) started: Instant,
+    pub(crate) finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+pub(crate) struct CapturedAudio {
+    pub(crate) samples: Vec<f32>,
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u16,
+    pub(crate) duration_ms: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VoiceStatus {
+    pub(crate) available: bool,
+    pub(crate) recording: bool,
+    pub(crate) model_path: Option<String>,
+    pub(crate) detail: String,
+    pub(crate) max_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VoiceLevel {
+    pub(crate) level: f32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VoiceTranscription {
+    pub(crate) text: String,
+    pub(crate) duration_ms: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct VerificationResult {
@@ -199,7 +273,6 @@ pub(crate) struct StartRunRequest {
     pub(crate) run_id: String,
     pub(crate) project_id: String,
     pub(crate) objective: String,
-    pub(crate) repository_path: String,
     pub(crate) requested_agent: Option<String>,
 }
 
@@ -232,7 +305,6 @@ pub(crate) struct ChatRequest {
     pub(crate) run_id: String,
     pub(crate) project_id: String,
     pub(crate) message: String,
-    pub(crate) repository_path: String,
     pub(crate) requested_agent: Option<String>,
     pub(crate) active_run_id: Option<String>,
 }
@@ -255,7 +327,6 @@ pub(crate) struct QuickEditRequest {
     pub(crate) edit_id: String,
     pub(crate) project_id: String,
     pub(crate) message: String,
-    pub(crate) repository_path: String,
     pub(crate) requested_agent: Option<String>,
 }
 
@@ -273,6 +344,13 @@ pub(crate) struct QuickEditResult {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct QuickEditActionRequest {
     pub(crate) edit_id: String,
+    pub(crate) project_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct QuickEditActionResult {
+    pub(crate) cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -287,7 +365,6 @@ pub(crate) struct ShipIntent {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConnectionTestRequest {
     pub(crate) project_id: String,
-    pub(crate) repository_path: String,
     pub(crate) participant_kind: String,
     #[serde(default)]
     pub(crate) model: Option<String>,

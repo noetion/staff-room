@@ -14,6 +14,19 @@
 
 .skip-link:focus { transform: translateY(0); }
 
+.boot-screen {
+  display: grid;
+  align-content: center;
+  min-height: 100%;
+  gap: var(--s-3);
+  padding: var(--s-7);
+  color: var(--ink);
+  background: var(--ground);
+}
+.boot-screen h1 { max-width: 20ch; font-size: var(--t-display); line-height: var(--lh-display); letter-spacing: var(--ls-display); }
+.boot-screen > p { max-width: 54ch; color: var(--ink-muted); }
+.boot-screen .error-state { margin-top: var(--s-3); }
+
 .utility-screen {
   grid-row: 1 / -1;
   min-height: 0;

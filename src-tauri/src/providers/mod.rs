@@ -12,6 +12,8 @@ pub const MAX_ARGV_PROMPT_CHARS: usize = 8_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Ask,
+    Probe,
+    Review,
     QuickEdit,
     Ship,
 }
@@ -65,7 +67,7 @@ fn assert_argv_prompt(prompt: &str) -> Result<(), String> {
 }
 
 fn is_read_only(mode: Mode) -> bool {
-    mode == Mode::Ask
+    matches!(mode, Mode::Ask | Mode::Probe | Mode::Review)
 }
 
 pub(crate) use parse::*;

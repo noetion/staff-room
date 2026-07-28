@@ -7,6 +7,7 @@ export type RunState =
   | "verifying"
   | "reviewing"
   | "revising"
+  | "awaiting-promotion"
   | "promoting"
   | "waiting"
   | "complete"

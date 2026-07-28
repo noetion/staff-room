@@ -1,5 +1,50 @@
 use crate::*;
 
+pub(crate) const AUTONOMOUS_ACCEPTANCE_COMPLETE: bool = false;
+
+#[tauri::command]
+pub(crate) async fn allocate_operation_id(
+    database: State<'_, Database>,
+    runtime: State<'_, RuntimeState>,
+    request: AllocateOperationRequest,
+) -> Result<String, String> {
+    if !matches!(request.kind.as_str(), "chat" | "quick-edit" | "ship") {
+        return Err("Unsupported operation kind.".to_owned());
+    }
+    project_repository(database.inner(), &request.project_id)?;
+    let id = Uuid::new_v4().to_string();
+    runtime.issued_operations.lock().await.insert(
+        id.clone(),
+        IssuedOperation {
+            project_id: request.project_id,
+            kind: request.kind,
+        },
+    );
+    Ok(id)
+}
+
+pub(crate) async fn consume_operation_id(
+    runtime: &RuntimeState,
+    id: &str,
+    project_id: &str,
+    kind: &str,
+) -> Result<(), String> {
+    let issued = runtime
+        .issued_operations
+        .lock()
+        .await
+        .remove(id)
+        .ok_or_else(|| {
+            "This operation ID was not issued by Agent Room or has already been used.".to_owned()
+        })?;
+    if issued.project_id != project_id || issued.kind != kind {
+        return Err(
+            "This operation ID does not belong to the selected project and action.".to_owned(),
+        );
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn get_environment(
     database: State<'_, Database>,
@@ -126,7 +171,8 @@ pub(crate) fn project_settings(
             [project_id],
             |row| {
                 Ok(ProjectSettings {
-                    autonomous_ship_enabled: row.get::<_, i64>(0)? != 0,
+                    autonomous_ship_enabled: AUTONOMOUS_ACCEPTANCE_COMPLETE
+                        && row.get::<_, i64>(0)? != 0,
                 })
             },
         )
@@ -140,6 +186,12 @@ pub(crate) fn save_project_settings(
     database: State<'_, Database>,
     settings: ProjectSettingsInput,
 ) -> Result<(), String> {
+    if settings.autonomous_ship_enabled && !AUTONOMOUS_ACCEPTANCE_COMPLETE {
+        return Err(
+            "Autonomous Ship remains locked until the autonomous acceptance contract passes. Human-gated Ship is available now."
+                .to_owned(),
+        );
+    }
     let connection = database.0.lock().map_err(|error| error.to_string())?;
     connection
         .execute(

@@ -25,7 +25,6 @@ export function MessageBubble({
       data-pos={pos}
       data-fresh={fresh || undefined}
       data-streaming={streaming || undefined}
-      aria-live={streaming ? "polite" : undefined}
     >
       {children}
     </div>

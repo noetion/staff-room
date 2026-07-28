@@ -93,12 +93,14 @@ function checkCss(rel, text) {
   while ((d = decl.exec(clean))) {
     const prop = d[1].toLowerCase();
     const value = d[2];
+    if (prop === "font") {
+      add(rel, lineOf(clean, d.index), "font shorthand", d[0]);
+      continue;
+    }
     if (tokenised(value)) continue;
     const line = lineOf(clean, d.index);
 
     if (prop === "font-family") add(rel, line, "raw font stack", d[0]);
-    if (prop === "font" && /["']|\b(serif|sans-serif|monospace)\b/.test(value))
-      add(rel, line, "raw font stack", d[0]);
     if (prop === "border-radius" && RAW_RADIUS.test(value))
       add(rel, line, "raw radius", d[0]);
     if ((prop === "transition-duration" || prop === "animation-duration") && RAW_TIME.test(value))

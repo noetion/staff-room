@@ -364,6 +364,11 @@ pub(crate) fn persist_chat_receipt(
 }
 
 pub(crate) fn run_artifact_directory(app: &AppHandle, run_id: &str) -> Result<PathBuf, String> {
+    let operation_id =
+        Uuid::parse_str(run_id).map_err(|_| "Operation IDs must be valid UUIDs.".to_owned())?;
+    if operation_id.hyphenated().to_string() != run_id.to_ascii_lowercase() {
+        return Err("Operation IDs must use canonical hyphenated UUID form.".to_owned());
+    }
     let path = app
         .path()
         .app_local_data_dir()

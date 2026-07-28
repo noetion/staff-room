@@ -18,6 +18,7 @@ export function RunProgressCard({
   activity,
   limits,
   onStop,
+  onPromote,
   onResume,
   onAbandon,
 }: {
@@ -25,10 +26,12 @@ export function RunProgressCard({
   activity: LiveActivityItem[];
   limits: string;
   onStop: () => void;
+  onPromote: () => void;
   onResume: () => void;
   onAbandon: () => void;
 }) {
   const running = activeStates.includes(run.state);
+  const awaitingPromotion = run.state === "awaiting-promotion";
   const recoverable =
     Boolean(run.worktreePath) &&
     ["waiting", "failed", "stopped"].includes(run.state) &&
@@ -41,8 +44,10 @@ export function RunProgressCard({
       data-run-state={run.state}
       id="run-progress-card"
       aria-label="Current Ship run"
-      aria-live="polite"
     >
+      <span className="visually-hidden" role="status" aria-live="polite">
+        Ship run {run.state.replace("-", " ")}
+      </span>
       <div className="run-progress-card__header">
         <Chip className="run-progress-card__state">
           <span className="run-state-dot" aria-hidden="true" />
@@ -75,6 +80,17 @@ export function RunProgressCard({
               <CircleStop aria-hidden="true" />
               Stop
             </button>
+          ) : awaitingPromotion ? (
+            <>
+              <button type="button" className="run-progress-card__action" onClick={onPromote}>
+                <Check aria-hidden="true" />
+                Promote
+              </button>
+              <button type="button" className="run-progress-card__secondary-action" onClick={onAbandon}>
+                <X aria-hidden="true" />
+                Abandon
+              </button>
+            </>
           ) : recoverable ? (
             <>
               <button type="button" className="run-progress-card__action" onClick={onResume}>

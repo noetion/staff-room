@@ -6,7 +6,7 @@ export function LiveActivityStrip({ activity }: { activity: LiveActivityItem[] }
       className="live-activity-strip"
       role="log"
       aria-label="Live provider activity"
-      aria-live="polite"
+      aria-live="off"
       aria-relevant="additions text"
     >
       <div className="live-activity-rows">
