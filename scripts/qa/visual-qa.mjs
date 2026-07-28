@@ -63,10 +63,16 @@ async function launch() {
     process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ||
     process.env.CHROME_PATH ||
     undefined;
-  return chromium.launch({
+  const options = {
     executablePath,
     args: ["--force-color-profile=srgb", "--disable-lcd-text"],
-  });
+  };
+  try {
+    return await chromium.launch(options);
+  } catch (error) {
+    if (executablePath) throw error;
+    return chromium.launch({ ...options, channel: process.env.PLAYWRIGHT_BROWSER_CHANNEL || "chrome" });
+  }
 }
 
 async function newPage(browser, { width, theme, reducedMotion, forcedColors, reducedTransparency }) {
