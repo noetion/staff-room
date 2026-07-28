@@ -1,14 +1,11 @@
 import {
-  Bot,
   Braces,
   Check,
-  ChevronRight,
   CircleAlert,
   GitBranch,
   HardDrive,
   History,
   ShieldCheck,
-  Sparkles,
   X,
 } from "lucide-react";
 import {
@@ -44,7 +41,6 @@ import {
   initials,
   latencyLabel,
   millisecondsLabel,
-  relativeTime,
   usageLabel,
 } from "./lib/format";
 import {
@@ -86,6 +82,7 @@ import { StatusPill } from "./components/chrome/StatusPill";
 import { Conversation } from "./components/conversation";
 import { RunProgressCard } from "./components/conversation/RunProgressCard";
 import { Monogram } from "./components/primitives";
+import { ActivityView, AttachProjectView, EmptyState, RoomHeader } from "./components/views";
 import { SettingsView } from "./components/settings";
 export { ProviderProfileCard } from "./components/settings";
 import { Composer } from "./components/composer";
@@ -154,101 +151,6 @@ function TimelineMessageContent({ message }: { message: RoomMessage }) {
       )}
       {(message.changedFiles?.length || message.verification?.length) ? <EvidenceCard changedFiles={message.changedFiles ?? []} label="Run evidence" verification={message.verification ?? []} /> : null}
     </>
-  );
-}
-
-function TimelineEntry({ message }: { message: RoomMessage }) {
-  const isHuman = message.kind === "human";
-  const senderName =
-    message.sender === "human"
-      ? "You"
-      : message.sender === "system"
-        ? "Agent Room"
-        : agentNames[message.sender];
-
-  return (
-    <article className={`timeline-entry entry-${message.kind}`}>
-      <div className="entry-rail">
-        <span className="entry-dot">
-          {isHuman ? (
-            <Sparkles size={13} />
-          ) : message.kind === "evidence" ? (
-            <ShieldCheck size={13} />
-          ) : (
-            <Bot size={13} />
-          )}
-        </span>
-        <span className="entry-line" />
-      </div>
-      <div className="entry-content">
-        <header>
-          <strong>{senderName}</strong>
-          <span>{relativeTime(message.createdAt)}</span>
-          <span className="entry-kind">{message.kind}</span>
-        </header>
-        <TimelineMessageContent message={message} />
-      </div>
-    </article>
-  );
-}
-
-function AttachProjectView({
-  projects,
-  native,
-  onAttach,
-  onSelect,
-}: {
-  projects: Project[];
-  native: boolean;
-  onAttach: () => void;
-  onSelect: (id: string) => void;
-}) {
-  return (
-    <section className="utility-screen attach-project" aria-labelledby="attach-project-title">
-      <header className="utility-header">
-        <span className="eyebrow">Local workspace</span>
-        <h1 id="attach-project-title">Choose a repository</h1>
-        <p>Attach a Git repository to create an independently scoped Agent Room.</p>
-        <button type="button" className="primary-button" onClick={onAttach} disabled={!native}>
-          Choose a repository
-        </button>
-        {!native && <p className="empty-state">Repository attachment is available in the Tauri desktop app.</p>}
-      </header>
-      {projects.length > 0 && (
-        <div className="recent-projects">
-          <span className="eyebrow">Recent projects</span>
-          {projects.map((recentProject) => (
-            <button key={recentProject.id} type="button" className="project-switch" onClick={() => onSelect(recentProject.id)}>
-              <span className="project-monogram small">{recentProject.name.slice(0, 2).toUpperCase()}</span>
-              <span>
-                <strong>{recentProject.name}</strong>
-                <small>{recentProject.repositoryPath}</small>
-              </span>
-              <ChevronRight size={15} />
-            </button>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function ActivityView({ messages, query }: { messages: RoomMessage[]; query: string }) {
-  return (
-    <section className="utility-screen" aria-labelledby="activity-title">
-      <header className="utility-header">
-        <span className="eyebrow">Room record</span>
-        <h1 id="activity-title">Activity</h1>
-        <p>{query ? `Results for “${query}”` : "A durable timeline of objectives, evidence, and recovery states."}</p>
-      </header>
-      <div className="utility-timeline" role="feed" aria-label="Room activity">
-        {messages.length ? (
-          messages.map((message) => <TimelineEntry key={message.id} message={message} />)
-        ) : (
-          <p className="empty-state">No room activity matches this search.</p>
-        )}
-      </div>
-    </section>
   );
 }
 
@@ -480,8 +382,8 @@ function LegacySettingsView({
           {refreshing ? "Checking providers" : "Recheck providers"}
         </button>
       </header>
-      {!native && <p className="empty-state">Provider checks are available in the Tauri desktop app.</p>}
-      {error && <p className="utility-error" role="alert">{error}</p>}
+      {!native && <EmptyState title="Provider checks are unavailable in browser preview." />}
+      {error && <ErrorState cause={error} action={<button type="button" className="secondary-button" onClick={onRefresh}>Recheck providers</button>} />}
       <div className="autonomy-setting">
         <div>
           <strong>Hands-free autonomous Ship</strong>
@@ -803,7 +705,7 @@ function Inspector({
                 </table>
               </div>
             ) : (
-              <p className="empty-state">Receipts appear after the first provider phase. They report run telemetry, not provider account quotas.</p>
+              <EmptyState title="No execution receipts yet." body="Receipts appear after the first provider phase. They report run telemetry, not provider account quotas." />
             )}
           </section>
           <VerificationList verification={verification} />
@@ -1767,7 +1669,7 @@ export function App() {
             onSelect={handleSelectProject}
           />
         ) : activeView === "activity" ? (
-          <ActivityView messages={visibleMessages} query={searchQuery} />
+          <ActivityView messages={visibleMessages} query={searchQuery} renderMessage={(message) => <TimelineMessageContent message={message} />} />
         ) : activeView === "settings" ? (
           <SettingsView
             environment={environment}
@@ -1793,23 +1695,7 @@ export function App() {
           />
         ) : (
           <>
-        <div className="room-header">
-          <div>
-            <span className="eyebrow">Autonomous project room</span>
-            <h1>{project.name}</h1>
-            <p>{project.goal}</p>
-          </div>
-          <div className="room-meta">
-            <span>
-              <GitBranch size={14} />
-              {project.branch}
-            </span>
-            <span>
-              <Bot size={14} />
-              {installedCount} of 4 ready
-            </span>
-          </div>
-        </div>
+        <RoomHeader project={project} installedCount={installedCount} />
 
         <Conversation
           ref={timelineRef}
@@ -1830,6 +1716,18 @@ export function App() {
           renderMessage={(message) => <TimelineMessageContent message={message} />}
           onResume={handleResume}
         >
+          {!messages.length && !searchQuery && (
+            <EmptyState
+              wordmark
+              title="Nothing has happened in this room yet."
+              suggestions={[
+                { label: "Plan the next task", value: "Plan the next task for this repository." },
+                { label: "Review the codebase", value: "Review the codebase and identify the highest-value next step." },
+                { label: "Explain this project", value: "Explain this project and its current state." },
+              ]}
+              onSuggestion={setObjective}
+            />
+          )}
           {attention && (
             <AttentionCard title={attention.title} detail={attention.detail} onDismiss={() => setAttention(undefined)} />
           )}
