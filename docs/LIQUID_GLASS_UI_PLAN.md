@@ -31,9 +31,9 @@ The custom frame follows [Tauri's custom title bar guidance](https://v2.tauri.ap
 ## Acceptance criteria
 
 1. The default Windows title bar is gone and custom minimize, maximize, close, drag, and double-click maximize behaviour work in Tauri.
-2. The resting interface is a light lavender-tinted neutral ground, with an explicit dark variant that follows the OS when no theme is selected, rather than a predominantly blue surface.
-3. Glass appears only on the title bar, navigation, contextual inspector, floating run status, and composer; bounded refraction is limited to the title bar and composer when its capability checks pass.
-4. The main room gives materially more width and height to a grouped, directional conversation and its input, while evidence and run progress remain readable in that thread.
+2. The resting interface is a light lavender-tinted neutral ground with a visible, subordinate state-responsive aurora; an explicit dark variant follows the OS when no theme is selected.
+3. Glass appears only on the title bar, navigation, contextual inspector, floating run status, and composer. Refraction is a bounded optional enhancement on the title bar and composer, with the regular glass treatment as its fallback.
+4. The main room gives materially more width and height to a grouped, directional machine conversation and its input, while evidence, receipts, and run progress remain readable in that same thread.
 5. Search, navigation, inspector, Chat/Ship switching, participant targeting, Send/Stop, recovery, and settings remain operable.
 6. The app has no horizontal overflow at 1024, 1280, 1440, and 1800 pixel desktop widths.
 7. Keyboard focus, contrast, reduced motion, forced colours, reduced transparency, and no-backdrop-filter fallbacks remain usable.
