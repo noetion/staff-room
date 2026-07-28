@@ -31,8 +31,12 @@ body {
 
 :focus-visible {
   border-radius: inherit;
-  outline: 2px solid var(--state-working);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  :focus-visible { outline-color: Highlight; }
 }
 
 * {

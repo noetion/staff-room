@@ -65,7 +65,7 @@
 .chrome-search-button kbd { flex: none; padding: var(--s-1) var(--s-2); border: 1px solid var(--hairline); border-radius: var(--r-capsule); color: var(--ink-faint); background: var(--surface-sunken); font-size: var(--t-micro); }
 .chrome-search-field { min-width: calc(var(--s-8) * 4); }
 .chrome-search.is-open .chrome-search-field { animation: chrome-search-expand var(--dur-2) var(--ease-out); }
-.chrome-search-field input { min-width: 0; flex: 1; border: 0; outline: 0; color: var(--ink); background: transparent; }
+.chrome-search-field input { min-width: 0; flex: 1; border: 0; color: var(--ink); background: transparent; }
 .chrome-search-field input::placeholder { color: var(--ink-faint); }
 .chrome-search-close { display: grid; place-items: center; flex: none; width: calc(var(--s-6) - var(--s-1)); height: calc(var(--s-6) - var(--s-1)); border: 0; border-radius: var(--r-capsule); color: var(--ink-muted); background: transparent; cursor: pointer; }
 

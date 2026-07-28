@@ -61,7 +61,7 @@ export function TitleBar({
         {status}
       </div>
       <ThemeToggle />
-      <button ref={contextToggleRef} type="button" className="chrome-inspector-toggle" aria-label={inspectorOpen ? "Close context" : "Open context"} aria-expanded={inspectorOpen} aria-controls="room-context" onClick={onInspectorToggle}>
+      <button ref={contextToggleRef} type="button" className="chrome-inspector-toggle" aria-label={inspectorOpen ? "Close context" : "Open context"} aria-expanded={inspectorOpen} aria-controls={inspectorOpen ? "room-context" : undefined} onClick={onInspectorToggle}>
         <PanelRight size={18} />
       </button>
       <WindowControls native={native} />

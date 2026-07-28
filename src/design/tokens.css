@@ -7,17 +7,18 @@
   --surface-sunken: #F1EFF4;
   --ink: #0C0C0E;
   --ink-muted: #5E5C66;
-  --ink-faint: #95929E;
-  --hairline: rgb(12 12 14 / 0.08);
-  --hairline-strong: rgb(12 12 14 / 0.16);
+  --ink-faint: #696671;
+  --hairline: rgb(12 12 14 / 0.46);
+  --hairline-strong: rgb(12 12 14 / 0.62);
   --iris-lavender: #C7BDF2;
   --iris-periwinkle: #A8C3F7;
   --iris-mint: #A6EBD1;
   --iris-blush: #F4C9DC;
-  --state-working: #4A6CF5;
-  --state-good: #0E8F6B;
-  --state-warn: #A86A0B;
+  --state-working: #3E5BC4;
+  --state-good: #087455;
+  --state-warn: #875400;
   --state-bad: #C0392F;
+  --focus-ring: #3E5BC4;
   --action: var(--ink);
   --action-ink: #FBFAFC;
 
@@ -94,9 +95,9 @@
   --surface-sunken: #121214;
   --ink: #F4F2F7;
   --ink-muted: #A5A2AE;
-  --ink-faint: #75727E;
-  --hairline: rgb(255 255 255 / 0.10);
-  --hairline-strong: rgb(255 255 255 / 0.18);
+  --ink-faint: #9A97A3;
+  --hairline: rgb(255 255 255 / 0.34);
+  --hairline-strong: rgb(255 255 255 / 0.48);
   --iris-lavender: #5B4E8C;
   --iris-periwinkle: #3F5C93;
   --iris-mint: #2F7360;
@@ -105,6 +106,7 @@
   --state-good: #3FCFA2;
   --state-warn: #E0AE5C;
   --state-bad: #F08079;
+  --focus-ring: #2C61E5;
   --action: #F4F2F7;
   --action-ink: #0C0C0E;
   --e-rest: 0 1px 2px rgb(0 0 0 / 0.10);
@@ -127,9 +129,9 @@
     --surface-sunken: #121214;
     --ink: #F4F2F7;
     --ink-muted: #A5A2AE;
-    --ink-faint: #75727E;
-    --hairline: rgb(255 255 255 / 0.10);
-    --hairline-strong: rgb(255 255 255 / 0.18);
+    --ink-faint: #9A97A3;
+    --hairline: rgb(255 255 255 / 0.34);
+    --hairline-strong: rgb(255 255 255 / 0.48);
     --iris-lavender: #5B4E8C;
     --iris-periwinkle: #3F5C93;
     --iris-mint: #2F7360;
@@ -138,6 +140,7 @@
     --state-good: #3FCFA2;
     --state-warn: #E0AE5C;
     --state-bad: #F08079;
+    --focus-ring: #2C61E5;
     --action: #F4F2F7;
     --action-ink: #0C0C0E;
     --e-rest: 0 1px 2px rgb(0 0 0 / 0.10);
