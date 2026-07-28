@@ -1,12 +1,10 @@
 import {
-  ArrowRight,
   Bot,
   Braces,
   Check,
   ChevronRight,
   CircleAlert,
   CircleStop,
-  Gauge,
   GitBranch,
   HardDrive,
   History,
@@ -14,7 +12,6 @@ import {
   RefreshCw,
   ShieldCheck,
   Sparkles,
-  Workflow,
   X,
 } from "lucide-react";
 import {
@@ -92,7 +89,9 @@ import {
   type RunEvent,
 } from "./native";
 import { NavRail, TitleBar } from "./components/chrome";
+import { StatusPill } from "./components/chrome/StatusPill";
 import { Conversation } from "./components/conversation";
+import { RunProgressCard } from "./components/conversation/RunProgressCard";
 import { Monogram } from "./components/primitives";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
@@ -145,145 +144,6 @@ function ParticipantMark({ participant }: { participant: Participant }) {
   );
 }
 
-function RunLens({
-  run,
-  participants,
-  activity,
-  streamTitle,
-  contextBudgetBytes,
-  onStop,
-  onResume,
-  onAbandon,
-}: {
-  run: Run;
-  participants: Participant[];
-  activity: LiveActivityItem[];
-  streamTitle: string;
-  contextBudgetBytes: number;
-  onStop: () => void;
-  onResume: () => void;
-  onAbandon: () => void;
-}) {
-  const active = run.currentOwner
-    ? participants.find((participant) => participant.kind === run.currentOwner)
-    : undefined;
-  const running = activeStates.includes(run.state);
-  const autonomy = active?.capabilities.autonomyMode;
-  const recoverable =
-    Boolean(run.worktreePath) &&
-    ["waiting", "failed", "stopped"].includes(run.state) &&
-    (run.recoveryCount ?? 0) < 2;
-
-  return (
-    <article
-      className={`timeline-entry entry-run-progress state-${run.state}`}
-      aria-label="Current Ship run"
-      aria-live="polite"
-    >
-      <div className="entry-rail">
-        <span className="entry-dot progress-dot">
-          <Workflow size={13} />
-        </span>
-        <span className="entry-line" />
-      </div>
-      <section className="entry-content run-progress">
-        <header>
-          <span className="state-pulse" />
-          <strong>Agent Room / Ship</strong>
-          <span>{run.state.replace("-", " ")}</span>
-        </header>
-        <div className="progress-summary">
-          <strong>
-            {run.state === "waiting"
-              ? "Your attention is needed"
-              : active
-                ? `${active.name} is handling ${run.route.find((step) => step.state === "current")?.label ?? "this phase"}`
-                : run.state === "complete"
-                  ? "Verified workflow complete"
-                  : "Ship workflow"}
-          </strong>
-          <p>{run.stopReason ?? run.objective}</p>
-        </div>
-
-        <div className="progress-route" aria-label="Ship stages">
-          {run.route.map((step, index) => (
-            <div className={`progress-step ${step.state}`} key={`${step.label}-${index}`}>
-              <span>{step.state === "complete" ? <Check size={11} /> : step.agent ? initials(step.agent) : index + 1}</span>
-              <small>{step.label}</small>
-              {index < run.route.length - 1 && <ArrowRight size={12} aria-hidden="true" />}
-            </div>
-          ))}
-        </div>
-
-        {activity.length > 0 && (
-          <div className="progress-activity" role="log" aria-live="polite" aria-relevant="additions text">
-            <div className="progress-live-label">
-              <span className="stream-pulse" />
-              <strong>{streamTitle}</strong>
-              <span>live</span>
-            </div>
-            <div className="activity-list">
-              {activity.slice(-1).map((item, index) => (
-                <div className="activity-item" key={`${item.title}-${index}`}>
-                  <strong>{item.title}</strong>
-                  <p>{item.detail}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div className="progress-footer">
-          <div className="progress-meta">
-            <span>
-              <ShieldCheck size={12} />
-              {run.degradedReview ? "Same-provider review" : run.reviewer ? "Independent review" : "Reviewer selected at run time"}
-            </span>
-            <span>
-              <Gauge size={12} />
-              {contextLabel(run.contextBytes, contextBudgetBytes)}
-            </span>
-            <span>
-              <Workflow size={12} />
-              {autonomy ? autonomyLabel(autonomy) : "Bounded autonomous route"}
-            </span>
-            <span>{elapsedTime(run.startedAt)}</span>
-            <span>{run.revisionCount}/1 revise · {run.reviewCount}/2 review · {run.recoveryCount ?? 0}/2 recover</span>
-          </div>
-          <div className="progress-action">
-            {running ? (
-              <button type="button" className="danger-button" onClick={onStop}>
-                <CircleStop size={15} />
-                Stop
-              </button>
-            ) : recoverable ? (
-              <>
-              <button type="button" className="send-button recovery-button" onClick={onResume}>
-                <History size={14} />
-                Resume recovery
-              </button>
-              <button type="button" className="danger-button" onClick={onAbandon}>
-                <X size={15} />
-                Abandon
-              </button>
-              </>
-            ) : Boolean(run.worktreePath) && !running ? (
-              <button type="button" className="danger-button" onClick={onAbandon}>
-                <X size={15} />
-                Abandon
-              </button>
-            ) : (
-              <span className="progress-limits">
-                {run.revisionCount}/1 revisions · {run.reviewCount}/2 reviews · {run.recoveryCount ?? 0}/2 recoveries
-              </span>
-            )}
-          </div>
-        </div>
-      </section>
-    </article>
-  );
-}
-
 function TimelineMessageContent({ message }: { message: RoomMessage }) {
   const reason = message.reason;
 
@@ -331,48 +191,6 @@ function TimelineEntry({ message }: { message: RoomMessage }) {
           <span className="entry-kind">{message.kind}</span>
         </header>
         <TimelineMessageContent message={message} />
-      </div>
-    </article>
-  );
-}
-
-function LiveActivity({
-  title,
-  activity,
-}: {
-  title: string;
-  activity: LiveActivityItem[];
-}) {
-  return (
-    <article
-      className="timeline-entry entry-activity"
-      role="log"
-      aria-live="polite"
-      aria-relevant="additions text"
-    >
-      <div className="entry-rail">
-        <span className="entry-dot activity-dot">
-          <Bot size={13} />
-        </span>
-        <span className="entry-line" />
-      </div>
-      <div className="entry-content activity-content">
-        <header>
-          <span className="stream-pulse" />
-          <strong>{title}</strong>
-          <span>live</span>
-        </header>
-        <div className="activity-list">
-          {activity.slice(-6).map((item, index) => (
-            <div className="activity-item" key={`${item.title}-${index}`}>
-              <strong>{item.title}</strong>
-              <p>{item.detail}</p>
-            </div>
-          ))}
-        </div>
-        <small className="activity-note">
-          Provider-reported reasoning and tool activity only. Full output remains in the local run log.
-        </small>
       </div>
     </article>
   );
@@ -1896,7 +1714,7 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-run-state={run.state}>
       <a className="skip-link" href="#room-main">
         Skip to room
       </a>
@@ -1938,6 +1756,13 @@ export function App() {
       />
 
       <main className="room" id="room-main" tabIndex={-1}>
+        {(activeStates.includes(run.state) || ["waiting", "failed", "stopped"].includes(run.state)) && (
+          <StatusPill
+            state={run.state}
+            stage={run.route.find((step) => step.state === "current")?.label ?? "Ship run"}
+            elapsed={elapsedTime(run.startedAt)}
+          />
+        )}
         {!environment.attached ? (
           <AttachProjectView
             projects={projects}
@@ -2013,19 +1838,14 @@ export function App() {
             <AttentionCard title={attention.title} detail={attention.detail} onDismiss={() => setAttention(undefined)} />
           )}
           {run.state !== "ready" && !searchQuery && (
-            <RunLens
+            <RunProgressCard
               run={run}
-              participants={environment.participants}
               activity={activity}
-              streamTitle={streamTitle}
-              contextBudgetBytes={environment.contextBudgetBytes}
+              limits={`${run.revisionCount}/1 revise · ${run.reviewCount}/2 review · ${run.recoveryCount ?? 0}/2 recover`}
               onStop={handleStop}
               onResume={handleResume}
               onAbandon={handleAbandon}
             />
-          )}
-          {run.state === "ready" && activity.length > 0 && (
-            <LiveActivity title={streamTitle} activity={activity} />
           )}
         </Conversation>
 

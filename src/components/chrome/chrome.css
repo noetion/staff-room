@@ -115,3 +115,10 @@
   .chrome-status { display: none; }
   .chrome-titlebar { gap: var(--s-1); }
 }
+.room { position: relative; }
+.status-pill { position: absolute; z-index: 3; top: var(--s-3); left: 50%; display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--s-6); padding-inline: var(--s-3); border: 1px solid var(--hairline); border-radius: var(--r-capsule); color: var(--ink); background: var(--surface-raised); box-shadow: var(--e-float); transform: translate(-50%, calc(var(--s-2) * -1)); animation: status-pill-enter var(--dur-2) var(--ease-spring) both; }
+.status-pill__stage { color: var(--ink); font-size: var(--t-compact); white-space: nowrap; }
+.status-pill__elapsed { color: var(--ink-faint); white-space: nowrap; }
+.status-pill[data-run-state="waiting"] .status-pill__dot { background: var(--state-warn); }
+.status-pill[data-run-state="failed"] .status-pill__dot, .status-pill[data-run-state="stopped"] .status-pill__dot { background: var(--state-bad); }
+@keyframes status-pill-enter { from { opacity: 0; transform: translate(-50%, calc(var(--s-4) * -1)); } to { opacity: 1; transform: translate(-50%, calc(var(--s-2) * -1)); } }
