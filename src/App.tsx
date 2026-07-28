@@ -92,6 +92,7 @@ import { Conversation } from "./components/conversation";
 import { RunProgressCard } from "./components/conversation/RunProgressCard";
 import { Monogram } from "./components/primitives";
 import { Composer } from "./components/composer";
+import { Inspector as InspectorSheet } from "./components/inspector";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 type PrimaryView = "rooms" | "activity" | "settings";
@@ -1920,40 +1921,7 @@ export function App() {
         )}
       </main>
 
-      {inspectorOpen && (
-        <>
-          <div
-            className="inspector-scrim"
-            aria-hidden="true"
-            onClick={() => {
-              setInspectorOpen(false);
-              requestAnimationFrame(() => contextToggleRef.current?.focus());
-            }}
-          />
-          <div className="inspector-wrap open" id="room-context">
-            <button
-              type="button"
-              className="inspector-close"
-              aria-label="Close context"
-              onClick={() => {
-                setInspectorOpen(false);
-                requestAnimationFrame(() => contextToggleRef.current?.focus());
-              }}
-            >
-              <X size={18} />
-            </button>
-            <Inspector
-              project={project}
-              environment={environment}
-              activeTab={activeTab}
-              setActiveTab={setActiveTab}
-              run={run}
-              messages={messages}
-              receipts={receipts}
-            />
-          </div>
-        </>
-      )}
+      {inspectorOpen && <InspectorSheet project={project} environment={environment} activeTab={activeTab} setActiveTab={setActiveTab} run={run} messages={messages} receipts={receipts} onClose={() => { setInspectorOpen(false); requestAnimationFrame(() => contextToggleRef.current?.focus()); }} />}
     </div>
   );
 }
