@@ -78,15 +78,24 @@ async function newPage(browser, { width, theme, reducedMotion, forcedColors, red
     deviceScaleFactor: 1,
   });
   const page = await context.newPage();
+  let transparencyEmulated = true;
   if (reducedTransparency) {
-    await page.emulateMedia({ media: "screen" });
-    // Playwright has no first-class reduced-transparency emulation; inject the
-    // query result by forcing the fallback class the app also uses.
-    await page.addInitScript(() => {
-      document.documentElement.setAttribute("data-reduced-transparency", "on");
-    });
+    // Playwright's emulateMedia() has no prefers-reduced-transparency option,
+    // but Chromium implements the feature - reach it over CDP rather than
+    // inventing an attribute and asserting the app honours it.
+    try {
+      const client = await context.newCDPSession(page);
+      await client.send("Emulation.setEmulatedMedia", {
+        features: [
+          { name: "prefers-reduced-transparency", value: "reduce" },
+          { name: "prefers-color-scheme", value: theme },
+        ],
+      });
+    } catch {
+      transparencyEmulated = false;
+    }
   }
-  return { context, page };
+  return { context, page, transparencyEmulated };
 }
 
 async function gotoView(page, base, view, theme) {
@@ -229,7 +238,20 @@ async function checkReducedMotion(page, label) {
   else ok(`reduced-motion ${label}`);
 }
 
-async function checkGlassFallback(page, label) {
+async function checkGlassFallback(page, label, emulated = true) {
+  if (!emulated) {
+    warn("glass-fallback", `${label}: browser would not emulate prefers-reduced-transparency - not checked`);
+    return;
+  }
+  // Sanity-check the emulation itself before judging the app: a query that did
+  // not take effect would otherwise look like an application defect.
+  const queryLive = await page.evaluate(
+    () => window.matchMedia("(prefers-reduced-transparency: reduce)").matches,
+  );
+  if (!queryLive) {
+    warn("glass-fallback", `${label}: prefers-reduced-transparency did not take effect - not checked`);
+    return;
+  }
   const leaking = await page.evaluate(() => {
     const out = [];
     for (const el of document.querySelectorAll(".glass, .glass--clear")) {
@@ -386,9 +408,9 @@ async function main() {
 
     // 5. reduced transparency
     {
-      const { context, page } = await newPage(browser, { width: 1280, theme: "light", reducedTransparency: true });
+      const { context, page, transparencyEmulated } = await newPage(browser, { width: 1280, theme: "light", reducedTransparency: true });
       await gotoView(page, base, "rooms", "light");
-      await checkGlassFallback(page, "rooms reduced-transparency");
+      await checkGlassFallback(page, "rooms reduced-transparency", transparencyEmulated);
       await page.screenshot({ path: join(outDir, "rooms-1280-reduced-transparency.png") });
       await context.close();
     }

@@ -1,4 +1,20 @@
 .markdown-body { display: grid; gap: var(--s-3); min-width: 0; }
+.message-group { display: grid; gap: var(--s-1); width: min(760px, 100%); margin: 0 auto var(--s-4); }
+.message-row { display: flex; min-width: 0; align-items: end; gap: var(--s-2); }
+.message-group[data-side="out"] .message-row { justify-content: flex-end; }
+.message-avatar-slot { display: block; flex: 0 0 var(--s-7); }
+.message-stack { display: grid; min-width: 0; max-width: min(76%, 620px); gap: var(--s-1); }
+.message-group[data-side="out"] .message-stack { justify-items: end; }
+.message-sender, .message-meta { color: var(--ink-faint); font: var(--t-micro); }
+.message-bubble { min-width: 0; padding: var(--s-3) var(--s-4); border-radius: var(--r-lg); color: var(--ink); background: var(--surface-raised); box-shadow: var(--e-rest); overflow-wrap: anywhere; }
+.message-bubble[data-side="out"] { background: var(--action); color: var(--action-ink); }
+.message-bubble[data-side="in"][data-pos="first"], .message-bubble[data-side="in"][data-pos="only"] { border-bottom-right-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); }
+.message-bubble[data-side="in"][data-pos="middle"] { border-top-right-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); border-bottom-right-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); }
+.message-bubble[data-side="in"][data-pos="last"] { border-top-right-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); }
+.message-bubble[data-side="out"][data-pos="first"], .message-bubble[data-side="out"][data-pos="only"] { border-bottom-left-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); }
+.message-bubble[data-side="out"][data-pos="middle"] { border-top-left-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); border-bottom-left-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); }
+.message-bubble[data-side="out"][data-pos="last"] { border-top-left-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); }
+.message-meta { display: flex; align-items: center; gap: var(--s-2); justify-content: flex-end; width: min(760px, 100%); margin-inline: auto; }
 .markdown-body p { margin: 0; overflow-wrap: anywhere; color: var(--ink); font: var(--t-body); white-space: pre-wrap; }
 .markdown-body p + p { margin-top: var(--s-3); }
 .markdown-body strong { font-weight: 600; }
@@ -41,6 +57,7 @@
 .attention-card small { color: var(--ink-muted); font: var(--t-compact); }
 .attention-card button { padding: var(--s-1); border: 0; border-radius: var(--r-capsule); color: var(--ink-muted); background: transparent; cursor: pointer; font: var(--t-heading); }
 .reason-line { display: flex; align-items: flex-start; gap: var(--s-2); margin-top: var(--s-3); padding-top: var(--s-2); border-top: 1px solid var(--hairline); color: var(--ink-muted); font: var(--t-compact); }
+.message-bubble[data-side="out"] .reason-line { color: var(--action-ink); }
 .reason-line svg { flex: 0 0 auto; margin-top: var(--s-1); color: var(--ink-faint); }
 .reason-line span { overflow-wrap: anywhere; white-space: pre-wrap; }
 .capability-chips { display: flex; flex-wrap: wrap; gap: var(--s-1); margin: var(--s-2) 0; }

@@ -49,7 +49,7 @@ body::before {
     linear-gradient(145deg, #151513, #111210 52%, #161512);
 }
 
-.eyebrow { color: var(--muted); font-size: 10px; font-weight: 600; }
+.eyebrow { color: var(--ink-muted); font-size: 10px; font-weight: 600; }
 
 .room { grid-row: 2; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: rgba(16,16,14,.16); }
 .spinning { animation: spin .8s linear infinite; }
@@ -135,7 +135,7 @@ body::before {
 .participant-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; }
 .participant-copy strong { font-size: 12px; }
 .participant-copy small { overflow: hidden; color: var(--muted); font: 9px "IBM Plex Mono"; text-overflow: ellipsis; white-space: nowrap; }
-.status-chip { padding: 3px 6px; border-radius: 5px; color: var(--muted); background: rgba(255,255,255,.04); font-size: 9px; }
+.status-chip { padding: 3px 6px; border-radius: 5px; color: var(--ink-muted); background: rgba(255,255,255,.04); font-size: 9px; }
 .status-chip.available { color: #79ddbf; background: rgba(66,198,162,.08); }
 .status-chip.mode-isolated-auto, .status-chip.mode-reviewed-auto { color: #79ddbf; background: rgba(66,198,162,.08); }
 .status-chip.mode-unattended-bypass { color: #f0bd6c; background: rgba(230,162,60,.09); }

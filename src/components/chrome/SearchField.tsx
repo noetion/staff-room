@@ -33,7 +33,7 @@ export function SearchField({
           </button>
         </div>
       ) : (
-        <button type="button" className="chrome-search-button" onClick={onOpen}>
+        <button type="button" className="chrome-search-button" onClick={onOpen} aria-label="Search rooms and evidence">
           <Search size={16} />
           <span>Search rooms and evidence</span>
           <kbd>Ctrl K</kbd>
