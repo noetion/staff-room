@@ -7,7 +7,6 @@ import {
   GitBranch,
   HardDrive,
   History,
-  RefreshCw,
   ShieldCheck,
   Sparkles,
   X,
@@ -37,8 +36,6 @@ import type {
 import { AttentionCard, EvidenceCard, MarkdownBody, VerificationList } from "./components/conversation";
 import { agentNames } from "./model";
 import {
-  connectionTestDraft,
-  providerModelOptions,
   type ProviderDraft,
 } from "./lib/provider-profiles";
 import {
@@ -53,9 +50,7 @@ import {
 import {
   autonomyLabel,
   canUseChat,
-  capabilityChips,
   chatAgentFor,
-  connectionLabel,
   isRunnableParticipant,
 } from "./lib/participants";
 import { asRunState, hydrateRun } from "./lib/runs";
@@ -91,12 +86,13 @@ import { StatusPill } from "./components/chrome/StatusPill";
 import { Conversation } from "./components/conversation";
 import { RunProgressCard } from "./components/conversation/RunProgressCard";
 import { Monogram } from "./components/primitives";
+import { SettingsView } from "./components/settings";
+export { ProviderProfileCard } from "./components/settings";
 import { Composer } from "./components/composer";
 import { Inspector as InspectorSheet } from "./components/inspector";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 type PrimaryView = "rooms" | "activity" | "settings";
-type ProviderRoute = "chat" | "build" | "review";
 
 const detachedProject: Project = {
   id: "",
@@ -256,7 +252,7 @@ function ActivityView({ messages, query }: { messages: RoomMessage[]; query: str
   );
 }
 
-export function ProviderProfileCard({
+/* export function ProviderProfileCard({
   participant,
   profiles,
   saving,
@@ -428,7 +424,7 @@ export function ProviderProfileCard({
   );
 }
 
-function SettingsView({
+function LegacySettingsView({
   environment,
   profiles,
   projectSettings,
@@ -606,7 +602,7 @@ function SettingsView({
       <p className="settings-disclosure">Token totals appear only when a CLI emits them in its native run output. Provider account quotas and reset windows are not scraped or guessed.</p>
     </section>
   );
-}
+} */
 
 function Inspector({
   project,
