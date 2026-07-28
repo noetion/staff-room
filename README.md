@@ -35,7 +35,7 @@ The working v1 provides:
 - durable capped stdout/stderr logs and final responses under the app's local run-artifact directory;
 - desktop notifications for completion, failure, stop, and required attention;
 - SQLite-backed rooms, runs, activations, evidence, and provider session identifiers;
-- a desktop Handoff Lens UI with keyboard navigation, labelled controls, accessible live/error regions, reduced-motion, increased-contrast, and solid-surface fallbacks.
+- a light-first Liquid Glass conversation UI with keyboard navigation, labelled controls, accessible live/error regions, reduced-motion, increased-contrast, and solid-surface fallbacks.
 
 ## Run
 

@@ -1,3 +1,5 @@
+.conversation { min-height: 0; overflow: auto; }
+.conversation-column { padding: var(--s-5) var(--s-4); }
 .markdown-body { display: grid; gap: var(--s-3); min-width: 0; }
 .message-group { display: grid; gap: var(--s-1); width: min(760px, 100%); margin: 0 auto var(--s-4); }
 .message-row { display: flex; min-width: 0; align-items: end; gap: var(--s-2); }

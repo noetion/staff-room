@@ -25,10 +25,6 @@ const SRC = join(repo, "src");
 // Where design values are allowed to be literal.
 const TOKEN_HOME = ["src/design"];
 
-// Files the redesign has not reached yet. Step 15 deletes src/styles.css and
-// this entry with it; if the array is empty the lint is fully enforced.
-const LEGACY = ["src/styles.css"];
-
 const SKIP_DIRS = new Set(["node_modules", "dist", ".git", "target", "coverage"]);
 const EXTS = new Set([".css", ".tsx", ".ts"]);
 
@@ -49,8 +45,7 @@ function walk(dir, out = []) {
 }
 
 const norm = (p) => relative(repo, p).split(sep).join("/");
-const exempt = (rel) =>
-  TOKEN_HOME.some((d) => rel.startsWith(d + "/")) || LEGACY.includes(rel);
+const exempt = (rel) => TOKEN_HOME.some((d) => rel.startsWith(d + "/"));
 
 function stripComments(text) {
   // Replace comment bodies with spaces so line/column numbers stay intact.
@@ -157,7 +152,6 @@ for (const file of files) {
 if (args.has("--list")) {
   process.stdout.write(`scanned ${scanned.length} file(s):\n`);
   scanned.forEach((f) => process.stdout.write(`  ${f}\n`));
-  if (LEGACY.length) process.stdout.write(`skipped (legacy): ${LEGACY.join(", ")}\n`);
 }
 
 if (!violations.length) {

@@ -131,7 +131,7 @@ const activeStates: RunState[] = [
 
 function ParticipantMark({ participant }: { participant: Participant }) {
   return (
-    <Monogram label={participant.name} aria-hidden="true">
+    <Monogram label={initials(participant.kind)} aria-hidden="true">
       {initials(participant.kind)}
     </Monogram>
   );

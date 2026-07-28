@@ -132,10 +132,8 @@
 
 .composer-error { margin: 0; color: var(--state-bad); font: var(--t-compact); }
 
-.room .timeline {
-  padding-bottom: calc(var(--composer-height, 0px) + var(--s-5));
-  mask-image: linear-gradient(to bottom, transparent, black var(--s-7), black calc(100% - var(--composer-height, 0px)), transparent);
-}
+.danger-button { display: inline-flex; align-items: center; justify-content: center; gap: var(--s-2); min-height: var(--s-6); padding-inline: var(--s-3); border: 1px solid var(--state-bad); border-radius: var(--r-capsule); color: var(--state-bad); background: color-mix(in srgb, var(--state-bad) 8%, transparent); cursor: pointer; font: var(--t-compact); }
+.danger-button:hover { background: color-mix(in srgb, var(--state-bad) 14%, transparent); }
 
 @media (max-width: 720px) {
   .composer-contextual-label { display: none; }

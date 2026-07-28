@@ -52,7 +52,7 @@ export function ProviderProfileCard({
   return (
     <article className="provider-profile-card">
       <header className="provider-profile-header">
-        <Monogram label={participant.name} aria-hidden="true">{initials(participant.kind)}</Monogram>
+        <Monogram label={initials(participant.kind)} aria-hidden="true">{initials(participant.kind)}</Monogram>
         <span className="provider-profile-identity">
           <strong>{participant.name}</strong>
           <small>{participant.installed ? participant.version ?? "Installed" : "Not installed"}</small>

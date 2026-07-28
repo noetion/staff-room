@@ -350,12 +350,20 @@ function Invoke-Checked ($label, $cmd, $argv) {
   Say "    $label..." DarkGray
   $out = Join-Path $tmpDir ("gate-" + [guid]::NewGuid().ToString("N") + ".txt")
   Push-Location $repo
+  $previousErrorActionPreference = $ErrorActionPreference
   try {
+    # Cargo writes normal progress to stderr. Do not let PowerShell 7 turn that
+    # stream into a terminating NativeCommandError; the process exit code is
+    # the gate result and all output remains captured in $out.
+    $ErrorActionPreference = "Continue"
     & $cmd @argv *> $out
     $code = $LASTEXITCODE
   }
   catch { $code = 1; $_ | Out-File -Append $out }
-  finally { Pop-Location }
+  finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+    Pop-Location
+  }
 
   $text = if (Test-Path $out) { Get-Content $out -Raw -Encoding UTF8 } else { "" }
   if ($code -eq 0) { Good "$label ok"; return @{ Ok = $true; Label = $label; Output = "" } }

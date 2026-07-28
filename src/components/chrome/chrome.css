@@ -8,6 +8,7 @@
 
 .chrome-titlebar {
   z-index: 50;
+  grid-row: 1;
   grid-column: 1 / -1;
   display: grid;
   grid-template-columns: max-content minmax(0, calc(var(--s-8) * 4)) minmax(var(--s-3), 1fr) max-content max-content max-content max-content;
@@ -115,7 +116,16 @@
   .chrome-status { display: none; }
   .chrome-titlebar { gap: var(--s-1); }
 }
-.room { position: relative; }
+.room {
+  position: relative;
+  z-index: 1;
+  grid-row: 2;
+  grid-column: 2;
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
 .status-pill { position: absolute; z-index: 3; top: var(--s-3); left: 50%; display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--s-6); padding-inline: var(--s-3); border: 1px solid var(--hairline); border-radius: var(--r-capsule); color: var(--ink); background: var(--surface-raised); box-shadow: var(--e-float); transform: translate(-50%, calc(var(--s-2) * -1)); animation: status-pill-enter var(--dur-2) var(--ease-spring) both; }
 .status-pill__stage { color: var(--ink); font-size: var(--t-compact); white-space: nowrap; }
 .status-pill__elapsed { color: var(--ink-faint); white-space: nowrap; }

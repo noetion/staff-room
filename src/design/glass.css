@@ -54,7 +54,7 @@
 }
 
 .scroll-edge {
-  mask-image: linear-gradient(to bottom, transparent, black 28px);
+  mask-image: linear-gradient(to bottom, transparent, black var(--s-3));
 }
 
 @supports (backdrop-filter: url(#ar-refract)) {

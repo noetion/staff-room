@@ -99,7 +99,7 @@ function MessageGroupComponent({
                 <span className="message-avatar-slot">
                   {isLast && isAgent && (
                     <Monogram
-                      label={name}
+                      label={initials(group.sender as AgentKind)}
                       className={`conversation-avatar conversation-avatar-${group.sender}`}
                       aria-hidden="true"
                     >

@@ -167,7 +167,7 @@ export const Conversation = forwardRef<HTMLDivElement, ConversationProps>(
               <div className="message-row">
                 <span className="message-avatar-slot">
                   <Monogram
-                    label={agentNames[streaming.participant]}
+                    label={initials(streaming.participant)}
                     className={`conversation-avatar conversation-avatar-${streaming.participant}`}
                     aria-hidden="true"
                   >
