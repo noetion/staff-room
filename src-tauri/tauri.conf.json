@@ -20,7 +20,8 @@
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
-        "backgroundColor": "#141412"
+        "backgroundColor": "#E9E6EE",
+        "windowEffects": { "effects": ["mica"] }
       }
     ],
     "security": {

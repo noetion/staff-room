@@ -1,28 +1,11 @@
 import {
-  Activity,
-  ArrowRight,
-  Bot,
   Braces,
   Check,
-  ChevronRight,
   CircleAlert,
-  CircleStop,
-  Copy,
-  Gauge,
   GitBranch,
   HardDrive,
   History,
-  Minus,
-  PanelRight,
-  Play,
-  RefreshCw,
-  Search,
-  Settings,
   ShieldCheck,
-  Square,
-  Sparkles,
-  TerminalSquare,
-  Workflow,
   X,
 } from "lucide-react";
 import {
@@ -38,18 +21,35 @@ import type {
   ExecutionReceipt,
   NativeEnvironment,
   Participant,
-  ProviderProfile,
   Project,
   ProjectSettings,
+  ProviderProfile,
   QuickEditResult,
   RoomMessage,
   Run,
   RunState,
-  StoredRun,
-  VerificationResult,
   VerificationConfig,
 } from "./model";
+import { AttentionCard, EvidenceCard, MarkdownBody, VerificationList } from "./components/conversation";
 import { agentNames } from "./model";
+import {
+  type ProviderDraft,
+} from "./lib/provider-profiles";
+import {
+  contextLabel,
+  elapsedTime,
+  initials,
+  latencyLabel,
+  millisecondsLabel,
+  usageLabel,
+} from "./lib/format";
+import {
+  autonomyLabel,
+  canUseChat,
+  chatAgentFor,
+  isRunnableParticipant,
+} from "./lib/participants";
+import { asRunState, hydrateRun } from "./lib/runs";
 import {
   getEnvironment,
   discoverProviderModels,
@@ -77,43 +77,19 @@ import {
   testProviderConnection,
   type RunEvent,
 } from "./native";
+import { NavRail, TitleBar } from "./components/chrome";
+import { StatusPill } from "./components/chrome/StatusPill";
+import { Conversation } from "./components/conversation";
+import { RunProgressCard } from "./components/conversation/RunProgressCard";
+import { Aurora, Monogram, RefractionFilter, Wordmark } from "./components/primitives";
+import { ActivityView, AttachProjectView, EmptyState, RoomHeader } from "./components/views";
+import { SettingsView } from "./components/settings";
+export { ProviderProfileCard } from "./components/settings";
+import { Composer } from "./components/composer";
+import { Inspector as InspectorSheet } from "./components/inspector";
 
 type InspectorTab = "Repository" | "Participants" | "Evidence" | "Memory";
 type PrimaryView = "rooms" | "activity" | "settings";
-type ProviderRoute = "chat" | "build" | "review";
-
-export interface ProviderDraft {
-  model: string;
-  effort: string;
-}
-
-export function providerModelOptions(
-  models: string[],
-  profiles: ProviderProfile[],
-  hasAuthoritativeCatalog: boolean,
-) {
-  const catalogue = new Set(models);
-  const savedModels = profiles.flatMap((profile) => profile.model ? [profile.model] : []);
-  const unavailableSavedModels = hasAuthoritativeCatalog
-    ? savedModels.filter((model) => !catalogue.has(model))
-    : [];
-
-  return Array.from(new Set([...models, ...(!hasAuthoritativeCatalog ? savedModels : unavailableSavedModels)]))
-    .map((value) => ({
-      value,
-      unavailable: hasAuthoritativeCatalog && !catalogue.has(value),
-      label: hasAuthoritativeCatalog && !catalogue.has(value)
-        ? `${value} (Unavailable: not in the current catalogue)`
-        : value,
-    }));
-}
-
-export function connectionTestDraft(draft: ProviderDraft): ProviderDraft {
-  return {
-    model: draft.model.trim(),
-    effort: draft.effort,
-  };
-}
 
 const detachedProject: Project = {
   id: "",
@@ -153,642 +129,32 @@ const activeStates: RunState[] = [
   "promoting",
 ];
 
-const validStates: RunState[] = [
-  "ready",
-  "selecting",
-  "working",
-  "verifying",
-  "reviewing",
-  "revising",
-  "promoting",
-  "waiting",
-  "complete",
-  "failed",
-  "stopped",
-  "abandoned",
-];
-
-function asRunState(value: string): RunState {
-  return validStates.includes(value as RunState) ? (value as RunState) : "working";
-}
-
-function initials(kind?: AgentKind): string {
-  if (!kind) return "AR";
-  return { codex: "CX", claude: "CL", cursor: "CU", antigravity: "AG" }[kind];
-}
-
-function relativeTime(timestamp: string): string {
-  const normalized = timestamp.includes("T") ? timestamp : `${timestamp.replace(" ", "T")}Z`;
-  const minutes = Math.max(0, Math.round((Date.now() - new Date(normalized).getTime()) / 60_000));
-  if (minutes < 1) return "now";
-  if (minutes < 60) return `${minutes}m`;
-  return `${Math.floor(minutes / 60)}h`;
-}
-
-function elapsedTime(timestamp: string): string {
-  const started = new Date(timestamp).getTime();
-  if (!started || Number.isNaN(started)) return "just started";
-  const seconds = Math.max(0, Math.floor((Date.now() - started) / 1000));
-  return seconds < 60 ? `${seconds}s elapsed` : `${Math.floor(seconds / 60)}m ${seconds % 60}s elapsed`;
-}
-
-function contextLabel(bytes = 0, budgetBytes = 0): string {
-  if (!bytes) return "Packet not assembled";
-  const usage = `${Math.max(1, Math.round(bytes / 1024))} KiB`;
-  return budgetBytes ? `${usage} / ${Math.round(budgetBytes / 1024)} KiB` : usage;
-}
-
-function usageLabel(receipt: ExecutionReceipt): string {
-  const { inputTokens, cachedInputTokens, outputTokens, totalCostUsd, numTurns } = receipt.usage;
-  const parts = [
-    inputTokens !== undefined ? `${inputTokens.toLocaleString()} in` : undefined,
-    cachedInputTokens !== undefined ? `${cachedInputTokens.toLocaleString()} cached` : undefined,
-    outputTokens !== undefined ? `${outputTokens.toLocaleString()} out` : undefined,
-    totalCostUsd !== undefined ? `$${totalCostUsd.toFixed(4)}` : undefined,
-    numTurns !== undefined ? `${numTurns} turns` : undefined,
-  ].filter(Boolean);
-  return parts.length ? parts.join(" · ") : "Not reported";
-}
-
-function latencyLabel(receipt: ExecutionReceipt): string | undefined {
-  if (receipt.totalMs === undefined) return undefined;
-  const total = (receipt.totalMs / 1000).toFixed(2);
-  const first = receipt.firstOutputMs === undefined
-    ? "first output unavailable"
-    : `${(receipt.firstOutputMs / 1000).toFixed(2)}s to first output`;
-  const preflight = receipt.preflightMs === undefined
-    ? undefined
-    : `${(receipt.preflightMs / 1000).toFixed(2)}s preflight`;
-  return [`${total}s total`, first, preflight].filter(Boolean).join(" · ");
-}
-
-function millisecondsLabel(value: number | undefined): string {
-  return value === undefined ? "—" : `${value.toLocaleString()} ms`;
-}
-
-function autonomyLabel(mode: Participant["capabilities"]["autonomyMode"]): string {
-  return {
-    "isolated-auto": "Isolated auto",
-    "reviewed-auto": "Reviewed auto",
-    "unattended-bypass": "Sandbox bypass",
-    manual: "Manual",
-    unavailable: "Unavailable",
-  }[mode];
-}
-
-function connectionLabel(status: Participant["connectionStatus"]): string {
-  return {
-    connected: "Connected",
-    "sign-in-required": "Sign in required",
-    unverified: "Test connection",
-    "not-installed": "Not installed",
-    failed: "Connection failed",
-  }[status];
-}
-
-function hydrateRun(stored: StoredRun): Run {
-  return {
-    id: stored.id,
-    objective: stored.objective,
-    state: stored.state,
-    currentOwner: stored.currentOwner,
-    route: stored.route,
-    reviewCount: stored.reviewCount,
-    revisionCount: stored.revisionCount,
-    startedAt: stored.startedAt,
-    stopReason: stored.stopReason,
-    nativeSessionId: stored.nativeSessionId,
-    writer: stored.writer,
-    reviewer: stored.reviewer,
-    degradedReview: stored.degradedReview,
-    worktreePath: stored.worktreePath,
-    branch: stored.branch,
-    contextBytes: stored.contextBytes,
-    artifactPath: stored.artifactPath,
-    instructionFiles: stored.instructionFiles,
-    skillFiles: stored.skillFiles,
-    recoveryCount: stored.recoveryCount,
-  };
-}
-
-function isRunnableParticipant(participant: Participant): boolean {
-  return participant.installed
-    && participant.connectionStatus === "connected"
-    && !["manual", "unavailable"].includes(participant.capabilities.autonomyMode);
-}
-
-function canUseChat(participant: Participant): boolean {
-  return participant.kind !== "antigravity" && participant.installed && participant.capabilities.nonInteractiveTurn;
-}
-
-function capabilityChips(participant: Participant): string[] {
-  const chips: string[] = [];
-  if (participant.kind === "antigravity") {
-    chips.push("Ship only · no read-only mode");
-  }
-  if (participant.kind === "cursor") {
-    chips.push("sandbox unavailable on Windows, read-only enforced by ask mode");
-  }
-  if (!participant.capabilities.warmSession) {
-    chips.push("cold start per turn");
-  }
-  if (participant.kind === "antigravity") {
-    chips.push("completion stream, not token deltas", "usage not reported");
-  }
-  if (participant.kind === "cursor") {
-    chips.push("usage not reported");
-  }
-  return chips;
-}
-
-function chatAgentFor(
-  objective: string,
-  participants: Participant[],
-  replyTarget?: AgentKind,
-): AgentKind | undefined {
-  const mentioned = objective.match(/@(codex|claude|cursor|antigravity)\b/i)?.[1]?.toLowerCase() as AgentKind | undefined;
-  if (mentioned) return participants.find((participant) => participant.kind === mentioned && canUseChat(participant))?.kind;
-  if (replyTarget) return participants.find((participant) => participant.kind === replyTarget && canUseChat(participant))?.kind;
-  return participants.find(canUseChat)?.kind;
-}
-
 function ParticipantMark({ participant }: { participant: Participant }) {
   return (
-    <span className={`participant-mark participant-${participant.kind}`} aria-hidden="true">
+    <Monogram label={initials(participant.kind)} aria-hidden="true">
       {initials(participant.kind)}
-    </span>
+    </Monogram>
   );
 }
 
-function RunLens({
-  run,
-  participants,
-  activity,
-  streamTitle,
-  contextBudgetBytes,
-  onStop,
-  onResume,
-  onAbandon,
-}: {
-  run: Run;
-  participants: Participant[];
-  activity: LiveActivityItem[];
-  streamTitle: string;
-  contextBudgetBytes: number;
-  onStop: () => void;
-  onResume: () => void;
-  onAbandon: () => void;
-}) {
-  const active = run.currentOwner
-    ? participants.find((participant) => participant.kind === run.currentOwner)
-    : undefined;
-  const running = activeStates.includes(run.state);
-  const autonomy = active?.capabilities.autonomyMode;
-  const recoverable =
-    Boolean(run.worktreePath) &&
-    ["waiting", "failed", "stopped"].includes(run.state) &&
-    (run.recoveryCount ?? 0) < 2;
-
-  return (
-    <article
-      className={`timeline-entry entry-run-progress state-${run.state}`}
-      aria-label="Current Ship run"
-      aria-live="polite"
-    >
-      <div className="entry-rail">
-        <span className="entry-dot progress-dot">
-          <Workflow size={13} />
-        </span>
-        <span className="entry-line" />
-      </div>
-      <section className="entry-content run-progress">
-        <header>
-          <span className="state-pulse" />
-          <strong>Agent Room / Ship</strong>
-          <span>{run.state.replace("-", " ")}</span>
-        </header>
-        <div className="progress-summary">
-          <strong>
-            {run.state === "waiting"
-              ? "Your attention is needed"
-              : active
-                ? `${active.name} is handling ${run.route.find((step) => step.state === "current")?.label ?? "this phase"}`
-                : run.state === "complete"
-                  ? "Verified workflow complete"
-                  : "Ship workflow"}
-          </strong>
-          <p>{run.stopReason ?? run.objective}</p>
-        </div>
-
-        <div className="progress-route" aria-label="Ship stages">
-          {run.route.map((step, index) => (
-            <div className={`progress-step ${step.state}`} key={`${step.label}-${index}`}>
-              <span>{step.state === "complete" ? <Check size={11} /> : step.agent ? initials(step.agent) : index + 1}</span>
-              <small>{step.label}</small>
-              {index < run.route.length - 1 && <ArrowRight size={12} aria-hidden="true" />}
-            </div>
-          ))}
-        </div>
-
-        {activity.length > 0 && (
-          <div className="progress-activity" role="log" aria-live="polite" aria-relevant="additions text">
-            <div className="progress-live-label">
-              <span className="stream-pulse" />
-              <strong>{streamTitle}</strong>
-              <span>live</span>
-            </div>
-            <div className="activity-list">
-              {activity.slice(-1).map((item, index) => (
-                <div className="activity-item" key={`${item.title}-${index}`}>
-                  <strong>{item.title}</strong>
-                  <p>{item.detail}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div className="progress-footer">
-          <div className="progress-meta">
-            <span>
-              <ShieldCheck size={12} />
-              {run.degradedReview ? "Same-provider review" : run.reviewer ? "Independent review" : "Reviewer selected at run time"}
-            </span>
-            <span>
-              <Gauge size={12} />
-              {contextLabel(run.contextBytes, contextBudgetBytes)}
-            </span>
-            <span>
-              <Workflow size={12} />
-              {autonomy ? autonomyLabel(autonomy) : "Bounded autonomous route"}
-            </span>
-            <span>{elapsedTime(run.startedAt)}</span>
-            <span>{run.revisionCount}/1 revise · {run.reviewCount}/2 review · {run.recoveryCount ?? 0}/2 recover</span>
-          </div>
-          <div className="progress-action">
-            {running ? (
-              <button type="button" className="danger-button" onClick={onStop}>
-                <CircleStop size={15} />
-                Stop
-              </button>
-            ) : recoverable ? (
-              <>
-              <button type="button" className="send-button recovery-button" onClick={onResume}>
-                <History size={14} />
-                Resume recovery
-              </button>
-              <button type="button" className="danger-button" onClick={onAbandon}>
-                <X size={15} />
-                Abandon
-              </button>
-              </>
-            ) : Boolean(run.worktreePath) && !running ? (
-              <button type="button" className="danger-button" onClick={onAbandon}>
-                <X size={15} />
-                Abandon
-              </button>
-            ) : (
-              <span className="progress-limits">
-                {run.revisionCount}/1 revisions · {run.reviewCount}/2 reviews · {run.recoveryCount ?? 0}/2 recoveries
-              </span>
-            )}
-          </div>
-        </div>
-      </section>
-    </article>
-  );
-}
-
-function VerificationList({ verification }: { verification: VerificationResult[] }) {
-  if (!verification.length) return null;
-  return (
-    <div className="verification-list">
-      {verification.map((result) => (
-        <div className={`verification-row verification-${result.status}`} key={result.label}>
-          {result.status === "passed" ? <Check size={13} /> : <CircleAlert size={13} />}
-          <span>
-            <strong>{result.label}</strong>
-            <small>{result.status}</small>
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function InlineMarkdown({ text }: { text: string }) {
-  return text.split(/(`[^`]+`|\*\*[^*]+\*\*)/g).map((part, index) => {
-    if (part.startsWith("`") && part.endsWith("`")) return <code key={index}>{part.slice(1, -1)}</code>;
-    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
-    return part;
-  });
-}
-
-function MarkdownBody({ body }: { body: string }) {
-  const [copiedBlock, setCopiedBlock] = useState<number>();
-  const blocks = body.split(/```([^\n`]*)\n?([\s\S]*?)```/g);
-
-  async function copyCode(index: number, code: string) {
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopiedBlock(index);
-    } catch {
-      setCopiedBlock(undefined);
-    }
-  }
-
-  return (
-    <div className="markdown-body">
-      {blocks.map((block, index) => {
-        if (index % 3 === 1) return null;
-        if (index % 3 === 2) {
-          const language = blocks[index - 1].trim() || "text";
-          return (
-            <pre key={index}>
-              <div className="code-toolbar">
-                <span>{language}</span>
-                <button type="button" onClick={() => void copyCode(index, block)}>
-                  <Copy size={12} /> {copiedBlock === index ? "Copied" : "Copy"}
-                </button>
-              </div>
-              <code>{block}</code>
-            </pre>
-          );
-        }
-        return block.split(/\n{2,}/).filter(Boolean).map((paragraph, paragraphIndex) => (
-          <p key={`${index}-${paragraphIndex}`}><InlineMarkdown text={paragraph} /></p>
-        ));
-      })}
-    </div>
-  );
-}
-
-function TimelineEntry({ message }: { message: RoomMessage }) {
-  const isHuman = message.kind === "human";
+function TimelineMessageContent({ message }: { message: RoomMessage }) {
   const reason = message.reason;
-  const senderName =
-    message.sender === "human"
-      ? "You"
-      : message.sender === "system"
-        ? "Agent Room"
-        : agentNames[message.sender];
 
   return (
-    <article className={`timeline-entry entry-${message.kind}`}>
-      <div className="entry-rail">
-        <span className="entry-dot">
-          {isHuman ? (
-            <Sparkles size={13} />
-          ) : message.kind === "evidence" ? (
-            <ShieldCheck size={13} />
-          ) : (
-            <Bot size={13} />
-          )}
-        </span>
-        <span className="entry-line" />
-      </div>
-      <div className="entry-content">
-        <header>
-          <strong>{senderName}</strong>
-          <span>{relativeTime(message.createdAt)}</span>
-          <span className="entry-kind">{message.kind}</span>
-        </header>
-        <MarkdownBody body={message.body} />
-        {reason && (
-          <div className="reason-line">
-            <Braces size={14} />
-            <span>{reason}</span>
-          </div>
-        )}
-        {message.changedFiles?.length ? (
-          <div className="file-list">
-            {message.changedFiles.map((file) => (
-              <code key={file}>{file}</code>
-            ))}
-          </div>
-        ) : null}
-        <VerificationList verification={message.verification ?? []} />
-      </div>
-    </article>
-  );
-}
-
-function LiveActivity({
-  title,
-  activity,
-}: {
-  title: string;
-  activity: LiveActivityItem[];
-}) {
-  return (
-    <article
-      className="timeline-entry entry-activity"
-      role="log"
-      aria-live="polite"
-      aria-relevant="additions text"
-    >
-      <div className="entry-rail">
-        <span className="entry-dot activity-dot">
-          <Bot size={13} />
-        </span>
-        <span className="entry-line" />
-      </div>
-      <div className="entry-content activity-content">
-        <header>
-          <span className="stream-pulse" />
-          <strong>{title}</strong>
-          <span>live</span>
-        </header>
-        <div className="activity-list">
-          {activity.slice(-6).map((item, index) => (
-            <div className="activity-item" key={`${item.title}-${index}`}>
-              <strong>{item.title}</strong>
-              <p>{item.detail}</p>
-            </div>
-          ))}
-        </div>
-        <small className="activity-note">
-          Provider-reported reasoning and tool activity only. Full output remains in the local run log.
-        </small>
-      </div>
-    </article>
-  );
-}
-
-function WindowControls({ native }: { native: boolean }) {
-  return (
-    <div className="window-controls" role="group" aria-label="Window controls">
-      <button
-        type="button"
-        className="window-control"
-        aria-label="Minimize window"
-        disabled={!native}
-        title={native ? "Minimize window" : "Inert in browser preview mode"}
-        onClick={() => {
-          if (native) void getCurrentWindow().minimize();
-        }}
-      >
-        <Minus size={14} strokeWidth={1.7} />
-      </button>
-      <button
-        type="button"
-        className="window-control"
-        aria-label="Maximize or restore window"
-        disabled={!native}
-        title={native ? "Maximize or restore window" : "Inert in browser preview mode"}
-        onClick={() => {
-          if (native) void getCurrentWindow().toggleMaximize();
-        }}
-      >
-        <Square size={11} strokeWidth={1.7} />
-      </button>
-      <button
-        type="button"
-        className="window-control window-close"
-        aria-label="Close Agent Room"
-        disabled={!native}
-        title={native ? "Close Agent Room" : "Inert in browser preview mode"}
-        onClick={() => {
-          if (native) void getCurrentWindow().close();
-        }}
-      >
-        <X size={14} strokeWidth={1.7} />
-      </button>
-    </div>
-  );
-}
-
-function ProjectRail({
-  activeView,
-  onNavigate,
-  projects,
-  activeProjectId,
-  onSelectProject,
-  onAttachProject,
-}: {
-  activeView: PrimaryView;
-  onNavigate: (view: PrimaryView) => void;
-  projects: Project[];
-  activeProjectId: string;
-  onSelectProject: (id: string) => void;
-  onAttachProject: () => void;
-}) {
-  return (
-    <aside className="project-rail">
-      <nav className="primary-nav" aria-label="Primary">
-        <button
-          type="button"
-          className={`nav-button ${activeView === "rooms" ? "active" : ""}`}
-          aria-current={activeView === "rooms" ? "page" : undefined}
-          onClick={() => onNavigate("rooms")}
-        >
-          <TerminalSquare size={19} />
-          <span>Rooms</span>
-        </button>
-        <button
-          type="button"
-          className={`nav-button ${activeView === "activity" ? "active" : ""}`}
-          aria-current={activeView === "activity" ? "page" : undefined}
-          onClick={() => onNavigate("activity")}
-        >
-          <Activity size={19} />
-          <span>Activity</span>
-        </button>
-        <button
-          type="button"
-          className={`nav-button ${activeView === "settings" ? "active" : ""}`}
-          aria-current={activeView === "settings" ? "page" : undefined}
-          onClick={() => onNavigate("settings")}
-        >
-          <Settings size={19} />
-          <span>Settings</span>
-        </button>
-      </nav>
-      <div className="rail-projects" aria-label="Projects">
-        {projects.map((project) => (
-          <button
-            key={project.id}
-            type="button"
-            className={`rail-project ${project.id === activeProjectId ? "active" : ""}`}
-            onClick={() => onSelectProject(project.id)}
-            title={project.repositoryPath}
-          >
-            {project.name.slice(0, 2).toUpperCase()}
-          </button>
-        ))}
-        <button type="button" className="rail-project rail-project-add" onClick={onAttachProject} aria-label="Attach repository">
-          +
-        </button>
-      </div>
-      <div className="rail-foot">
-        <span className="local-indicator" />
-        <span>Local</span>
-      </div>
-    </aside>
-  );
-}
-
-function AttachProjectView({
-  projects,
-  native,
-  onAttach,
-  onSelect,
-}: {
-  projects: Project[];
-  native: boolean;
-  onAttach: () => void;
-  onSelect: (id: string) => void;
-}) {
-  return (
-    <section className="utility-screen attach-project" aria-labelledby="attach-project-title">
-      <header className="utility-header">
-        <span className="eyebrow">Local workspace</span>
-        <h1 id="attach-project-title">Choose a repository</h1>
-        <p>Attach a Git repository to create an independently scoped Agent Room.</p>
-        <button type="button" className="primary-button" onClick={onAttach} disabled={!native}>
-          Choose a repository
-        </button>
-        {!native && <p className="empty-state">Repository attachment is available in the Tauri desktop app.</p>}
-      </header>
-      {projects.length > 0 && (
-        <div className="recent-projects">
-          <span className="eyebrow">Recent projects</span>
-          {projects.map((recentProject) => (
-            <button key={recentProject.id} type="button" className="project-switch" onClick={() => onSelect(recentProject.id)}>
-              <span className="project-monogram small">{recentProject.name.slice(0, 2).toUpperCase()}</span>
-              <span>
-                <strong>{recentProject.name}</strong>
-                <small>{recentProject.repositoryPath}</small>
-              </span>
-              <ChevronRight size={15} />
-            </button>
-          ))}
+    <>
+      <MarkdownBody body={message.body} />
+      {reason && (
+        <div className="reason-line">
+          <Braces size={14} />
+          <span>{reason}</span>
         </div>
       )}
-    </section>
+      {(message.changedFiles?.length || message.verification?.length) ? <EvidenceCard changedFiles={message.changedFiles ?? []} label="Run evidence" verification={message.verification ?? []} /> : null}
+    </>
   );
 }
 
-function ActivityView({ messages, query }: { messages: RoomMessage[]; query: string }) {
-  return (
-    <section className="utility-screen" aria-labelledby="activity-title">
-      <header className="utility-header">
-        <span className="eyebrow">Room record</span>
-        <h1 id="activity-title">Activity</h1>
-        <p>{query ? `Results for “${query}”` : "A durable timeline of objectives, evidence, and recovery states."}</p>
-      </header>
-      <div className="utility-timeline" role="feed" aria-label="Room activity">
-        {messages.length ? (
-          messages.map((message) => <TimelineEntry key={message.id} message={message} />)
-        ) : (
-          <p className="empty-state">No room activity matches this search.</p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-export function ProviderProfileCard({
+/* export function ProviderProfileCard({
   participant,
   profiles,
   saving,
@@ -960,7 +326,7 @@ export function ProviderProfileCard({
   );
 }
 
-function SettingsView({
+function LegacySettingsView({
   environment,
   profiles,
   projectSettings,
@@ -1016,8 +382,8 @@ function SettingsView({
           {refreshing ? "Checking providers" : "Recheck providers"}
         </button>
       </header>
-      {!native && <p className="empty-state">Provider checks are available in the Tauri desktop app.</p>}
-      {error && <p className="utility-error" role="alert">{error}</p>}
+      {!native && <EmptyState title="Provider checks are unavailable in browser preview." />}
+      {error && <ErrorState cause={error} action={<button type="button" className="secondary-button" onClick={onRefresh}>Recheck providers</button>} />}
       <div className="autonomy-setting">
         <div>
           <strong>Hands-free autonomous Ship</strong>
@@ -1138,7 +504,7 @@ function SettingsView({
       <p className="settings-disclosure">Token totals appear only when a CLI emits them in its native run output. Provider account quotas and reset windows are not scraped or guessed.</p>
     </section>
   );
-}
+} */
 
 function Inspector({
   project,
@@ -1339,7 +705,7 @@ function Inspector({
                 </table>
               </div>
             ) : (
-              <p className="empty-state">Receipts appear after the first provider phase. They report run telemetry, not provider account quotas.</p>
+              <EmptyState title="No execution receipts yet." body="Receipts appear after the first provider phase. They report run telemetry, not provider account quotas." />
             )}
           </section>
           <VerificationList verification={verification} />
@@ -2246,100 +1612,44 @@ export function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-run-state={run.state}>
+      <Aurora />
+      <RefractionFilter
+        composerVisible={environment.attached && activeView === "rooms"}
+        surfaceKey={`${environment.attached}:${activeView}`}
+      />
       <a className="skip-link" href="#room-main">
         Skip to room
       </a>
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">
-            <span />
-          </span>
-          <strong>Agent Room</strong>
-        </div>
-        <button
-          type="button"
-          className="project-switch"
-          onClick={() => {
-            setActiveView("rooms");
-            openInspector("Repository");
-          }}
-          aria-label={`Open ${project.name} repository details`}
-        >
-          <span className="project-monogram small">AR</span>
-          <span>
-            <strong>{project.name}</strong>
-            <small>{project.branch}</small>
-          </span>
-          <ChevronRight size={15} />
-        </button>
-        {searchOpen ? (
-          <div className="search-field" role="search">
-            <Search size={16} aria-hidden="true" />
-            <input
-              ref={searchInputRef}
-              value={searchQuery}
-              onChange={(event) => setSearchQuery(event.target.value)}
-              placeholder="Search rooms and evidence"
-              aria-label="Search rooms and evidence"
-            />
-            <button
-              type="button"
-              className="search-close"
-              onClick={() => {
-                setSearchOpen(false);
-                setSearchQuery("");
-              }}
-              aria-label="Close search"
-            >
-              <X size={15} />
-            </button>
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="search-button"
-            onClick={() => {
-              setSearchOpen(true);
-              requestAnimationFrame(() => searchInputRef.current?.focus());
-            }}
-          >
-            <Search size={16} />
-            <span>Search rooms and evidence</span>
-            <kbd>Ctrl K</kbd>
-          </button>
-        )}
-        <div
-          className="titlebar-drag"
-          data-tauri-drag-region
-          onDoubleClick={() => {
-            if (native) void getCurrentWindow().toggleMaximize();
-          }}
-          aria-hidden="true"
-        />
-        <div className="topbar-status">
-          <span className={native ? "online" : ""} />
-          {native
-            ? projectSettings.autonomousShipEnabled
-              ? "Autonomy armed"
-              : "Local runtime"
-            : "Read-only preview"}
-        </div>
-        <button
-          ref={contextToggleRef}
-          type="button"
-          className="icon-button context-toggle"
-          aria-label={inspectorOpen ? "Close context" : "Open context"}
-          aria-expanded={inspectorOpen}
-          aria-controls="room-context"
-          onClick={() => setInspectorOpen((open) => !open)}
-        >
-          <PanelRight size={18} />
-        </button>
-        <WindowControls native={native} />
-      </header>
+      <TitleBar
+        project={project}
+        native={native}
+        autonomousShipEnabled={projectSettings.autonomousShipEnabled}
+        searchOpen={searchOpen}
+        searchQuery={searchQuery}
+        searchInputRef={searchInputRef}
+        inspectorOpen={inspectorOpen}
+        contextToggleRef={contextToggleRef}
+        onOpenRepository={() => {
+          setActiveView("rooms");
+          openInspector("Repository");
+        }}
+        onSearchOpen={() => {
+          setSearchOpen(true);
+          requestAnimationFrame(() => searchInputRef.current?.focus());
+        }}
+        onSearchClose={() => {
+          setSearchOpen(false);
+          setSearchQuery("");
+        }}
+        onSearchQueryChange={setSearchQuery}
+        onInspectorToggle={() => setInspectorOpen((open) => !open)}
+        onToggleMaximize={() => {
+          if (native) void getCurrentWindow().toggleMaximize();
+        }}
+      />
 
-      <ProjectRail
+      <NavRail
         activeView={activeView}
         onNavigate={showView}
         projects={projects}
@@ -2348,7 +1658,24 @@ export function App() {
         onAttachProject={handleAttachProject}
       />
 
-      <main className="room" id="room-main" tabIndex={-1}>
+      <main
+        className={`room${!environment.attached || activeView === "settings" ? " room--signature" : ""}`}
+        id="room-main"
+        tabIndex={-1}
+      >
+        {(!environment.attached || activeView === "settings") && (
+          <Wordmark
+            corner="bottom-left"
+            size="calc(var(--s-8) * 3 + var(--s-2))"
+          />
+        )}
+        {(activeStates.includes(run.state) || ["waiting", "failed", "stopped"].includes(run.state)) && (
+          <StatusPill
+            state={run.state}
+            stage={run.route.find((step) => step.state === "current")?.label ?? "Ship run"}
+            elapsed={elapsedTime(run.startedAt)}
+          />
+        )}
         {!environment.attached ? (
           <AttachProjectView
             projects={projects}
@@ -2357,7 +1684,7 @@ export function App() {
             onSelect={handleSelectProject}
           />
         ) : activeView === "activity" ? (
-          <ActivityView messages={visibleMessages} query={searchQuery} />
+          <ActivityView messages={visibleMessages} query={searchQuery} renderMessage={(message) => <TimelineMessageContent message={message} />} />
         ) : activeView === "settings" ? (
           <SettingsView
             environment={environment}
@@ -2383,266 +1710,126 @@ export function App() {
           />
         ) : (
           <>
-        <div className="room-header">
-          <div>
-            <span className="eyebrow">Autonomous project room</span>
-            <h1>{project.name}</h1>
-            <p>{project.goal}</p>
-          </div>
-          <div className="room-meta">
-            <span>
-              <GitBranch size={14} />
-              {project.branch}
-            </span>
-            <span>
-              <Bot size={14} />
-              {installedCount} of 4 ready
-            </span>
-          </div>
-        </div>
+        <RoomHeader project={project} installedCount={installedCount} />
 
-        {attention && (
-          <aside className="attention-banner" role="alert">
-            <CircleAlert size={16} />
-            <span><strong>{attention.title}</strong>{attention.detail}</span>
-            <button type="button" onClick={() => setAttention(undefined)} aria-label="Dismiss attention notice"><X size={14} /></button>
-          </aside>
-        )}
-
-        <div className="timeline" ref={timelineRef} role="feed" aria-label="Room timeline">
-          <div className="timeline-date">
-            <span>Durable room</span>
-          </div>
-          {hasMoreMessages && !searchQuery && (
-            <button
-              type="button"
-              className="load-older-messages"
-              onClick={() => void loadOlderMessages()}
-              disabled={loadingOlderMessages}
-            >
-              {loadingOlderMessages ? "Loading earlier messages…" : "Load earlier messages"}
-            </button>
+        <Conversation
+          ref={timelineRef}
+          messages={messages}
+          streaming={{
+            active: chatSending || activeStates.includes(run.state),
+            participant:
+              environment.participants.find((participant) => streamTitle.startsWith(participant.name))?.kind
+              ?? activeShipAgent,
+            runId: chatSending ? chatRunRef.current : run.id || undefined,
+          }}
+          hasMore={hasMoreMessages}
+          loadingOlder={loadingOlderMessages}
+          onLoadOlder={() => void loadOlderMessages()}
+          query={searchQuery}
+          run={run}
+          receipts={receipts}
+          renderMessage={(message) => <TimelineMessageContent message={message} />}
+          onResume={handleResume}
+        >
+          {!messages.length && !searchQuery && (
+            <EmptyState
+              title="Nothing has happened in this room yet."
+              suggestions={[
+                { label: "Plan the next task", value: "Plan the next task for this repository." },
+                { label: "Review the codebase", value: "Review the codebase and identify the highest-value next step." },
+                { label: "Explain this project", value: "Explain this project and its current state." },
+              ]}
+              onSuggestion={setObjective}
+            />
           )}
-          {visibleMessages.map((message) => (
-            <TimelineEntry key={message.id} message={message} />
-          ))}
-          {searchQuery && !visibleMessages.length && (
-            <p className="empty-state">No room activity matches this search.</p>
+          {attention && (
+            <AttentionCard title={attention.title} detail={attention.detail} onDismiss={() => setAttention(undefined)} />
           )}
           {run.state !== "ready" && !searchQuery && (
-            <RunLens
+            <RunProgressCard
               run={run}
-              participants={environment.participants}
               activity={activity}
-              streamTitle={streamTitle}
-              contextBudgetBytes={environment.contextBudgetBytes}
+              limits={`${run.revisionCount}/1 revise · ${run.reviewCount}/2 review · ${run.recoveryCount ?? 0}/2 recover`}
               onStop={handleStop}
               onResume={handleResume}
               onAbandon={handleAbandon}
             />
           )}
-          {run.state === "ready" && activity.length > 0 && (
-            <LiveActivity title={streamTitle} activity={activity} />
-          )}
-        </div>
+        </Conversation>
 
-        {quickEdit && (
-          <section className="quick-edit-preview" aria-label="Quick Edit preview">
-            <p><strong>{agentNames[quickEdit.participant]}</strong>: {quickEdit.summary}</p>
-            <pre>{quickEdit.diff || "No file changes were produced."}</pre>
-            <div className="composer-actions">
-              <button type="button" className="send-button" onClick={() => void applyQuickEdit()} disabled={!quickEdit.diff}>
-                <Check size={15} /> Apply edit
-              </button>
-              <button type="button" className="danger-button" onClick={() => void discardQuickEdit()}>
-                <X size={15} /> Discard
-              </button>
-            </div>
-          </section>
-        )}
-        <form className="composer" onSubmit={submitComposer}>
-          <div className="composer-context">
-            <label className="composer-label" htmlFor="room-objective">
-              {composerMode === "ask"
-                ? sideChatAvailable
-                  ? "Ask about active Ship run"
-                  : "Ask a question"
-                : composerMode === "quick-edit"
-                  ? "Quick Edit"
+        <Composer
+          busy={chatSending}
+          canSelectParticipant={(participant) =>
+            sideChatAvailable
+              ? participant.kind === activeShipAgent
+              : composerMode === "ask" || composerMode === "quick-edit"
+                ? canUseChat(participant)
+                : run.state !== "promoting" && isRunnableParticipant(participant)
+          }
+          contextualLabel={
+            composerMode === "ask"
+              ? sideChatAvailable ? "Ask about active Ship run" : "Ask a question"
+              : composerMode === "quick-edit"
+                ? "Quick edit"
                 : run.state === "promoting"
                   ? "Promoting verified work"
-                  : sideChatAvailable
-                  ? "Ask about active Ship run"
-                  : "Engineering objective"}
-            </label>
-            <div className="composer-mode" role="group" aria-label="Message route">
-              <button
-                type="button"
-                className={composerMode === "ask" ? "active" : ""}
-                onClick={() => setComposerMode("ask")}
-                aria-pressed={composerMode === "ask"}
-              >
-                Ask
-              </button>
-              <button
-                type="button"
-                className={composerMode === "quick-edit" ? "active" : ""}
-                onClick={() => setComposerMode("quick-edit")}
-                aria-pressed={composerMode === "quick-edit"}
-                disabled={sideChatAvailable || run.state === "promoting" || Boolean(quickEdit)}
-              >
-                Quick Edit
-              </button>
-              <button
-                type="button"
-                className={composerMode === "ship" ? "active" : ""}
-                onClick={() => setComposerMode("ship")}
-                aria-pressed={composerMode === "ship"}
-                disabled={sideChatAvailable || run.state === "promoting"}
-              >
-                Ship
-              </button>
-            </div>
-          </div>
-          <textarea
-            id="room-objective"
-            value={objective}
-            onChange={(event) => setObjective(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-            placeholder={
-              composerMode === "ask"
-                ? sideChatAvailable
-                  ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
-                  : "Ask a question..."
-                : composerMode === "quick-edit"
-                  ? "Describe a small, bounded edit..."
+                  : sideChatAvailable ? "Ask about active Ship run" : "Engineering objective"
+          }
+          error={uiError}
+          inputDescribedBy={uiError ? "composer-error" : undefined}
+          mode={composerMode}
+          onModeChange={setComposerMode}
+          onObjectiveChange={setObjective}
+          onParticipantSelect={(participant) =>
+            setObjective((current) => `@${participant.kind} ${current.replace(/^@\w+\s*/, "")}`)
+          }
+          onStop={() => void handleStopChat()}
+          onSubmit={submitComposer}
+          participants={environment.participants}
+          placeholder={
+            composerMode === "ask"
+              ? sideChatAvailable
+                ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
+                : "Ask a question..."
+              : composerMode === "quick-edit"
+                ? "Describe a small, bounded edit..."
                 : run.state === "promoting"
                   ? "Promotion is finishing safely..."
                   : sideChatAvailable
-                  ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
-                  : "@codex State the objective once..."
-            }
-            aria-describedby={uiError ? "composer-error" : undefined}
-            rows={2}
-          />
-          <div className="composer-actions">
-            <div className="mention-list">
-              {environment.participants
-                .filter((participant) => composerMode === "ship" || participant.kind !== "antigravity")
-                .map((participant) => (
-                <button
-                  type="button"
-                  key={participant.kind}
-                  disabled={
-                    sideChatAvailable
-                      ? participant.kind !== activeShipAgent
-                      : composerMode === "ask"
-                      ? !canUseChat(participant)
-                      : composerMode === "quick-edit"
-                        ? !canUseChat(participant)
-                      : run.state === "promoting"
-                        ? true
-                        : sideChatAvailable
-                        ? participant.kind !== activeShipAgent
-                        : !isRunnableParticipant(participant)
-                  }
-                  onClick={() =>
-                    setObjective(
-                      (current) => `@${participant.kind} ${current.replace(/^@\w+\s*/, "")}`,
-                    )
-                  }
-                  title={
-                    (composerMode === "ask"
-                      ? canUseChat(participant)
-                      : composerMode === "quick-edit"
-                        ? canUseChat(participant)
-                        : isRunnableParticipant(participant))
-                      ? `${autonomyLabel(participant.capabilities.autonomyMode)}: ${participant.capabilities.autonomyNote}`
-                      : participant.capabilities.autonomyNote
-                  }
-                >
-                  <ParticipantMark participant={participant} />
-                  <span>{participant.name}</span>
+                    ? `Ask ${activeShipAgent ? agentNames[activeShipAgent] : "the active agent"} what is happening...`
+                    : "@codex State the objective once..."
+          }
+          promoting={run.state === "promoting"}
+          quickEditDisabled={sideChatAvailable || run.state === "promoting" || Boolean(quickEdit)}
+          quickEditPreview={quickEdit && (
+            <>
+              <p><strong>{agentNames[quickEdit.participant]}</strong>: {quickEdit.summary}</p>
+              <pre>{quickEdit.diff || "No file changes were produced."}</pre>
+              <div className="composer-preview-actions">
+                <button type="button" className="composer-preview-apply" onClick={() => void applyQuickEdit()} disabled={!quickEdit.diff}>
+                  <Check size={15} /> Apply edit
                 </button>
-              ))}
-            </div>
-            {chatSending ? (
-              <button type="button" className="danger-button chat-stop" onClick={handleStopChat}>
-                <CircleStop size={15} />
-                Stop response
-              </button>
-            ) : (
-              <button
-                type="submit"
-                className="send-button"
-                disabled={!objective.trim() || (composerMode === "ship" && run.state === "promoting")}
-                aria-busy={composerMode === "ask" || composerMode === "quick-edit" ? chatSending : false}
-              >
-                {composerMode === "ask" || composerMode === "quick-edit" ? <Sparkles size={15} /> : <Play size={15} fill="currentColor" />}
-                {composerMode === "ask"
-                  ? sideChatAvailable
-                    ? "Ask active run"
-                    : "Ask"
-                  : composerMode === "quick-edit"
-                    ? "Preview edit"
-                  : run.state === "promoting"
-                    ? "Promoting"
-                    : sideChatAvailable
-                    ? "Ask active run"
-                    : "Run autonomously"}
-                <kbd>Enter</kbd>
-              </button>
-            )}
-          </div>
-          {uiError && (
-            <p className="composer-error" id="composer-error" role="alert">
-              {uiError}
-            </p>
+                <button type="button" className="danger-button" onClick={() => void discardQuickEdit()}>
+                  <X size={15} /> Discard
+                </button>
+              </div>
+            </>
           )}
-        </form>
+          renderParticipantMark={(participant) => <ParticipantMark participant={participant} />}
+          shipDisabled={sideChatAvailable || run.state === "promoting"}
+          sideChatAvailable={sideChatAvailable}
+          titleForParticipant={(participant) =>
+            (composerMode === "ask" || composerMode === "quick-edit" ? canUseChat(participant) : isRunnableParticipant(participant))
+              ? `${autonomyLabel(participant.capabilities.autonomyMode)}: ${participant.capabilities.autonomyNote}`
+              : participant.capabilities.autonomyNote
+          }
+          value={objective}
+        />
           </>
         )}
       </main>
 
-      {inspectorOpen && (
-        <>
-          <div
-            className="inspector-scrim"
-            aria-hidden="true"
-            onClick={() => {
-              setInspectorOpen(false);
-              requestAnimationFrame(() => contextToggleRef.current?.focus());
-            }}
-          />
-          <div className="inspector-wrap open" id="room-context">
-            <button
-              type="button"
-              className="inspector-close"
-              aria-label="Close context"
-              onClick={() => {
-                setInspectorOpen(false);
-                requestAnimationFrame(() => contextToggleRef.current?.focus());
-              }}
-            >
-              <X size={18} />
-            </button>
-            <Inspector
-              project={project}
-              environment={environment}
-              activeTab={activeTab}
-              setActiveTab={setActiveTab}
-              run={run}
-              messages={messages}
-              receipts={receipts}
-            />
-          </div>
-        </>
-      )}
+      {inspectorOpen && <InspectorSheet project={project} environment={environment} activeTab={activeTab} setActiveTab={setActiveTab} run={run} messages={messages} receipts={receipts} onClose={() => { setInspectorOpen(false); requestAnimationFrame(() => contextToggleRef.current?.focus()); }} />}
     </div>
   );
 }

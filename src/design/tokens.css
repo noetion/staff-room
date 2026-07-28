@@ -1,0 +1,156 @@
+:root {
+  color-scheme: light dark;
+
+  --ground: #E9E6EE;
+  --surface: #FBFAFC;
+  --surface-raised: #FFFFFF;
+  --surface-sunken: #F1EFF4;
+  --ink: #0C0C0E;
+  --ink-muted: #4B4952;
+  --ink-faint: #33313A;
+  --hairline: rgb(12 12 14 / 0.46);
+  --hairline-strong: rgb(12 12 14 / 0.62);
+  --iris-lavender: #C7BDF2;
+  --iris-periwinkle: #A8C3F7;
+  --iris-mint: #A6EBD1;
+  --iris-blush: #F4C9DC;
+  --state-working: #3E5BC4;
+  --state-good: #087455;
+  --state-warn: #875400;
+  --state-bad: #C0392F;
+  --focus-ring: #3E5BC4;
+  --action: var(--ink);
+  --action-ink: #FBFAFC;
+
+  --font-display: "Onest Variable", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --t-display: 34px;
+  --lh-display: 1.05;
+  --ls-display: -0.035em;
+  --t-title: 22px;
+  --lh-title: 1.15;
+  --ls-title: -0.03em;
+  --t-heading: 16px;
+  --lh-heading: 1.25;
+  --ls-heading: -0.02em;
+  --t-body: 14px;
+  --lh-body: 1.55;
+  --ls-body: -0.005em;
+  --t-compact: 12.5px;
+  --lh-compact: 1.45;
+  --ls-compact: 0;
+  --t-micro: 11px;
+  --lh-micro: 1.35;
+  --ls-micro: 0.01em;
+  --t-label: 10px;
+  --lh-label: 1.2;
+  --ls-label: 0.07em;
+  --weight-body: 400;
+  --weight-control: 500;
+  --weight-heading: 600;
+  --weight-display: 680;
+
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --s-8: 64px;
+
+  --r-capsule: 999px;
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-xl: 28px;
+  --r-window: 12px;
+
+  --e-rest: 0 1px 2px rgb(12 12 14 / 0.04);
+  --e-raised: 0 4px 14px rgb(12 12 14 / 0.06), 0 1px 2px rgb(12 12 14 / 0.04);
+  --e-float: 0 12px 34px rgb(12 12 14 / 0.10), 0 2px 6px rgb(12 12 14 / 0.05);
+  --e-sheet: 0 28px 70px rgb(12 12 14 / 0.16), 0 4px 12px rgb(12 12 14 / 0.06);
+
+  --dur-1: 120ms;
+  --dur-2: 220ms;
+  --dur-3: 340ms;
+  --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --ease-spring: linear(0, 0.34, 0.83, 1.03, 1.01, 1);
+
+  --glass-blur: 24px;
+  --glass-tint: rgb(251 250 252 / 0.62);
+  --glass-edge: rgb(255 255 255 / 0.72);
+  --glass-specular: rgb(255 255 255 / 0.90);
+  --glass-shade: rgb(12 12 14 / 0.04);
+  --glass-clear-blur: 12px;
+  --glass-clear-tint: rgb(251 250 252 / 0.34);
+}
+
+:root[data-theme="dark"] {
+  --ground: #0F0F11;
+  --surface: #17171A;
+  --surface-raised: #1F1F23;
+  --surface-sunken: #121214;
+  --ink: #F4F2F7;
+  --ink-muted: #A5A2AE;
+  --ink-faint: #9A97A3;
+  --hairline: rgb(255 255 255 / 0.34);
+  --hairline-strong: rgb(255 255 255 / 0.48);
+  --iris-lavender: #5B4E8C;
+  --iris-periwinkle: #3F5C93;
+  --iris-mint: #2F7360;
+  --iris-blush: #7E4A61;
+  --state-working: #7E9BFF;
+  --state-good: #3FCFA2;
+  --state-warn: #E0AE5C;
+  --state-bad: #F08079;
+  --focus-ring: #2C61E5;
+  --action: #F4F2F7;
+  --action-ink: #0C0C0E;
+  --e-rest: 0 1px 2px rgb(0 0 0 / 0.10);
+  --e-raised: 0 4px 14px rgb(0 0 0 / 0.15), 0 1px 2px rgb(0 0 0 / 0.10);
+  --e-float: 0 12px 34px rgb(0 0 0 / 0.25), 0 2px 6px rgb(0 0 0 / 0.13);
+  --e-sheet: 0 28px 70px rgb(0 0 0 / 0.40), 0 4px 12px rgb(0 0 0 / 0.15);
+  --glass-blur: 28px;
+  --glass-tint: rgb(28 28 32 / 0.62);
+  --glass-edge: rgb(255 255 255 / 0.14);
+  --glass-specular: rgb(255 255 255 / 0.16);
+  --glass-shade: rgb(0 0 0 / 0.22);
+}
+
+/* Keep this dark set in sync with the explicit dark-theme block above. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #0F0F11;
+    --surface: #17171A;
+    --surface-raised: #1F1F23;
+    --surface-sunken: #121214;
+    --ink: #F4F2F7;
+    --ink-muted: #A5A2AE;
+    --ink-faint: #9A97A3;
+    --hairline: rgb(255 255 255 / 0.34);
+    --hairline-strong: rgb(255 255 255 / 0.48);
+    --iris-lavender: #5B4E8C;
+    --iris-periwinkle: #3F5C93;
+    --iris-mint: #2F7360;
+    --iris-blush: #7E4A61;
+    --state-working: #7E9BFF;
+    --state-good: #3FCFA2;
+    --state-warn: #E0AE5C;
+    --state-bad: #F08079;
+    --focus-ring: #2C61E5;
+    --action: #F4F2F7;
+    --action-ink: #0C0C0E;
+    --e-rest: 0 1px 2px rgb(0 0 0 / 0.10);
+    --e-raised: 0 4px 14px rgb(0 0 0 / 0.15), 0 1px 2px rgb(0 0 0 / 0.10);
+    --e-float: 0 12px 34px rgb(0 0 0 / 0.25), 0 2px 6px rgb(0 0 0 / 0.13);
+    --e-sheet: 0 28px 70px rgb(0 0 0 / 0.40), 0 4px 12px rgb(0 0 0 / 0.15);
+    --glass-blur: 28px;
+    --glass-tint: rgb(28 28 32 / 0.62);
+    --glass-edge: rgb(255 255 255 / 0.14);
+    --glass-specular: rgb(255 255 255 / 0.16);
+    --glass-shade: rgb(0 0 0 / 0.22);
+  }
+}
