@@ -69,4 +69,136 @@
 .primitive-disclosure[open] > summary::before { transform: rotate(90deg); }
 .primitive-disclosure > :not(summary) { margin: 0 var(--s-3) var(--s-3); }
 
+.aurora {
+  position: fixed;
+  z-index: -1;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.aurora__drift {
+  position: absolute;
+  inset: calc(var(--s-8) * -2);
+  animation: aurora-drift var(--aurora-drift-duration) linear infinite;
+  will-change: transform;
+}
+
+.aurora__layer {
+  position: absolute;
+  inset: 0;
+  filter: blur(var(--s-8));
+  transform: translateZ(0);
+  transition: opacity var(--dur-3) var(--ease-out);
+}
+
+.aurora__layer--primary {
+  background:
+    radial-gradient(circle at -8% 16%, color-mix(in srgb, var(--iris-lavender) 18%, transparent) 0, transparent 56%),
+    radial-gradient(circle at 108% 42%, color-mix(in srgb, var(--iris-blush) 16%, transparent) 0, transparent 54%),
+    radial-gradient(circle at 38% 112%, color-mix(in srgb, var(--iris-periwinkle) 10%, transparent) 0, transparent 58%);
+  opacity: 1;
+}
+
+.aurora__layer--active {
+  background:
+    radial-gradient(circle at -12% 34%, color-mix(in srgb, var(--iris-periwinkle) 18%, transparent) 0, transparent 58%),
+    radial-gradient(circle at 72% -16%, color-mix(in srgb, var(--iris-lavender) 10%, transparent) 0, transparent 52%),
+    radial-gradient(circle at 112% 94%, color-mix(in srgb, var(--iris-periwinkle) 14%, transparent) 0, transparent 56%);
+  opacity: 0;
+}
+
+.app-shell[data-run-state="complete"] .aurora__layer--primary {
+  background:
+    radial-gradient(circle at -10% 64%, color-mix(in srgb, var(--iris-mint) 18%, transparent) 0, transparent 56%),
+    radial-gradient(circle at 46% -14%, color-mix(in srgb, var(--iris-periwinkle) 9%, transparent) 0, transparent 52%),
+    radial-gradient(circle at 110% 76%, color-mix(in srgb, var(--iris-mint) 13%, transparent) 0, transparent 58%);
+}
+
+.app-shell:is(
+  [data-run-state="waiting"],
+  [data-run-state="failed"],
+  [data-run-state="stopped"]
+) .aurora__layer--primary {
+  background:
+    radial-gradient(circle at -10% 28%, color-mix(in srgb, color-mix(in srgb, var(--iris-blush) 84%, var(--state-warn)) 18%, transparent) 0, transparent 56%),
+    radial-gradient(circle at 58% -12%, color-mix(in srgb, var(--iris-blush) 12%, transparent) 0, transparent 52%),
+    radial-gradient(circle at 110% 88%, color-mix(in srgb, var(--iris-lavender) 9%, transparent) 0, transparent 58%);
+}
+
+.app-shell:is(
+  [data-run-state="selecting"],
+  [data-run-state="working"],
+  [data-run-state="verifying"],
+  [data-run-state="reviewing"],
+  [data-run-state="revising"],
+  [data-run-state="promoting"]
+) .aurora__layer--primary {
+  opacity: 0;
+}
+
+.app-shell:is(
+  [data-run-state="selecting"],
+  [data-run-state="working"],
+  [data-run-state="verifying"],
+  [data-run-state="reviewing"],
+  [data-run-state="revising"],
+  [data-run-state="promoting"]
+) .aurora__layer--active {
+  opacity: 1;
+}
+
+.app-shell {
+  isolation: isolate;
+}
+
+@keyframes aurora-drift {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  35% { transform: translate3d(calc(var(--s-8) / 2), calc(var(--s-7) * -1), 0); }
+  70% { transform: translate3d(calc(var(--s-7) * -1), calc(var(--s-6) / 2), 0); }
+}
+
+.room--signature {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.wordmark {
+  position: absolute;
+  z-index: -1;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: var(--wordmark-size, calc(var(--s-8) * 3 + var(--s-2)));
+  font-weight: var(--weight-display);
+  line-height: var(--lh-display);
+  letter-spacing: var(--wordmark-tracking);
+  opacity: 0.035;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
+}
+
+.wordmark--bottom-left {
+  inset-block-end: calc(var(--s-7) * -1);
+  inset-inline-start: calc(var(--s-5) * -1);
+}
+
+.wordmark--bottom-right {
+  inset-block-end: calc(var(--s-7) * -1);
+  inset-inline-end: calc(var(--s-5) * -1);
+}
+
 @media (forced-colors: active) { .primitive-surface, .primitive-button, .primitive-icon-button, .primitive-chip, .primitive-segmented, .primitive-field__control, .primitive-monogram, .primitive-disclosure { border: 1px solid CanvasText; color: CanvasText; background: Canvas; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora__drift {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  .aurora {
+    display: none;
+  }
+}

@@ -81,7 +81,7 @@ import { NavRail, TitleBar } from "./components/chrome";
 import { StatusPill } from "./components/chrome/StatusPill";
 import { Conversation } from "./components/conversation";
 import { RunProgressCard } from "./components/conversation/RunProgressCard";
-import { Monogram } from "./components/primitives";
+import { Aurora, Monogram, RefractionFilter, Wordmark } from "./components/primitives";
 import { ActivityView, AttachProjectView, EmptyState, RoomHeader } from "./components/views";
 import { SettingsView } from "./components/settings";
 export { ProviderProfileCard } from "./components/settings";
@@ -1613,6 +1613,11 @@ export function App() {
 
   return (
     <div className="app-shell" data-run-state={run.state}>
+      <Aurora />
+      <RefractionFilter
+        composerVisible={environment.attached && activeView === "rooms"}
+        surfaceKey={`${environment.attached}:${activeView}`}
+      />
       <a className="skip-link" href="#room-main">
         Skip to room
       </a>
@@ -1653,7 +1658,17 @@ export function App() {
         onAttachProject={handleAttachProject}
       />
 
-      <main className="room" id="room-main" tabIndex={-1}>
+      <main
+        className={`room${!environment.attached || activeView === "settings" ? " room--signature" : ""}`}
+        id="room-main"
+        tabIndex={-1}
+      >
+        {(!environment.attached || activeView === "settings") && (
+          <Wordmark
+            corner="bottom-left"
+            size="calc(var(--s-8) * 3 + var(--s-2))"
+          />
+        )}
         {(activeStates.includes(run.state) || ["waiting", "failed", "stopped"].includes(run.state)) && (
           <StatusPill
             state={run.state}
@@ -1718,7 +1733,6 @@ export function App() {
         >
           {!messages.length && !searchQuery && (
             <EmptyState
-              wordmark
               title="Nothing has happened in this room yet."
               suggestions={[
                 { label: "Plan the next task", value: "Plan the next task for this repository." },
