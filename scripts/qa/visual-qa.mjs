@@ -171,29 +171,42 @@ async function checkAxe(page, label, axe) {
 }
 
 async function checkFocusVisibility(page, label) {
-  const bad = await page.evaluate(async () => {
-    const focusables = [
-      ...document.querySelectorAll(
-        'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),summary,[tabindex]:not([tabindex="-1"])',
-      ),
-    ].slice(0, 40);
-    const offenders = [];
-    for (const el of focusables) {
-      const before = getComputedStyle(el);
-      const rest = `${before.outlineWidth}|${before.boxShadow}`;
-      el.focus();
-      const after = getComputedStyle(el);
-      const focused = `${after.outlineWidth}|${after.boxShadow}`;
-      if (rest === focused) {
-        offenders.push(
-          `${el.tagName.toLowerCase()}.${String(el.className).slice(0, 40)}`,
-        );
-      }
-    }
-    return offenders;
-  });
-  if (bad.length) fail("focus-visible", `${label}: ${bad.length} element(s) show no focus change`, { elements: bad.slice(0, 8) });
-  else ok(`focus-visible ${label}`);
+  // Must be driven by real Tab presses. Calling el.focus() from page context
+  // does NOT reliably set :focus-visible in Chromium - the heuristic depends on
+  // the last input modality - so a scripted focus loop reports false failures on
+  // every button. Tab is the modality users actually complain about anyway.
+  const offenders = [];
+  const seen = new Set();
+
+  await page.evaluate(() => document.body.focus());
+  for (let i = 0; i < 40; i += 1) {
+    await page.keyboard.press("Tab");
+    const info = await page.evaluate(() => {
+      const el = document.activeElement;
+      if (!el || el === document.body) return null;
+      const s = getComputedStyle(el);
+      const id =
+        el.tagName.toLowerCase() +
+        (el.id ? "#" + el.id : "") +
+        "." + String(el.className || "").split(" ").slice(0, 2).join(".");
+      const outline = parseFloat(s.outlineWidth) || 0;
+      const hasRing =
+        (outline > 0 && s.outlineStyle !== "none") ||
+        (s.boxShadow && s.boxShadow !== "none");
+      return { id, hasRing, focusVisible: el.matches(":focus-visible") };
+    });
+    if (!info) break;
+    if (seen.has(info.id)) continue;   // wrapped around the tab order
+    seen.add(info.id);
+    // Only a genuinely focus-visible element owes the user an indicator.
+    if (info.focusVisible && !info.hasRing) offenders.push(info.id);
+  }
+
+  if (offenders.length) {
+    fail("focus-visible", `${label}: ${offenders.length} element(s) show no focus indicator`, {
+      elements: offenders.slice(0, 8),
+    });
+  } else ok(`focus-visible ${label} (${seen.size} stops)`);
 }
 
 async function checkReducedMotion(page, label) {
