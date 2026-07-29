@@ -15,7 +15,10 @@
   grid-row: 1;
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: max-content minmax(0, calc(var(--s-8) * 4)) minmax(var(--s-3), 1fr) max-content max-content max-content max-content;
+  /* Eight children: brand, project switch, drag region, search, status, theme
+     toggle, inspector toggle, window controls. Seven columns left the window
+     controls on an implicit second row, floating outside the bar. */
+  grid-template-columns: max-content minmax(0, calc(var(--s-8) * 4)) minmax(var(--s-3), 1fr) max-content max-content max-content max-content max-content;
   align-items: center;
   gap: var(--s-2);
   min-width: 0;
@@ -109,7 +112,7 @@
 }
 
 @media (max-width: 64rem) {
-  .chrome-titlebar { grid-template-columns: max-content minmax(0, calc(var(--s-8) * 3)) minmax(var(--s-2), 1fr) max-content max-content max-content max-content; }
+  .chrome-titlebar { grid-template-columns: max-content minmax(0, calc(var(--s-8) * 3)) minmax(var(--s-2), 1fr) max-content max-content max-content max-content max-content; }
   .chrome-search-button span,
   .chrome-search-button kbd { display: none; }
   .chrome-search-field { min-width: calc(var(--s-8) * 3); }
