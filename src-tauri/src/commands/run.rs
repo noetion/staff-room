@@ -24,11 +24,15 @@ pub(crate) async fn start_room_run(
             let connection = database.0.lock().map_err(|error| error.to_string())?;
             connection
                 .query_row(
+                    // 'promoting' must be included: promotion flips the row out of
+                    // 'awaiting-promotion' before it starts seconds of git work, and
+                    // a new Ship run starting inside that window snapshots a
+                    // half-applied checkout.
                     "SELECT EXISTS(
                         SELECT 1 FROM runs
                         WHERE project_id = ?1
                           AND worktree_path IS NOT NULL
-                          AND state = 'awaiting-promotion'
+                          AND state IN ('awaiting-promotion', 'promoting')
                     )",
                     [&project_id],
                     |row| row.get::<_, bool>(0),
@@ -181,6 +185,27 @@ fn approve_run_promotion_inner(
         .app_cache_dir()
         .map_err(|error| error.to_string())?
         .join("worktrees");
+    // Claim the run atomically before any git work begins. The `state` read above
+    // is only a fast-fail; promotion then spends seconds in git apply/merge, and
+    // reading-then-writing across that window let a second promotion or an
+    // abandon act on the same worktree. Every validation above this point leaves
+    // the row untouched, so a rejected promotion stays promotable.
+    {
+        let connection = database.0.lock().map_err(|error| error.to_string())?;
+        let claimed = connection
+            .execute(
+                "UPDATE runs SET state = 'promoting'
+                 WHERE id = ?1 AND project_id = ?2 AND state = 'awaiting-promotion'",
+                params![request.run_id, request.project_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if claimed == 0 {
+            return Err(
+                "This run is no longer awaiting promotion. Reload the room and try again."
+                    .to_owned(),
+            );
+        }
+    }
     update_run(
         database,
         &request.run_id,

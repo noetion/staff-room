@@ -36,13 +36,39 @@ pub(crate) async fn wait_for_idle(mut activity: watch::Receiver<u64>, timeout_se
     }
 }
 
+/// On Windows `Child::kill` is a `TerminateProcess` on the direct child only.
+/// Providers resolve to `.cmd` shims and verification runs through `cmd /C`, so
+/// killing the child leaves the real worker (node.exe, the agent runtime) alive
+/// and still holding handles inside the managed worktree — which then fails to
+/// remove, and surfaces only as a cleanup warning.
+#[cfg(windows)]
+pub(crate) async fn kill_pid_tree(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        let pid_text = pid.to_string();
+        let mut command = Command::new("taskkill");
+        hide_tokio_command_window(&mut command);
+        let _ = command
+            .args(["/T", "/F", "/PID", pid_text.as_str()])
+            .status()
+            .await;
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn kill_pid_tree(_pid: Option<u32>) {}
+
+pub(crate) async fn kill_tree(child: &mut tokio::process::Child) {
+    kill_pid_tree(child.id()).await;
+    let _ = child.kill().await;
+}
+
 async fn stop_for_idle(
     child: &mut tokio::process::Child,
 ) -> Result<(std::process::ExitStatus, bool), String> {
     if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
         return Ok((status, false));
     }
-    let _ = child.kill().await;
+    kill_tree(child).await;
     child
         .wait()
         .await
@@ -98,6 +124,11 @@ pub(crate) async fn invoke_provider(
     let stderr_log_path = artifact_dir.join(format!("{}.stderr.log", phase.as_str()));
     let prompt_path = artifact_dir.join(format!("{}.prompt.txt", phase.as_str()));
     std::fs::write(&prompt_path, prompt).map_err(|error| error.to_string())?;
+    // Artifact paths are keyed on run_id, and a recovery attempt reuses the run_id.
+    // If this phase exits without rewriting its `-o` file, read_to_string below would
+    // silently return the *previous* attempt's handoff — including a stale
+    // "status":"completed" or a stale review approval. Never inherit one.
+    let _ = std::fs::remove_file(final_output_path);
     let argv_prompt = format!(
         "Read the file at {} in full. It contains your complete assignment. Follow it exactly.",
         prompt_path.display()
@@ -338,13 +369,13 @@ pub(crate) async fn invoke_provider(
         changed = cancellation.changed() => {
             if cancellation_requested(&cancellation, changed) {
                 stopped = true;
-                let _ = child.kill().await;
+                kill_tree(&mut child).await;
             }
             child.wait().await.map_err(|error| error.to_string())?
         },
         _ = sleep(Duration::from_secs(PROCESS_TIMEOUT_SECONDS)) => {
             timed_out = true;
-            let _ = child.kill().await;
+            kill_tree(&mut child).await;
             child.wait().await.map_err(|error| error.to_string())?
         },
         _ = wait_for_idle(activity_receiver, idle_timeout_seconds(phase)) => {
@@ -355,7 +386,7 @@ pub(crate) async fn invoke_provider(
         changed = completion_receiver.changed() => {
             if changed.is_ok() && *completion_receiver.borrow() {
                 completed_handoff = true;
-                let _ = child.kill().await;
+                kill_tree(&mut child).await;
             }
             child.wait().await.map_err(|error| error.to_string())?
         }

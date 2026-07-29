@@ -199,12 +199,23 @@ fn create_isolation_at_root(
                 base_head.clone(),
             ],
         )?;
-        if patch
-            .metadata()
-            .map(|value| value.len())
-            .unwrap_or_default()
-            > 0
-        {
+        // This is the only place in this closure that turned an error into a
+        // no-op. A stat failure (sharing violation from an AV scanner, a
+        // permission or long-path failure on the managed root) used to read as
+        // "empty patch", so the snapshot silently omitted every uncommitted
+        // change to tracked files and the agent built against a stale premise
+        // that no later guard catches. A missing file is still treated as empty,
+        // because git omits the output file when there is nothing to diff.
+        let patch_bytes = match patch.metadata() {
+            Ok(value) => value.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => {
+                return Err(format!(
+                    "Could not inspect the workspace snapshot patch: {error}"
+                ))
+            }
+        };
+        if patch_bytes > 0 {
             git(
                 &worktree,
                 &[

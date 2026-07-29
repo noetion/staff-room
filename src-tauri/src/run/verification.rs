@@ -135,11 +135,19 @@ pub(crate) async fn run_verification_command(
         .stderr(std::process::Stdio::piped());
     match process.spawn() {
         Ok(child) => {
+            // wait_with_output consumes the child, so on cancel/timeout only
+            // kill_on_drop runs — and on Windows that kills cmd.exe while the
+            // real test runner keeps executing inside the managed worktree,
+            // holding handles that later break worktree removal.
+            let child_pid = child.id();
             let outcome = tokio::select! {
                 output = child.wait_with_output() => output.ok(),
                 _ = cancellation.changed() => None,
                 _ = sleep(Duration::from_secs(10 * 60)) => None,
             };
+            if outcome.is_none() {
+                kill_pid_tree(child_pid).await;
+            }
             match outcome {
                 Some(output) => {
                     let combined = format!(
@@ -183,8 +191,25 @@ pub(crate) async fn run_verification_command(
     }
 }
 
+/// Every configured check must have actually completed and passed.
+///
+/// The prepare step shares this vector and reports "passed" on success, so the
+/// old `any(passed) && !any(failed)` form returned true for
+/// `[prepare: passed, npm test: not-run]` — the shape produced when a run is
+/// cancelled during the first real command. A cancelled verification must never
+/// read as a passing one.
 pub(crate) fn verification_passed(results: &[VerificationResult]) -> bool {
-    results.iter().any(|result| result.status == "passed")
+    let mut checked_any = false;
+    for result in results
+        .iter()
+        .filter(|result| result.label != "Prepare dependencies")
+    {
+        if result.status != "passed" {
+            return false;
+        }
+        checked_any = true;
+    }
+    checked_any
         && !results
             .iter()
             .any(|result| matches!(result.status.as_str(), "failed" | "unavailable"))

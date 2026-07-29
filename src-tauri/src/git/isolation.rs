@@ -135,11 +135,26 @@ pub(crate) fn commit_managed_changes(worktree: &Path, objective: &str) -> Result
 }
 
 pub(crate) fn diff_evidence(worktree: &Path, base_head: &str) -> String {
-    let stat = git_static(worktree, &["diff", "--stat", base_head, "HEAD"]).unwrap_or_default();
-    let diff = git_static(
+    // A swallowed error here used to produce "\n\n", which assemble_packet drops as
+    // empty — so the reviewer silently received no delta at all and could still
+    // answer "approved". Failure has to be loud enough that it cannot be approved
+    // through.
+    let diff = match git_static(
         worktree,
         &["diff", "--no-ext-diff", "--unified=2", base_head, "HEAD"],
-    )
-    .unwrap_or_default();
+    ) {
+        Ok(diff) => diff,
+        Err(error) => {
+            return format!(
+                "DELTA UNAVAILABLE: Agent Room could not compute the repository delta ({error}). \
+                 You have not been shown the change. Do not approve; \
+                 return status `changes_required` citing missing evidence."
+            )
+        }
+    };
+    let stat = match git_static(worktree, &["diff", "--stat", base_head, "HEAD"]) {
+        Ok(stat) => stat,
+        Err(error) => format!("(diffstat unavailable: {error})"),
+    };
     truncate_utf8(&format!("{stat}\n\n{diff}"), SOURCE_BUDGET_BYTES * 2)
 }
