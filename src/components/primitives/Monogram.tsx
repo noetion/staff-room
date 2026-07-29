@@ -9,8 +9,10 @@ export type MonogramProps = HTMLAttributes<HTMLSpanElement> & {
 };
 
 export const Monogram = forwardRef<HTMLSpanElement, MonogramProps>(function Monogram(
-  { className, label, size = "md", ring, tone = "neutral", shape = "square", style, ...props },
+  { className, label, size = "md", ring, tone = "neutral", shape = "square", style, children, ...props },
   ref,
 ) {
-  return <span {...props} ref={ref} style={{ ...style, "--monogram-ring": ring ? `var(${ring})` : undefined } as CSSProperties} className={["primitive-monogram", `primitive-monogram--${size}`, `primitive-monogram--${tone}`, `primitive-monogram--${shape}`, className].filter(Boolean).join(" ")}>{label}</span>;
+  // Children win when supplied. Rendering `label` unconditionally silently
+  // discarded the caller's mark and printed the accessible name instead.
+  return <span {...props} ref={ref} style={{ ...style, "--monogram-ring": ring ? `var(${ring})` : undefined } as CSSProperties} className={["primitive-monogram", `primitive-monogram--${size}`, `primitive-monogram--${tone}`, `primitive-monogram--${shape}`, className].filter(Boolean).join(" ")}>{children ?? label}</span>;
 });

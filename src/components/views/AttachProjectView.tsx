@@ -29,9 +29,9 @@ export function AttachProjectView({ projects, native, onAttach, onSelect }: Atta
             <span className="recent-projects-label">Recent projects</span>
             {projects.map((recentProject) => (
               <button key={recentProject.id} type="button" className="recent-project" onClick={() => onSelect(recentProject.id)}>
-                <Monogram label={recentProject.name} aria-hidden="true">
-                  {recentProject.name.slice(0, 2).toUpperCase()}
-                </Monogram>
+                {/* Monogram renders its `label`, not its children, so the label
+                    has to be the two-letter mark rather than the full name. */}
+                <Monogram label={recentProject.name.slice(0, 2).toUpperCase()} aria-hidden="true" />
                 <span className="recent-project-copy">
                   <strong>{recentProject.name}</strong>
                   <code>{recentProject.branch}</code>

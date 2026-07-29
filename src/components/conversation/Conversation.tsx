@@ -8,7 +8,7 @@ import {
 } from "react";
 import { groupMessages, type MessageGroup as Group } from "../../lib/grouping";
 import { agentNames, type AgentKind, type ExecutionReceipt, type RoomMessage, type Run } from "../../model";
-import { initials } from "../../lib/format";
+import { calendarDay, initials } from "../../lib/format";
 import { Monogram } from "../primitives";
 import { DayDivider } from "./DayDivider";
 import { MessageGroup } from "./MessageGroup";
@@ -33,11 +33,6 @@ export interface ConversationProps {
   renderMessage: (message: RoomMessage) => ReactNode;
   onResume: () => void;
   children?: ReactNode;
-}
-
-function calendarDay(value: string) {
-  const date = new Date(value);
-  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 }
 
 function splitAtDayBoundaries(groups: Group[]) {

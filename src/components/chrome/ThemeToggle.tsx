@@ -1,5 +1,5 @@
 import { Monitor, Moon, Sun } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type ThemePreference = "system" | "light" | "dark";
 
@@ -12,14 +12,25 @@ function themePreference(): ThemePreference {
 
 function applyTheme(preference: ThemePreference) {
   localStorage.setItem("ar-theme", preference);
-  const resolved = preference === "system"
-    ? window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
-    : preference;
-  document.documentElement.dataset.theme = resolved;
+  // "System" must leave the attribute off. Baking the resolved value in pinned
+  // the app to whatever the OS happened to be at the moment of the click, and
+  // disagreed with the boot script in main.tsx, which clears it.
+  if (preference === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = preference;
 }
 
 export function ThemeToggle() {
   const [preference, setPreference] = useState<ThemePreference>(themePreference);
+
+  // Keep the meta theme-color and any JS-observed state honest when the OS
+  // flips while "system" is selected.
+  useEffect(() => {
+    if (preference !== "system" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const sync = () => applyTheme("system");
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, [preference]);
   const nextPreference: Record<ThemePreference, ThemePreference> = {
     system: "light",
     light: "dark",

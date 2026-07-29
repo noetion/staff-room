@@ -1,19 +1,23 @@
+import { calendarDay, parseTimestamp } from "../../lib/format";
+
 export interface DayDividerProps {
   date: string;
 }
 
-function calendarDay(value: Date) {
+function localDay(value: Date) {
   return `${value.getFullYear()}-${value.getMonth()}-${value.getDate()}`;
 }
 
 function dayLabel(value: string) {
-  const date = new Date(value);
+  const time = parseTimestamp(value);
+  if (Number.isNaN(time)) return "EARLIER";
+  const date = new Date(time);
   const today = new Date();
   const yesterday = new Date();
   yesterday.setDate(today.getDate() - 1);
 
-  if (calendarDay(date) === calendarDay(today)) return "TODAY";
-  if (calendarDay(date) === calendarDay(yesterday)) return "YESTERDAY";
+  if (calendarDay(value) === localDay(today)) return "TODAY";
+  if (calendarDay(value) === localDay(yesterday)) return "YESTERDAY";
   return new Intl.DateTimeFormat("en-GB", {
     weekday: "short",
     day: "2-digit",

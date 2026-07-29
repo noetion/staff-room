@@ -1,6 +1,6 @@
 import { Fragment, memo, type ReactNode } from "react";
 import { agentNames, type AgentKind, type ExecutionReceipt, type RoomMessage, type Run } from "../../model";
-import { initials, relativeTime } from "../../lib/format";
+import { initials, parseTimestamp, relativeTime } from "../../lib/format";
 import type { MessageGroup as Group } from "../../lib/grouping";
 import { Monogram } from "../primitives";
 import { DeliveryLine } from "./DeliveryLine";
@@ -31,10 +31,10 @@ function senderName(message: RoomMessage) {
 }
 
 function receiptAfter(message: RoomMessage, receipts: ExecutionReceipt[]) {
-  const createdAt = new Date(message.createdAt).getTime();
+  const createdAt = parseTimestamp(message.createdAt);
   return [...receipts]
     .reverse()
-    .find((receipt) => new Date(receipt.createdAt).getTime() >= createdAt);
+    .find((receipt) => parseTimestamp(receipt.createdAt) >= createdAt);
 }
 
 function MessageGroupComponent({

@@ -1,11 +1,6 @@
 import {
   Braces,
   Check,
-  CircleAlert,
-  GitBranch,
-  HardDrive,
-  History,
-  ShieldCheck,
   X,
 } from "lucide-react";
 import {
@@ -30,19 +25,12 @@ import type {
   RunState,
   VerificationConfig,
 } from "./model";
-import { AttentionCard, EvidenceCard, MarkdownBody, VerificationList } from "./components/conversation";
+import { AttentionCard, EvidenceCard, MarkdownBody } from "./components/conversation";
 import { agentNames } from "./model";
 import {
   type ProviderDraft,
 } from "./lib/provider-profiles";
-import {
-  contextLabel,
-  elapsedTime,
-  initials,
-  latencyLabel,
-  millisecondsLabel,
-  usageLabel,
-} from "./lib/format";
+import { initials } from "./lib/format";
 import {
   autonomyLabel,
   canUseChat,
@@ -142,6 +130,9 @@ const emptyRun: Run = {
   revisionCount: 0,
   startedAt: "",
 };
+/** How close to the bottom of the timeline still counts as "following the run". */
+const followThresholdPx = 120;
+
 type ComposerMode = "ask" | "quick-edit" | "ship";
 type LiveActivityItem = { title: string; detail: string };
 type QuickEditPreview = QuickEditResult & { projectId: string; projectName: string };
@@ -180,610 +171,6 @@ function TimelineMessageContent({ message }: { message: RoomMessage }) {
   );
 }
 
-/* export function ProviderProfileCard({
-  participant,
-  profiles,
-  saving,
-  onSave,
-  testing,
-  onTest,
-  models,
-  hasAuthoritativeCatalog,
-  discoveringModels,
-  modelDiscoveryDetail,
-  onRefreshModels,
-}: {
-  participant: Participant;
-  profiles: ProviderProfile[];
-  saving: boolean;
-  onSave: (profiles: ProviderProfile[]) => Promise<void>;
-  testing: boolean;
-  onTest: (kind: AgentKind, draft: ProviderDraft) => void;
-  models: string[];
-  hasAuthoritativeCatalog: boolean;
-  discoveringModels: boolean;
-  modelDiscoveryDetail?: string;
-  onRefreshModels: (kind: AgentKind) => void;
-}) {
-  const routes: ProviderRoute[] = ["chat", "build", "review"];
-  const [drafts, setDrafts] = useState<Record<ProviderRoute, ProviderDraft>>({
-    chat: { model: "", effort: "" },
-    build: { model: "", effort: "" },
-    review: { model: "", effort: "" },
-  });
-
-  useEffect(() => {
-    setDrafts(Object.fromEntries(routes.map((route) => {
-      const profile = profiles.find((value) => value.route === route);
-      return [route, {
-        model: profile?.model ?? "",
-        effort: profile?.effort ?? "",
-      }];
-    })) as typeof drafts);
-  }, [profiles]);
-
-  const modelOptions = providerModelOptions(models, profiles, hasAuthoritativeCatalog);
-
-  return (
-    <article className="participant-card provider-profile-card">
-      <div className="participant-row">
-        <ParticipantMark participant={participant} />
-        <span className="participant-copy">
-          <strong>{participant.name}</strong>
-          <small>{participant.installed ? participant.version ?? "Installed" : "Not installed"}</small>
-        </span>
-        <span className={`status-chip connection-${participant.connectionStatus}`}>
-          {connectionLabel(participant.connectionStatus)}
-        </span>
-      </div>
-      <p className="connection-detail" role={participant.connectionStatus === "connected" ? undefined : "status"}>
-        {participant.connectionDetail}
-      </p>
-      {capabilityChips(participant).length > 0 && (
-        <div className="capability-chips" aria-label={`${participant.name} capability limits`}>
-          {capabilityChips(participant).map((chip) => <span key={chip}>{chip}</span>)}
-        </div>
-      )}
-      <div className="route-profile-list">
-        {routes.map((route) => (
-          <div className="route-profile-row" key={route}>
-            <strong>{route === "chat" ? "Chat" : route === "build" ? "Builder" : "Reviewer"}</strong>
-            <label htmlFor={`model-${participant.kind}-${route}`}>
-              <span>Model</span>
-              <input
-                id={`model-${participant.kind}-${route}`}
-                list={`models-${participant.kind}`}
-                value={drafts[route].model}
-                onChange={(event) => setDrafts((current) => ({
-                  ...current,
-                  [route]: { ...current[route], model: event.target.value },
-                }))}
-                disabled={!participant.installed || saving}
-                placeholder="Default"
-              />
-              <datalist id={`models-${participant.kind}`}>
-                {modelOptions.map((option) => (
-                  <option key={option.value} value={option.value} label={option.label} />
-                ))}
-              </datalist>
-            </label>
-            <label htmlFor={`effort-${participant.kind}-${route}`}>
-              <span>Effort</span>
-              <select
-                id={`effort-${participant.kind}-${route}`}
-                value={drafts[route].effort}
-                onChange={(event) => setDrafts((current) => ({
-                  ...current,
-                  [route]: { ...current[route], effort: event.target.value },
-                }))}
-                disabled={
-                  !participant.installed
-                  || saving
-                  || !participant.supportsEffort
-                  || participant.kind === "cursor"
-                }
-                title={
-                  participant.kind === "cursor"
-                    ? "Cursor model identifiers already encode effort."
-                    : undefined
-                }
-              >
-                <option value="">Default</option>
-                {participant.effortOptions.filter((option) => (
-                  participant.kind !== "codex"
-                  || drafts[route].model === "gpt-5.6-sol"
-                  || !["max", "ultra"].includes(option)
-                )).map((option) => (
-                  <option key={option} value={option}>
-                    {option[0].toUpperCase() + option.slice(1)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        ))}
-      </div>
-      {participant.kind === "cursor" && (
-        <small className="model-discovery-note">
-          Cursor model identifiers already include effort, thinking, and speed. Refresh Models and select an exact identifier.
-        </small>
-      )}
-      <small className="model-discovery-note" title={modelDiscoveryDetail ?? participant.modelDiscoveryNote}>
-        {modelDiscoveryDetail ?? participant.modelDiscoveryNote}
-      </small>
-      <details className="provider-details">
-        <summary>Runtime capability</summary>
-        <p>{participant.capabilities.autonomyNote}</p>
-      </details>
-      <div className="profile-actions">
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={!participant.installed || discoveringModels}
-          onClick={() => onRefreshModels(participant.kind)}
-        >
-          <RefreshCw size={14} className={discoveringModels ? "spinning" : undefined} />
-          {discoveringModels ? "Refreshing" : "Models"}
-        </button>
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={!participant.installed || saving}
-          onClick={() => onSave(routes.map((route) => ({
-            participantKind: participant.kind,
-            route,
-            model: drafts[route].model.trim() || undefined,
-            effort: drafts[route].effort || undefined,
-          })))}
-        >
-          {saving ? "Saving" : "Save"}
-        </button>
-        <button
-          type="button"
-          className="secondary-button"
-          aria-label={`Test ${participant.name} connection`}
-          disabled={!participant.installed || testing}
-          onClick={() => onTest(participant.kind, connectionTestDraft(drafts.chat))}
-        >
-          {testing ? "Testing" : "Test"}
-        </button>
-      </div>
-    </article>
-  );
-}
-
-function LegacySettingsView({
-  environment,
-  profiles,
-  projectSettings,
-  verificationConfig,
-  savingProjectSettings,
-  savingKind,
-  refreshing,
-  native,
-  error,
-  onRefresh,
-  onSaveProfile,
-  testingKind,
-  onTestConnection,
-  modelCatalog,
-  discoveringModelsKind,
-  modelDiscoveryDetails,
-  onRefreshModels,
-  onAutonomousShipChange,
-  onVerificationConfigChange,
-  onSaveVerificationConfig,
-}: {
-  environment: NativeEnvironment;
-  profiles: ProviderProfile[];
-  projectSettings: ProjectSettings;
-  verificationConfig: VerificationConfig;
-  savingProjectSettings: boolean;
-  savingKind?: AgentKind;
-  refreshing: boolean;
-  native: boolean;
-  error: string;
-  onRefresh: () => void;
-  onSaveProfile: (profiles: ProviderProfile[]) => Promise<void>;
-  testingKind?: AgentKind;
-  onTestConnection: (kind: AgentKind, draft: ProviderDraft) => void;
-  modelCatalog: Partial<Record<AgentKind, string[]>>;
-  discoveringModelsKind?: AgentKind;
-  modelDiscoveryDetails: Partial<Record<AgentKind, string>>;
-  onRefreshModels: (kind: AgentKind) => void;
-  onAutonomousShipChange: (enabled: boolean) => void;
-  onVerificationConfigChange: (config: VerificationConfig) => void;
-  onSaveVerificationConfig: () => void;
-}) {
-  return (
-    <section className="utility-screen" aria-labelledby="settings-title">
-      <header className="utility-header utility-header-actions">
-        <div>
-          <span className="eyebrow">Local runtime</span>
-          <h1 id="settings-title">Models and runtime</h1>
-          <p>Choose exact provider models once per project. Agent Room stores the requested choice and records what each CLI reports for every phase.</p>
-        </div>
-        <button type="button" className="secondary-button" onClick={onRefresh} disabled={refreshing}>
-          <RefreshCw size={15} className={refreshing ? "spinning" : undefined} />
-          {refreshing ? "Checking providers" : "Recheck providers"}
-        </button>
-      </header>
-      {!native && <EmptyState title="Provider checks are unavailable in browser preview." />}
-      {error && <ErrorState cause={error} action={<button type="button" className="secondary-button" onClick={onRefresh}>Recheck providers</button>} />}
-      <div className="autonomy-setting">
-        <div>
-          <strong>Hands-free autonomous Ship</strong>
-          <p>When armed, an agent can apply the autonomous-ship skill and start the isolated Ship workflow without another approval. Verification, review, bounded recovery, and promotion gates remain coordinator-owned.</p>
-        </div>
-        <label className="switch-control">
-          <input
-            type="checkbox"
-            checked={projectSettings.autonomousShipEnabled}
-            disabled={!native || savingProjectSettings}
-            onChange={(event) => onAutonomousShipChange(event.target.checked)}
-          />
-          <span>{projectSettings.autonomousShipEnabled ? "Armed" : "Off"}</span>
-        </label>
-      </div>
-      <section className="verification-setting" aria-labelledby="verification-settings-title">
-        <div>
-          <strong id="verification-settings-title">Verification</strong>
-          <p>Commands are detected once when a repository is attached. Edit them here; they will not be replaced automatically.</p>
-        </div>
-        <label className="switch-control">
-          <input
-            type="checkbox"
-            checked={verificationConfig.enabled}
-            disabled={!native || savingProjectSettings}
-            onChange={(event) => onVerificationConfigChange({ ...verificationConfig, enabled: event.target.checked })}
-          />
-          <span>{verificationConfig.enabled ? "Enabled" : "Disabled"}</span>
-        </label>
-        <label className="verification-field">
-          <span>Prepare command</span>
-          <input
-            value={verificationConfig.prepare ?? ""}
-            disabled={!native || savingProjectSettings}
-            placeholder="Optional command before checks"
-            onChange={(event) => onVerificationConfigChange({ ...verificationConfig, prepare: event.target.value || undefined })}
-          />
-        </label>
-        <div className="verification-commands">
-          {verificationConfig.commands.map((command, index) => (
-            <div className="verification-command" key={`${command.label}-${index}`}>
-              <input
-                value={command.label}
-                aria-label={`Verification label ${index + 1}`}
-                disabled={!native || savingProjectSettings}
-                onChange={(event) => onVerificationConfigChange({
-                  ...verificationConfig,
-                  commands: verificationConfig.commands.map((value, valueIndex) => valueIndex === index ? { ...value, label: event.target.value } : value),
-                })}
-              />
-              <input
-                value={command.command}
-                aria-label={`Verification command ${index + 1}`}
-                disabled={!native || savingProjectSettings}
-                onChange={(event) => onVerificationConfigChange({
-                  ...verificationConfig,
-                  commands: verificationConfig.commands.map((value, valueIndex) => valueIndex === index ? { ...value, command: event.target.value } : value),
-                })}
-              />
-              <label className="switch-control">
-                <input
-                  type="checkbox"
-                  checked={command.enabled}
-                  disabled={!native || savingProjectSettings}
-                  onChange={(event) => onVerificationConfigChange({
-                    ...verificationConfig,
-                    commands: verificationConfig.commands.map((value, valueIndex) => valueIndex === index ? { ...value, enabled: event.target.checked } : value),
-                  })}
-                />
-                <span>Run</span>
-              </label>
-              <button
-                type="button"
-                className="secondary-button"
-                disabled={!native || savingProjectSettings}
-                onClick={() => onVerificationConfigChange({ ...verificationConfig, commands: verificationConfig.commands.filter((_, valueIndex) => valueIndex !== index) })}
-              >
-                Remove
-              </button>
-            </div>
-          ))}
-        </div>
-        <div className="verification-actions">
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={!native || savingProjectSettings || verificationConfig.commands.length >= 4}
-            onClick={() => onVerificationConfigChange({
-              ...verificationConfig,
-              commands: [...verificationConfig.commands, { label: "Project check", command: "", enabled: true }],
-            })}
-          >
-            Add check
-          </button>
-          <button type="button" className="primary-button" disabled={!native || savingProjectSettings} onClick={onSaveVerificationConfig}>
-            {savingProjectSettings ? "Saving…" : "Save verification"}
-          </button>
-        </div>
-      </section>
-      <div className="settings-grid">
-        {environment.participants.map((participant) => (
-          <ProviderProfileCard
-            key={participant.kind}
-            participant={participant}
-            profiles={profiles.filter((profile) => profile.participantKind === participant.kind)}
-            saving={savingKind === participant.kind}
-            onSave={onSaveProfile}
-            testing={testingKind === participant.kind}
-            onTest={onTestConnection}
-            models={modelCatalog[participant.kind] ?? participant.models}
-            hasAuthoritativeCatalog={modelCatalog[participant.kind] !== undefined}
-            discoveringModels={discoveringModelsKind === participant.kind}
-            modelDiscoveryDetail={modelDiscoveryDetails[participant.kind]}
-            onRefreshModels={onRefreshModels}
-          />
-        ))}
-      </div>
-      <p className="settings-disclosure">Token totals appear only when a CLI emits them in its native run output. Provider account quotas and reset windows are not scraped or guessed.</p>
-    </section>
-  );
-} */
-
-function Inspector({
-  project,
-  environment,
-  activeTab,
-  setActiveTab,
-  run,
-  messages,
-  receipts,
-}: {
-  project: Project;
-  environment: NativeEnvironment;
-  activeTab: InspectorTab;
-  setActiveTab: (tab: InspectorTab) => void;
-  run: Run;
-  messages: RoomMessage[];
-  receipts: ExecutionReceipt[];
-}) {
-  const tabs: InspectorTab[] = ["Repository", "Participants", "Evidence", "Memory"];
-  const latestEvidence = [...messages].reverse().find((message) => message.kind === "evidence");
-  const verification = latestEvidence?.verification ?? [];
-  return (
-    <aside className="inspector">
-      <div className="inspector-tabs" role="tablist">
-        {tabs.map((tab) => (
-          <button
-            type="button"
-            key={tab}
-            id={`inspector-tab-${tab.toLowerCase()}`}
-            className={activeTab === tab ? "active" : ""}
-            onClick={() => setActiveTab(tab)}
-            role="tab"
-            aria-selected={activeTab === tab}
-            aria-controls={`inspector-panel-${tab.toLowerCase()}`}
-            tabIndex={activeTab === tab ? 0 : -1}
-          >
-            {tab}
-          </button>
-        ))}
-      </div>
-
-      {activeTab === "Repository" && (
-        <div
-          className="inspector-body"
-          id="inspector-panel-repository"
-          role="tabpanel"
-          aria-labelledby="inspector-tab-repository"
-        >
-          <div className="inspector-heading">
-            <GitBranch size={17} />
-            <span>
-              <small>Base checkout</small>
-              <strong>{project.name}</strong>
-            </span>
-          </div>
-          <div className="data-row">
-            <span>Branch</span>
-            <code>{environment.branch || "unavailable"}</code>
-          </div>
-          <div className="data-row">
-            <span>Run branch</span>
-            <code>{run.branch ?? "Created per objective"}</code>
-          </div>
-          <div className="path-block">{environment.repositoryPath}</div>
-          {run.worktreePath && (
-            <div className="recovery-block">
-              <HardDrive size={15} />
-              <span>
-                <strong>Recoverable worktree</strong>
-                <code>{run.worktreePath}</code>
-              </span>
-            </div>
-          )}
-          {run.artifactPath && (
-            <div className="recovery-block log-block">
-              <Braces size={15} />
-              <span>
-                <strong>Durable run artifacts</strong>
-                <code>{run.artifactPath}</code>
-              </span>
-            </div>
-          )}
-          <div className="status-note">
-            <Check size={15} />
-            <span>
-              <strong>Promotion is gated</strong>
-              <small>The base HEAD must remain clean and unchanged before a fast-forward.</small>
-            </span>
-          </div>
-        </div>
-      )}
-
-      {activeTab === "Participants" && (
-        <div
-          className="inspector-body participant-list"
-          id="inspector-panel-participants"
-          role="tabpanel"
-          aria-labelledby="inspector-tab-participants"
-        >
-          {environment.participants.map((participant) => (
-            <div className="participant-card" key={participant.kind}>
-              <div className="participant-row">
-                <ParticipantMark participant={participant} />
-                <span className="participant-copy">
-                  <strong>{participant.name}</strong>
-                  <small>{participant.installed ? participant.version ?? "Installed" : "Not installed"}</small>
-                </span>
-                <span className={`status-chip mode-${participant.capabilities.autonomyMode}`}>
-                  {participant.kind === "antigravity"
-                    ? "Ship only — no read-only mode"
-                    : autonomyLabel(participant.capabilities.autonomyMode)}
-                </span>
-              </div>
-              <p>{participant.capabilities.autonomyNote}</p>
-              <div className="capability-line">
-                <span>{participant.capabilities.exactResume ? "Resume" : "Fresh session"}</span>
-                <span>{participant.capabilities.warmSession ? "Warm session" : "Cold start per turn"}</span>
-                <span>{participant.capabilities.structuredOutput ? "Structured" : "Text result"}</span>
-                <span>{participant.capabilities.streaming ? "Streaming" : "Completion only"}</span>
-              </div>
-              <ul className="capability-proof">
-                {participant.capabilities.capabilityProof.map((proof) => (
-                  <li key={proof}>{proof}</li>
-                ))}
-              </ul>
-            </div>
-          ))}
-          <p className="inspector-help">
-            Missing capabilities are shown as downgrades. Agent Room never substitutes an unavailable CLI.
-          </p>
-        </div>
-      )}
-
-      {activeTab === "Evidence" && (
-        <div
-          className="inspector-body"
-          id="inspector-panel-evidence"
-          role="tabpanel"
-          aria-labelledby="inspector-tab-evidence"
-        >
-          <div className="evidence-tile">
-            <ShieldCheck size={18} />
-            <span>
-              <strong>Coordinator-owned evidence</strong>
-              <small>Git and process results decide completion, not an agent claim.</small>
-            </span>
-          </div>
-          <div className="data-row">
-            <span>Changed files</span>
-            <strong>{latestEvidence?.changedFiles?.length ?? 0}</strong>
-          </div>
-          <div className="data-row">
-            <span>Context packet</span>
-            <strong>{contextLabel(run.contextBytes, environment.contextBudgetBytes)}</strong>
-          </div>
-          <div className="data-row">
-            <span>Review</span>
-            <strong>{run.degradedReview ? "Same provider" : run.reviewer ? "Independent" : "Pending"}</strong>
-          </div>
-          <div className="data-row">
-            <span>Handoff contract</span>
-            <strong>Schema v1</strong>
-          </div>
-          <div className="run-limits">
-            <strong>Agent Room limits</strong>
-            <small>48 KiB packet, 20 minute phase, 5 minute idle timeout, one revision, two recovery attempts.</small>
-          </div>
-          <section className="receipt-list" aria-labelledby="receipt-title">
-            <h2 id="receipt-title">Execution receipts</h2>
-            {receipts.length ? (
-              <div className="evidence-table-wrap">
-                <table className="evidence-table">
-                  <thead>
-                    <tr>
-                      <th>Phase</th><th>Provider</th><th>Model</th><th>Context bytes</th><th>Saved bytes</th>
-                      <th>Preflight</th><th>Process start</th><th>First output</th><th>Total</th><th>Tokens</th><th>Cost</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {receipts.map((receipt) => (
-                      <tr key={receipt.id}>
-                        <td>{receipt.phase}</td>
-                        <td>{agentNames[receipt.participant]}</td>
-                        <td>{receipt.actualModel ?? receipt.requestedModel ?? "Provider default"}</td>
-                        <td>{receipt.contextBytes.toLocaleString()}</td>
-                        <td>{receipt.packetBytesSaved.toLocaleString()}</td>
-                        <td>{millisecondsLabel(receipt.preflightMs)}</td>
-                        <td>{millisecondsLabel(receipt.processStartMs)}</td>
-                        <td>{millisecondsLabel(receipt.firstOutputMs)}</td>
-                        <td>{millisecondsLabel(receipt.totalMs)}</td>
-                        <td>{[receipt.usage.inputTokens, receipt.usage.outputTokens].every((value) => value === undefined)
-                          ? "—"
-                          : `${receipt.usage.inputTokens?.toLocaleString() ?? "—"} in / ${receipt.usage.outputTokens?.toLocaleString() ?? "—"} out`}</td>
-                        <td>{receipt.usage.totalCostUsd === undefined ? "—" : `$${receipt.usage.totalCostUsd.toFixed(4)}`}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <EmptyState title="No execution receipts yet." body="Receipts appear after the first provider phase. They report run telemetry, not provider account quotas." />
-            )}
-          </section>
-          <VerificationList verification={verification} />
-        </div>
-      )}
-
-      {activeTab === "Memory" && (
-        <div
-          className="inspector-body memory-body"
-          id="inspector-panel-memory"
-          role="tabpanel"
-          aria-labelledby="inspector-tab-memory"
-        >
-          <span className="memory-label">Current direction</span>
-          <p>
-            Carry one objective, compact handoffs, repository evidence, and review findings between coding CLIs.
-          </p>
-          <span className="memory-label">Autonomy boundary</span>
-          <p>
-            One writer, managed worktree, deterministic routing, one revision, two reviews, then complete or notify.
-          </p>
-          <span className="memory-label">Context policy</span>
-          <p>Native session history plus a measured 48 KiB delta packet. No full room replay.</p>
-          <span className="memory-label">Instruction hierarchy</span>
-          {run.instructionFiles?.length ? (
-            <div className="context-file-list">
-              {run.instructionFiles.map((file) => (
-                <code key={file}>{file}</code>
-              ))}
-            </div>
-          ) : (
-            <p>No repository AGENTS.md or CLAUDE.md files were discovered for this run.</p>
-          )}
-          <span className="memory-label">Selected project skills</span>
-          {run.skillFiles?.length ? (
-            <div className="context-file-list">
-              {run.skillFiles.map((file) => (
-                <code key={file}>{file}</code>
-              ))}
-            </div>
-          ) : (
-            <p>No repository-local skill matched this objective. Provider-global skills remain provider-owned.</p>
-          )}
-          <p className="recovery-status">
-            <History size={15} />
-            {run.recoveryCount ?? 0} of 2 recovery attempts used
-          </p>
-        </div>
-      )}
-    </aside>
-  );
-}
 
 export function App() {
   const [project, setProject] = useState<Project>(detachedProject);
@@ -829,8 +216,10 @@ export function App() {
   const [attention, setAttention] = useState<LiveActivityItem>();
   const timelineRef = useRef<HTMLDivElement>(null);
   const loadingOlderMessagesRef = useRef(false);
+  const pinnedToBottomRef = useRef(true);
   const runRef = useRef(run);
   const chatRunRef = useRef<string | undefined>(undefined);
+  const quickEditRunRef = useRef<string | undefined>(undefined);
   const activeProjectIdRef = useRef(project.id);
   const activationGenerationRef = useRef(0);
   const streamTextBufferRef = useRef("");
@@ -1094,11 +483,26 @@ export function App() {
       loadingOlderMessagesRef.current = false;
       return;
     }
-    timelineRef.current?.scrollTo({
-      top: timelineRef.current.scrollHeight,
-      behavior: "smooth",
-    });
+    const timeline = timelineRef.current;
+    if (!timeline) return;
+    // Follow the newest output only while the reader is already at the bottom.
+    // Scrolling back through a long run must not be interrupted by every delta.
+    const distanceFromBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
+    if (!pinnedToBottomRef.current && distanceFromBottom > followThresholdPx) return;
+    timeline.scrollTo({ top: timeline.scrollHeight, behavior: "smooth" });
   }, [messages, activity]);
+
+  useEffect(() => {
+    const timeline = timelineRef.current;
+    if (!timeline) return;
+    const onScroll = () => {
+      pinnedToBottomRef.current =
+        timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <= followThresholdPx;
+    };
+    onScroll();
+    timeline.addEventListener("scroll", onScroll, { passive: true });
+    return () => timeline.removeEventListener("scroll", onScroll);
+  }, [activeView, environment.attached]);
 
   async function loadOlderMessages() {
     const oldest = messages[0];
@@ -1579,6 +983,9 @@ export function App() {
     }
     setUiError("");
     setObjective("");
+    // The composer's Stop button reads this ref. Without it a Quick Edit shows a
+    // live Stop control that cancels nothing.
+    quickEditRunRef.current = editId;
     setChatSending(true);
     try {
       const result = await quickEditStart({
@@ -1591,6 +998,7 @@ export function App() {
     } catch (error) {
       setUiError(error instanceof Error ? error.message : String(error));
     } finally {
+      if (quickEditRunRef.current === editId) quickEditRunRef.current = undefined;
       setChatSending(false);
     }
   }
@@ -1668,18 +1076,29 @@ export function App() {
 
   async function submitComposer(event: FormEvent) {
     event.preventDefault();
+    // Sending is an explicit request to follow the newest output again.
+    pinnedToBottomRef.current = true;
     if (sideChatAvailable) await submitChat(true);
     else if (composerMode === "ask") await submitChat();
     else if (composerMode === "quick-edit") await submitQuickEdit();
     else await submitObjective();
   }
 
+  /**
+   * The composer's Stop button covers both composer-owned operations: a chat turn
+   * and a Quick Edit. Both register a cancellation entry under their operation ID
+   * in Rust, so both are stoppable through the same command.
+   */
   async function handleStopChat() {
-    const chatRunId = chatRunRef.current;
-    if (!chatRunId) return;
+    const operationId = chatRunRef.current ?? quickEditRunRef.current;
+    if (!operationId) return;
     try {
-      await stopRun(project.id, chatRunId);
-      if (chatRunRef.current === chatRunId) {
+      const result = await stopRun(project.id, operationId);
+      if (!result.cancelled) {
+        setUiError(result.reason);
+        return;
+      }
+      if (chatRunRef.current === operationId) {
         setChatSending(false);
         chatRunRef.current = undefined;
       }
@@ -1865,7 +1284,7 @@ export function App() {
           <StatusPill
             state={run.state}
             stage={run.route.find((step) => step.state === "current")?.label ?? "Ship run"}
-            elapsed={elapsedTime(run.startedAt)}
+            startedAt={run.startedAt}
           />
         )}
         {!environment.attached ? (
@@ -2008,6 +1427,11 @@ export function App() {
                 <span>{quickEdit.editId}</span>
               </div>
               <p><strong>{agentNames[quickEdit.participant]}</strong>: {quickEdit.summary}</p>
+              {quickEdit.stopped && (
+                <p className="composer-preview-warning" role="status">
+                  This Quick Edit was stopped early. Review the partial diff carefully before applying it.
+                </p>
+              )}
               <pre>{quickEdit.diff || "No file changes were produced."}</pre>
               <div className="composer-preview-actions">
                 <button type="button" className="composer-preview-apply" onClick={() => void applyQuickEdit()} disabled={!quickEdit.diff || Boolean(quickEditAction)}>

@@ -59,13 +59,16 @@ export function ProviderProfileCard({
         </span>
         <span className={`status-chip connection-${participant.connectionStatus}`}>{connectionLabel(participant.connectionStatus)}</span>
       </header>
+      {/* One datalist per card. Rendering it inside the route loop emitted the
+          same element id three times, which is invalid and leaves two of the
+          three inputs pointing at a duplicate the browser ignores. */}
+      <datalist id={`models-${participant.kind}`}>{modelOptions.map((option) => <option key={option.value} value={option.value} label={option.label} />)}</datalist>
       <div className="route-profile-list">
         {routes.map((route) => <section className="route-profile-row" key={route}>
           <strong>{route === "chat" ? "Chat" : route === "build" ? "Build" : "Review"}</strong>
           <label htmlFor={`model-${participant.kind}-${route}`}>
             <span>Model</span>
             <input id={`model-${participant.kind}-${route}`} list={`models-${participant.kind}`} value={drafts[route].model} onChange={(event) => setDrafts((current) => ({ ...current, [route]: { ...current[route], model: event.target.value } }))} disabled={!participant.installed || saving} placeholder="Default" />
-            <datalist id={`models-${participant.kind}`}>{modelOptions.map((option) => <option key={option.value} value={option.value} label={option.label} />)}</datalist>
           </label>
           <label htmlFor={`effort-${participant.kind}-${route}`}>
             <span>Effort</span>

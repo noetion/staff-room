@@ -173,6 +173,7 @@
 .quick-edit-preview pre { max-block-size: calc(var(--s-8) * 2); margin: 0; padding: var(--s-2); overflow: auto; border-radius: var(--r-sm); color: var(--ink); background: var(--surface-sunken); font-family: var(--font-mono); font-size: var(--t-micro); line-height: var(--lh-micro); white-space: pre; }
 .quick-edit-preview p { margin: 0; color: var(--ink-muted); font-size: var(--t-compact); line-height: var(--lh-compact); }
 .quick-edit-preview .composer-preview-context { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s-2); color: var(--ink-faint); font-family: var(--font-mono); font-size: var(--t-label); line-height: var(--lh-label); }
+.quick-edit-preview .composer-preview-warning { display: flex; align-items: center; gap: var(--s-2); padding: var(--s-2); border: 1px solid var(--state-warn); border-radius: var(--r-sm); color: var(--state-warn); }
 .quick-edit-preview .composer-preview-actions { display: flex; justify-content: flex-end; gap: var(--s-2); }
 .quick-edit-preview .composer-preview-actions button { min-height: var(--s-6); padding-inline: var(--s-3); border: 1px solid var(--hairline); border-radius: var(--r-capsule); font-family: var(--font-body); font-size: var(--t-compact); line-height: var(--lh-compact); cursor: pointer; }
 .quick-edit-preview .composer-preview-actions button:disabled { cursor: wait; opacity: .55; }
