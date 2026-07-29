@@ -1,0 +1,27 @@
+# Line endings are normalised to LF inside the repository.
+#
+# core.autocrlf is false and the committed blobs are LF, but the PowerShell
+# automation in this repo rewrites files with CRLF. Without this file every
+# touched file reads as a whole-file rewrite in `git diff`, which buries real
+# changes. `text=auto` normalises on the way in and leaves the working tree
+# alone, so PowerShell can keep writing CRLF harmlessly.
+* text=auto eol=lf
+
+# Windows shells are happiest with CRLF on disk.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never transform these.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
