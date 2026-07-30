@@ -192,6 +192,32 @@ fn antigravity_review_uses_plan_without_permission_bypass() {
 }
 
 #[test]
+fn antigravity_probe_allows_required_headless_reads_without_leaving_plan_mode() {
+    let request = TurnRequest {
+        mode: ProviderMode::Probe,
+        phase: "chat",
+        prompt: "Reply with exactly READY.",
+        repository: Path::new("C:/worktree"),
+        session_id: None,
+        model: None,
+        effort: None,
+        final_output_path: Path::new("C:/output.txt"),
+        structured_output: false,
+        handoff_contract: None,
+    };
+    let command =
+        providers::build_command("antigravity", &request).expect("build Antigravity probe command");
+    assert!(command
+        .args
+        .windows(2)
+        .any(|pair| pair == ["--mode", "plan"]));
+    assert!(command
+        .args
+        .iter()
+        .any(|arg| arg == "--dangerously-skip-permissions"));
+}
+
+#[test]
 fn every_review_adapter_is_prepared_read_only() {
     for kind in ["codex", "claude", "cursor", "antigravity"] {
         let request = TurnRequest {
@@ -443,6 +469,19 @@ fn cursor_chat_adapter_supports_stream_fragments_and_terminal_result() {
         "type": "result",
         "result": "Cursor answer"
     });
+    let forwarded_prompt = serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": "Read the prompt file."}]
+        }
+    });
+    let assistant_message = serde_json::json!({
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Assistant answer"}]
+        }
+    });
     assert_eq!(
         provider_chat_fragment("cursor", &fragment).as_deref(),
         Some("Cursor ")
@@ -451,6 +490,30 @@ fn cursor_chat_adapter_supports_stream_fragments_and_terminal_result() {
         provider_chat_text("cursor", &result).as_deref(),
         Some("Cursor answer")
     );
+    assert!(parse_result_text(&forwarded_prompt).is_none());
+    assert_eq!(
+        parse_result_text(&assistant_message).as_deref(),
+        Some("Assistant answer")
+    );
+}
+
+#[test]
+fn unborn_git_repository_is_detected_before_cursor_launch() {
+    let root = std::env::temp_dir().join(format!("agent-room-unborn-{}", Uuid::new_v4()));
+    let repository = root.join("repository");
+    std::fs::create_dir_all(&repository).expect("create unborn repository");
+    git(&repository, &["init".to_owned()]).expect("initialize unborn repository");
+
+    assert!(!repository_has_head(&repository).expect("inspect unborn repository"));
+    let error = ensure_cursor_repository_has_head(&repository)
+        .expect_err("Cursor launch should require an initial commit");
+    assert!(error.contains("requires the attached Git repository to have an initial commit"));
+
+    remove_test_repository(&root);
+
+    let (committed_root, committed_repository) = test_repository();
+    assert!(repository_has_head(&committed_repository).expect("inspect committed repository"));
+    remove_test_repository(&committed_root);
 }
 
 #[test]

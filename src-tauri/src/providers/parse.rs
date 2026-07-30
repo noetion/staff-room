@@ -90,7 +90,13 @@ pub(crate) fn parse_result_text(value: &Value) -> Option<String> {
         if let Some(Value::String(result)) = map.get("result") {
             return Some(result.clone());
         }
+        if map.get("type").and_then(Value::as_str) == Some("user") {
+            return None;
+        }
         if let Some(Value::Object(message)) = map.get("message") {
+            if message.get("role").and_then(Value::as_str) == Some("user") {
+                return None;
+            }
             if let Some(Value::Array(content)) = message.get("content") {
                 let text = content
                     .iter()

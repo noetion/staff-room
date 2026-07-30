@@ -54,6 +54,16 @@ pub(crate) fn provider_fatal_stderr(kind: &str, line: &str) -> bool {
         .any(|signal| normalized.contains(signal))
 }
 
+pub(crate) fn ensure_cursor_repository_has_head(repository: &Path) -> Result<(), String> {
+    match repository_has_head(repository)? {
+        true => Ok(()),
+        false => Err(
+            "Cursor Agent requires the attached Git repository to have an initial commit. Create an initial commit in the repository, then retry."
+                .to_owned(),
+        ),
+    }
+}
+
 /// On Windows `Child::kill` is a `TerminateProcess` on the direct child only.
 /// Providers resolve to `.cmd` shims and verification runs through `cmd /C`, so
 /// killing the child leaves the real worker (node.exe, the agent runtime) alive
@@ -130,6 +140,9 @@ pub(crate) async fn invoke_provider(
             "{} cannot prove a safe unattended mode: {}",
             participant.name, participant.capabilities.autonomy_note
         ));
+    }
+    if kind == "cursor" {
+        ensure_cursor_repository_has_head(repository)?;
     }
     let artifact_dir = app
         .path()

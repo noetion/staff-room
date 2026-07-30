@@ -48,6 +48,21 @@ pub(crate) fn git_static(repository: &Path, args: &[&str]) -> Result<String, Str
     )
 }
 
+pub(crate) fn repository_has_head(repository: &Path) -> Result<bool, String> {
+    match git_static(repository, &["rev-parse", "--verify", "HEAD"]) {
+        Ok(_) => Ok(true),
+        Err(error) if is_unborn_head_error(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn is_unborn_head_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("ambiguous argument 'head'")
+        || normalized.contains("unknown revision")
+        || normalized.contains("needed a single revision")
+}
+
 pub(crate) fn git_status(repository: &Path) -> String {
     git_static(repository, &["status", "--short", "--branch"])
         .unwrap_or_else(|error| format!("Git evidence unavailable: {error}"))
