@@ -651,6 +651,129 @@ pub(crate) async fn test_provider_connection(
     participant_for_project(database, &request.project_id, participant)
 }
 
+async fn read_codex_app_server_response(
+    stdout: &mut BufReader<tokio::process::ChildStdout>,
+    request_id: i64,
+) -> Result<Value, String> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = timeout(Duration::from_secs(15), stdout.read_line(&mut line))
+            .await
+            .map_err(|_| "Codex model discovery timed out after 15 seconds.".to_owned())?
+            .map_err(|error| format!("Could not read Codex model discovery: {error}"))?;
+        if read == 0 {
+            return Err("Codex app-server closed before returning its model catalogue.".to_owned());
+        }
+        let value: Value = serde_json::from_str(line.trim())
+            .map_err(|error| format!("Codex model discovery returned invalid JSON: {error}"))?;
+        if value.get("id").and_then(Value::as_i64) != Some(request_id) {
+            continue;
+        }
+        if let Some(error) = value.get("error") {
+            return Err(format!(
+                "Codex app-server rejected model discovery: {}",
+                truncate_utf8(&error.to_string(), 500)
+            ));
+        }
+        return Ok(value);
+    }
+}
+
+pub(crate) fn parse_codex_model_catalog(response: &Value) -> Result<Vec<String>, String> {
+    let data = response
+        .get("result")
+        .and_then(|result| result.get("data"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Codex model discovery returned no model data.".to_owned())?;
+    let mut models = BTreeSet::new();
+    for entry in data {
+        if entry.get("hidden").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let model = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| entry.get("model").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(model) = model {
+            models.insert(model.to_owned());
+        }
+    }
+    if models.is_empty() {
+        return Err(
+            "Codex model discovery returned no selectable models for this account.".to_owned(),
+        );
+    }
+    Ok(models.into_iter().collect())
+}
+
+async fn discover_codex_models(
+    executable: &std::path::Path,
+) -> Result<ModelDiscoveryResult, String> {
+    let mut command = Command::new(executable);
+    hide_tokio_command_window(&mut command);
+    let mut child = command
+        .arg("app-server")
+        .arg("--stdio")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not start Codex model discovery: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Codex model discovery did not expose stdin.".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Codex model discovery did not expose stdout.".to_owned())?;
+    let mut stdout = BufReader::new(stdout);
+    let discovery = async {
+        stdin
+            .write_all(
+                br#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"agent-room-model-refresh","title":"Agent Room","version":"0.1.0"},"capabilities":{"experimentalApi":true}}}
+"#,
+            )
+            .await
+            .map_err(|error| format!("Could not initialize Codex model discovery: {error}"))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|error| format!("Could not initialize Codex model discovery: {error}"))?;
+        let _ = read_codex_app_server_response(&mut stdout, 1).await?;
+        stdin
+            .write_all(
+                br#"{"method":"initialized","params":{}}
+{"method":"model/list","id":2,"params":{"includeHidden":false}}
+"#,
+            )
+            .await
+            .map_err(|error| format!("Could not request the Codex model catalogue: {error}"))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|error| format!("Could not request the Codex model catalogue: {error}"))?;
+        let response = read_codex_app_server_response(&mut stdout, 2).await?;
+        let models = parse_codex_model_catalog(&response)?;
+        Ok::<Vec<String>, String>(models)
+    }
+    .await;
+    drop(stdin);
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    let models = discovery?;
+    Ok(ModelDiscoveryResult {
+        detail: format!(
+            "Fetched {} models from the signed-in Codex app-server catalogue just now.",
+            models.len()
+        ),
+        models,
+    })
+}
+
 #[tauri::command]
 pub(crate) async fn discover_provider_models(
     request: ModelDiscoveryRequest,
@@ -688,11 +811,8 @@ pub(crate) async fn discover_provider_models(
                 },
             })
         }
-        "codex" | "claude" => {
-            let (models, detail, _) =
-                model_options(&request.participant_kind, Some(executable.as_path()));
-            Ok(ModelDiscoveryResult { models, detail })
-        }
+        "codex" => discover_codex_models(&executable).await,
+        "claude" => Err("Claude Code does not expose a non-interactive model catalogue. Enter a supported alias or exact model identifier; saved choices were not changed.".to_owned()),
         _ => Err("Unknown provider.".to_owned()),
     }
 }

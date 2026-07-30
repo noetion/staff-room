@@ -2,8 +2,8 @@
   position: relative;
   display: grid;
   gap: var(--s-3);
-  width: calc(100% - (var(--s-4) * 2));
-  max-width: min(760px, 100%);
+  width: min(var(--content-max), calc(100% - (var(--s-4) * 2)));
+  max-width: var(--content-max);
   margin: 0 auto var(--s-4);
   padding: var(--s-3);
   border-radius: var(--r-xl);

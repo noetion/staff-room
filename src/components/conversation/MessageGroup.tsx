@@ -73,7 +73,7 @@ function MessageGroupComponent({
       ? "failed"
       : activeForGroup
         ? "working"
-        : receipt?.firstOutputMs !== undefined
+        : receipt?.firstOutputMs != null
           ? "answered"
           : "sent";
   const recoverable =

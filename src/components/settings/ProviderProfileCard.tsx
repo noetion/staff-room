@@ -68,7 +68,7 @@ export function ProviderProfileCard({
           <strong>{route === "chat" ? "Chat" : route === "build" ? "Build" : "Review"}</strong>
           <label htmlFor={`model-${participant.kind}-${route}`}>
             <span>Model</span>
-            <input id={`model-${participant.kind}-${route}`} list={`models-${participant.kind}`} value={drafts[route].model} onChange={(event) => setDrafts((current) => ({ ...current, [route]: { ...current[route], model: event.target.value } }))} disabled={!participant.installed || saving} placeholder="Default" />
+            <input id={`model-${participant.kind}-${route}`} list={`models-${participant.kind}`} value={drafts[route].model} onChange={(event) => setDrafts((current) => ({ ...current, [route]: { ...current[route], model: event.target.value } }))} disabled={!participant.installed || saving} placeholder="Default" aria-invalid={hasAuthoritativeCatalog && Boolean(drafts[route].model.trim()) && !models.includes(drafts[route].model.trim())} title={hasAuthoritativeCatalog && Boolean(drafts[route].model.trim()) && !models.includes(drafts[route].model.trim()) ? "Choose an exact model from the refreshed catalogue before saving." : undefined} />
           </label>
           <label htmlFor={`effort-${participant.kind}-${route}`}>
             <span>Effort</span>
@@ -83,7 +83,7 @@ export function ProviderProfileCard({
       <small className="model-discovery-note" title={modelDiscoveryDetail ?? participant.modelDiscoveryNote}>{modelDiscoveryDetail ?? participant.modelDiscoveryNote}</small>
       <details className="provider-details"><summary>Runtime capability</summary><p className="connection-detail" role={participant.connectionStatus === "connected" ? undefined : "status"}>{participant.connectionDetail}</p>{capabilityChips(participant).length > 0 && <div className="capability-chips" aria-label={`${participant.name} capability limits`}>{capabilityChips(participant).map((chip) => <span key={chip}>{chip}</span>)}</div>}<p>{participant.capabilities.autonomyNote}</p></details>
       <div className="profile-actions">
-        <button type="button" className="secondary-button" disabled={!participant.installed || discoveringModels} onClick={() => onRefreshModels(participant.kind)}><RefreshCw size={14} className={discoveringModels ? "spinning" : undefined} />{discoveringModels ? "Refreshing" : "Models"}</button>
+        <button type="button" className="secondary-button" aria-label={`Refresh models for ${participant.name}`} title={`Refresh models for ${participant.name}`} disabled={!participant.installed || discoveringModels} onClick={() => onRefreshModels(participant.kind)}><RefreshCw size={14} className={discoveringModels ? "spinning" : undefined} />{discoveringModels ? "Refreshing" : "Refresh"}</button>
         <button type="button" className="secondary-button" disabled={!participant.installed || saving} onClick={() => onSave(routes.map((route) => ({ participantKind: participant.kind, route, model: drafts[route].model.trim() || undefined, effort: drafts[route].effort || undefined })))}>{saving ? "Saving" : "Save"}</button>
         <button type="button" className="secondary-button" aria-label={`Test ${participant.name} connection`} disabled={!participant.installed || testing} onClick={() => onTest(participant.kind, connectionTestDraft(drafts.chat))}>{testing ? "Testing" : "Test"}</button>
       </div>

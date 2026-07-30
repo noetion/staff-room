@@ -446,6 +446,74 @@ async function checkBubbleGeometry(page) {
   } else ok("bubble-corners");
 }
 
+async function checkLaunchReadinessLayout(page) {
+  const metrics = await page.evaluate(() => {
+    const feed = document.querySelector('[role="feed"]');
+    const conversation = document.querySelector('.conversation-column');
+    const conversationScroller = document.querySelector('.conversation');
+    const room = document.querySelector('.room');
+    const composer = document.querySelector('.composer');
+    const search = document.querySelector('.chrome-search-button');
+    const documentHeight = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+    const viewportHeight = window.innerHeight;
+    const initialScrollY = window.scrollY;
+    window.scrollTo(0, documentHeight);
+    const afterScrollY = window.scrollY;
+    window.scrollTo(0, initialScrollY);
+    return {
+      documentOverflow: documentHeight - viewportHeight,
+      afterScrollY,
+      feedCanScroll: Boolean(feed && feed.scrollHeight > feed.clientHeight),
+      conversationOverflowY: conversationScroller ? getComputedStyle(conversationScroller).overflowY : '',
+      overscrollBehaviorY: conversationScroller ? getComputedStyle(conversationScroller).overscrollBehaviorY : '',
+      roomOverflow: room ? getComputedStyle(room).overflow : '',
+      conversationWidth: conversation?.getBoundingClientRect().width ?? 0,
+      composerWidth: composer?.getBoundingClientRect().width ?? 0,
+      searchWidth: search?.getBoundingClientRect().width ?? 0,
+    };
+  });
+  if (metrics.documentOverflow > 1 || metrics.afterScrollY > 1) {
+    fail('room-scroll-boundary', `the document can scroll beyond the room (${Math.round(metrics.documentOverflow)}px)`);
+  } else if (!['auto', 'scroll'].includes(metrics.conversationOverflowY)
+    || metrics.overscrollBehaviorY !== 'contain'
+    || metrics.roomOverflow !== 'hidden') {
+    fail('room-scroll-boundary', 'the room/conversation scroll ownership contract is incomplete');
+  } else ok('room-scroll-boundary');
+  if (metrics.conversationWidth < 900 || metrics.composerWidth < 900) {
+    fail('wide-room-content', `wide room content remains capped at ${Math.round(Math.min(metrics.conversationWidth, metrics.composerWidth))}px`);
+  } else ok('wide-room-content');
+  if (metrics.searchWidth < 380) fail('prominent-search', `search control is only ${Math.round(metrics.searchWidth)}px wide`);
+  else ok('prominent-search');
+}
+
+async function checkInspectorEvidence(page) {
+  const errors = [];
+  const onPageError = (error) => errors.push(error.message);
+  page.on('pageerror', onPageError);
+  await page.getByRole('button', { name: 'Open context' }).click();
+  await page.getByRole('tab', { name: 'Evidence' }).click();
+  const panel = page.locator('.inspector-body');
+  const rendered = await panel.getByText('Coordinator-owned evidence.').count();
+  const visible = await page.getByRole('dialog').isVisible();
+  await page.locator('.primitive-sheet__close').click();
+  page.off('pageerror', onPageError);
+  if (errors.length || !visible || !rendered) {
+    fail('evidence-tab', errors[0] || 'Evidence tab did not remain mounted');
+  } else ok('evidence-tab');
+}
+
+async function checkSettingsLayout(page) {
+  const metrics = await page.evaluate(() => {
+    const view = document.querySelector('.settings-view');
+    const cards = [...document.querySelectorAll('.provider-profile-card')];
+    const rows = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top)));
+    return { width: view?.getBoundingClientRect().width ?? 0, cards: cards.length, rows: rows.size };
+  });
+  if (metrics.width < 1200 || metrics.rows > 1) {
+    fail('settings-layout', `settings uses ${Math.round(metrics.width)}px across ${metrics.rows} provider rows`);
+  } else ok('settings-layout');
+}
+
 async function checkScrollPerf(page) {
   if (skipPerf) { ok("scroll-perf (skipped)"); return; }
   const feed = page.locator('[role="feed"]').first();
@@ -524,7 +592,17 @@ async function main() {
       const { context, page } = await newPage(browser, { width: 1280, theme: "light" });
       await gotoView(page, base, "rooms", "light");
       await checkBubbleGeometry(page);
+      await checkInspectorEvidence(page);
       await checkScrollPerf(page);
+      await checkLaunchReadinessLayout(page);
+      await context.close();
+    }
+
+    // 2b. Wide settings should use the available desktop measure.
+    {
+      const { context, page } = await newPage(browser, { width: 1800, theme: "light" });
+      await gotoView(page, base, "settings", "light");
+      await checkSettingsLayout(page);
       await context.close();
     }
 

@@ -36,6 +36,24 @@ pub(crate) async fn wait_for_idle(mut activity: watch::Receiver<u64>, timeout_se
     }
 }
 
+pub(crate) fn provider_fatal_stderr(kind: &str, line: &str) -> bool {
+    if kind != "cursor" {
+        return false;
+    }
+    let normalized = line.trim().to_ascii_lowercase();
+    normalized.starts_with("cannot use this model:")
+        || normalized.starts_with("failed to load models:")
+        || [
+            "authentication required",
+            "invalid api key",
+            "login required",
+            "not logged in",
+            "unauthorized",
+        ]
+        .iter()
+        .any(|signal| normalized.contains(signal))
+}
+
 /// On Windows `Child::kill` is a `TerminateProcess` on the direct child only.
 /// Providers resolve to `.cmd` shims and verification runs through `cmd /C`, so
 /// killing the child leaves the real worker (node.exe, the agent runtime) alive
@@ -211,8 +229,10 @@ pub(crate) async fn invoke_provider(
     let stdout_run = run_id.to_owned();
     let stdout_phase = phase.as_str().to_owned();
     let stdout_agent = kind.to_owned();
+    let stderr_agent = kind.to_owned();
     let (activity_sender, activity_receiver) = watch::channel(0_u64);
     let (completion_sender, mut completion_receiver) = watch::channel(false);
+    let (fatal_sender, mut fatal_receiver) = watch::channel(false);
     let stdout_activity = activity_sender.clone();
     let completion_phase = phase;
     let stdout_started = provider_started;
@@ -350,12 +370,16 @@ pub(crate) async fn invoke_provider(
     });
 
     let stderr_activity = activity_sender;
+    let stderr_fatal = fatal_sender;
     let stderr_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         let mut raw = String::new();
         while let Ok(Some(line)) = lines.next_line().await {
             stderr_activity.send_modify(|value| *value = value.saturating_add(1));
             append_capped(&mut raw, &line);
+            if provider_fatal_stderr(&stderr_agent, &line) {
+                stderr_fatal.send_replace(true);
+            }
         }
         raw
     });
@@ -386,6 +410,12 @@ pub(crate) async fn invoke_provider(
         changed = completion_receiver.changed() => {
             if changed.is_ok() && *completion_receiver.borrow() {
                 completed_handoff = true;
+                kill_tree(&mut child).await;
+            }
+            child.wait().await.map_err(|error| error.to_string())?
+        }
+        changed = fatal_receiver.changed() => {
+            if changed.is_ok() && *fatal_receiver.borrow() {
                 kill_tree(&mut child).await;
             }
             child.wait().await.map_err(|error| error.to_string())?

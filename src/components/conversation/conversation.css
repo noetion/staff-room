@@ -1,11 +1,11 @@
-.conversation { min-height: 0; overflow: auto; }
-.conversation-column { padding: var(--s-5) var(--s-4); }
+.conversation { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.conversation-column { width: min(var(--content-max), 100%); margin-inline: auto; padding: var(--s-5) var(--s-4); }
 .markdown-body { display: grid; gap: var(--s-3); min-width: 0; }
-.message-group { display: grid; gap: var(--s-1); width: min(760px, 100%); margin: 0 auto var(--s-4); }
+.message-group { display: grid; gap: var(--s-1); width: 100%; margin: 0 auto var(--s-4); }
 .message-row { display: flex; min-width: 0; align-items: end; gap: var(--s-2); }
 .message-group[data-side="out"] .message-row { justify-content: flex-end; }
 .message-avatar-slot { display: block; flex: 0 0 var(--s-7); }
-.message-stack { display: grid; min-width: 0; max-width: min(76%, 620px); gap: var(--s-1); }
+.message-stack { display: grid; min-width: 0; max-width: min(76%, 820px); gap: var(--s-1); }
 .message-group[data-side="out"] .message-stack { justify-items: end; }
 .message-sender, .message-meta { color: var(--ink-faint); font-size: var(--t-micro); line-height: var(--lh-micro); }
 .message-bubble { min-width: 0; padding: var(--s-3) var(--s-4); border-radius: var(--r-lg); color: var(--ink); background: var(--surface-raised); box-shadow: var(--e-rest); overflow-wrap: anywhere; }
@@ -16,7 +16,7 @@
 .message-bubble[data-side="out"][data-pos="first"], .message-bubble[data-side="out"][data-pos="only"] { border-bottom-left-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); }
 .message-bubble[data-side="out"][data-pos="middle"] { border-top-left-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); border-bottom-left-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); }
 .message-bubble[data-side="out"][data-pos="last"] { border-top-left-radius: var(--r-tight, calc(var(--r-sm) - var(--s-1))); }
-.message-meta { display: flex; align-items: center; gap: var(--s-2); justify-content: flex-end; width: min(760px, 100%); margin-inline: auto; }
+.message-meta { display: flex; align-items: center; gap: var(--s-2); justify-content: flex-end; width: 100%; margin-inline: auto; }
 .markdown-body, .markdown-body p { color: inherit; }
 .markdown-body p { margin: 0; overflow-wrap: anywhere; font-size: var(--t-body); line-height: var(--lh-body); white-space: pre-wrap; }
 .markdown-body p + p { margin-top: var(--s-3); }
@@ -66,7 +66,7 @@
 .run-progress-card {
   display: grid;
   gap: var(--s-4);
-  width: min(760px, 100%);
+  width: 100%;
   margin: 0 auto;
   padding: var(--s-4);
   border: 1px solid var(--hairline);

@@ -28,6 +28,7 @@ import type {
 import { AttentionCard, EvidenceCard, MarkdownBody } from "./components/conversation";
 import { agentNames } from "./model";
 import {
+  unavailableModelValues,
   type ProviderDraft,
 } from "./lib/provider-profiles";
 import { initials } from "./lib/format";
@@ -37,7 +38,7 @@ import {
   chatAgentFor,
   isRunnableParticipant,
 } from "./lib/participants";
-import { asRunState, hydrateRun } from "./lib/runs";
+import { asRunState, hydrateRun, shouldShowRunProgress } from "./lib/runs";
 import {
   approveRunPromotion,
   allocateOperationId,
@@ -637,6 +638,17 @@ export function App() {
     setUiError("");
     const participantKind = nextProfiles[0]?.participantKind;
     if (!participantKind) return;
+    const unavailableModels = unavailableModelValues(
+      nextProfiles,
+      modelCatalog[participantKind] ?? [],
+      modelCatalog[participantKind] !== undefined,
+    );
+    if (unavailableModels.length > 0) {
+      setUiError(
+        `${agentNames[participantKind]} model ${unavailableModels.map((model) => `\`${model}\``).join(", ")} is not in the refreshed catalogue. Choose an exact model identifier before saving.`,
+      );
+      return;
+    }
     setSavingProfileKind(participantKind);
     try {
       if (native) {
@@ -742,6 +754,18 @@ export function App() {
         )));
       }
     } catch (error) {
+      setModelCatalog((current) => {
+        if (!(kind in current)) return current;
+        const next = { ...current };
+        delete next[kind];
+        return next;
+      });
+      setModelDiscoveryDetails((current) => {
+        if (!(kind in current)) return current;
+        const next = { ...current };
+        delete next[kind];
+        return next;
+      });
       setUiError(error instanceof Error ? error.message : String(error));
     } finally {
       setSavingProfileKind(undefined);
@@ -1359,7 +1383,7 @@ export function App() {
           {attention && (
             <AttentionCard title={attention.title} detail={attention.detail} onDismiss={() => setAttention(undefined)} />
           )}
-          {run.state !== "ready" && !searchQuery && (
+          {shouldShowRunProgress(run) && !searchQuery && (
             <RunProgressCard
               run={run}
               activity={activity}

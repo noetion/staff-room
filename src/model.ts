@@ -219,11 +219,11 @@ export interface StoredRun {
 }
 
 export interface ProviderUsage {
-  inputTokens?: number;
-  cachedInputTokens?: number;
-  outputTokens?: number;
-  totalCostUsd?: number;
-  numTurns?: number;
+  inputTokens?: number | null;
+  cachedInputTokens?: number | null;
+  outputTokens?: number | null;
+  totalCostUsd?: number | null;
+  numTurns?: number | null;
 }
 
 export interface ExecutionReceipt {
@@ -239,10 +239,10 @@ export interface ExecutionReceipt {
   usage: ProviderUsage;
   usageNote: string;
   createdAt: string;
-  preflightMs?: number;
-  processStartMs?: number;
-  firstOutputMs?: number;
-  totalMs?: number;
+  preflightMs?: number | null;
+  processStartMs?: number | null;
+  firstOutputMs?: number | null;
+  totalMs?: number | null;
   sessionResumed: boolean;
   packetBytesSaved: number;
   stdoutLogPath?: string;

@@ -18,7 +18,7 @@
   /* Eight children: brand, project switch, drag region, search, status, theme
      toggle, inspector toggle, window controls. Seven columns left the window
      controls on an implicit second row, floating outside the bar. */
-  grid-template-columns: max-content minmax(0, calc(var(--s-8) * 4)) minmax(var(--s-3), 1fr) max-content max-content max-content max-content max-content;
+  grid-template-columns: max-content minmax(0, calc(var(--s-8) * 4)) minmax(var(--s-3), 1fr) minmax(280px, 420px) max-content max-content max-content max-content;
   align-items: center;
   gap: var(--s-2);
   min-width: 0;
@@ -65,13 +65,14 @@
 .chrome-project-monogram { display: grid; place-items: center; flex: none; width: calc(var(--s-5) + var(--s-1)); height: calc(var(--s-5) + var(--s-1)); border-radius: var(--r-capsule); color: var(--action-ink); background: var(--action); font-size: var(--t-micro); font-weight: 600; }
 
 .chrome-titlebar-drag { align-self: stretch; min-width: var(--s-3); }
-.chrome-search { min-width: 0; transform-origin: right center; transition: transform var(--dur-2) var(--ease-out); }
+.chrome-search { width: 100%; min-width: 0; transform-origin: right center; transition: transform var(--dur-2) var(--ease-out); }
 .chrome-search.is-open { transform: scaleX(1); }
 .chrome-search-button,
-.chrome-search-field { gap: var(--s-2); height: calc(var(--s-7) - var(--s-3)); padding: 0 var(--s-2); cursor: pointer; }
+.chrome-search-field { width: 100%; gap: var(--s-2); min-height: calc(var(--s-7) - var(--s-2)); padding: 0 var(--s-3); cursor: pointer; }
+.chrome-search-button { justify-content: flex-start; }
 .chrome-search-button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chrome-search-button kbd { flex: none; padding: var(--s-1) var(--s-2); border: 1px solid var(--hairline); border-radius: var(--r-capsule); color: var(--ink-faint); background: var(--surface-sunken); font-size: var(--t-micro); }
-.chrome-search-field { min-width: calc(var(--s-8) * 4); }
+.chrome-search-field { min-width: 0; }
 .chrome-search.is-open .chrome-search-field { animation: chrome-search-expand var(--dur-2) var(--ease-out); }
 .chrome-search-field input { min-width: 0; flex: 1; border: 0; color: var(--ink); background: transparent; }
 .chrome-search-field input::placeholder { color: var(--ink-faint); }
@@ -112,10 +113,9 @@
 }
 
 @media (max-width: 64rem) {
-  .chrome-titlebar { grid-template-columns: max-content minmax(0, calc(var(--s-8) * 3)) minmax(var(--s-2), 1fr) max-content max-content max-content max-content max-content; }
+  .chrome-titlebar { grid-template-columns: max-content minmax(0, calc(var(--s-8) * 3)) minmax(var(--s-2), 1fr) minmax(220px, 320px) max-content max-content max-content max-content; }
   .chrome-search-button span,
   .chrome-search-button kbd { display: none; }
-  .chrome-search-field { min-width: calc(var(--s-8) * 3); }
 }
 
 @media (max-width: 48rem) {
@@ -131,6 +131,7 @@
   display: grid;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
 .status-pill { position: absolute; z-index: 3; top: var(--s-3); left: 50%; display: inline-flex; align-items: center; gap: var(--s-2); min-height: var(--s-6); padding-inline: var(--s-3); border: 1px solid var(--hairline); border-radius: var(--r-capsule); color: var(--ink); background: var(--surface-raised); box-shadow: var(--e-float); transform: translate(-50%, calc(var(--s-2) * -1)); animation: status-pill-enter var(--dur-2) var(--ease-spring) both; }

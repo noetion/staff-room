@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { StopRunResult } from "./model";
+import { shouldShowRunProgress } from "./lib/runs";
 
 describe("run control contract", () => {
   it("keeps a failed cancellation distinct from a cancellation request", () => {
@@ -14,5 +15,12 @@ describe("run control contract", () => {
 
     expect(unavailable.cancelled).toBe(false);
     expect(requested.cancelled).toBe(true);
+  });
+
+  it("does not place completed or abandoned Ship runs in the chat timeline", () => {
+    expect(shouldShowRunProgress({ id: "run-complete", state: "complete" })).toBe(false);
+    expect(shouldShowRunProgress({ id: "run-abandoned", state: "abandoned" })).toBe(false);
+    expect(shouldShowRunProgress({ id: "run-active", state: "working" })).toBe(true);
+    expect(shouldShowRunProgress({ id: "run-recoverable", state: "failed" })).toBe(true);
   });
 });

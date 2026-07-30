@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { calendarDay, elapsedTime, parseTimestamp, relativeTime } from "./format";
+import { calendarDay, elapsedTime, millisecondsLabel, parseTimestamp, relativeTime, usageLabel } from "./format";
+import type { ExecutionReceipt } from "../model";
 
 /** Render a UTC instant the way SQLite's CURRENT_TIMESTAMP writes it. */
 function sqliteTimestamp(date: Date): string {
@@ -53,5 +54,30 @@ describe("calendarDay", () => {
   it("buckets both timestamp shapes into the same local day", () => {
     const now = new Date();
     expect(calendarDay(sqliteTimestamp(now))).toBe(calendarDay(now.toISOString()));
+  });
+});
+
+describe("nullable receipt formatting", () => {
+  it("keeps JSON null timing and usage fields readable", () => {
+    const receipt = {
+      id: "receipt",
+      phase: "chat",
+      participant: "codex",
+      contextBytes: 0,
+      usage: {
+        inputTokens: null,
+        cachedInputTokens: null,
+        outputTokens: null,
+        totalCostUsd: null,
+        numTurns: null,
+      },
+      usageNote: "Provider did not report usage.",
+      createdAt: "2026-07-30T00:00:00Z",
+      preflightMs: null,
+      totalMs: null,
+    } as unknown as ExecutionReceipt;
+
+    expect(millisecondsLabel(receipt.preflightMs)).toBe("—");
+    expect(usageLabel(receipt)).toBe("Not reported");
   });
 });

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   connectionTestDraft,
   providerModelOptions,
+  unavailableModelValues,
 } from "./lib/provider-profiles";
 import type { ProviderProfile } from "./model";
 
@@ -41,5 +42,17 @@ describe("provider model profiles", () => {
       model: "cursor-grok-4.5-high",
       effort: "high",
     });
+  });
+
+  it("identifies saved models that a refreshed catalogue cannot execute", () => {
+    const profiles: ProviderProfile[] = [{
+      participantKind: "cursor",
+      route: "chat",
+      model: "cursor-grok-4.5",
+    }];
+
+    expect(unavailableModelValues(profiles, ["cursor-grok-4.5-high"], true))
+      .toEqual(["cursor-grok-4.5"]);
+    expect(unavailableModelValues(profiles, [], false)).toEqual([]);
   });
 });

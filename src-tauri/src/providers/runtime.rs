@@ -368,7 +368,7 @@ pub(crate) fn model_options(
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            "Seeded Codex model IDs. Model refresh is intentionally a no-op because this CLI has no models command; enter a newly released ID directly.".to_owned(),
+            "Seeded Codex model IDs for startup. Refresh uses the Codex app-server catalogue when available.".to_owned(),
         ),
         "claude" => (
             [
@@ -383,7 +383,7 @@ pub(crate) fn model_options(
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            "Exact Claude model IDs, including the model generation and version.".to_owned(),
+            "Seeded Claude model IDs and aliases. Claude Code does not expose a non-interactive account catalogue; enter a newly released ID directly.".to_owned(),
         ),
         "cursor" => (
             vec![],

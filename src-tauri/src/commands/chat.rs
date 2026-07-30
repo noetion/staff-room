@@ -1,5 +1,35 @@
 use crate::*;
 
+pub(crate) fn cursor_unavailable_model(stderr: &str) -> Option<String> {
+    stderr.lines().find_map(|line| {
+        let line = line.trim();
+        let prefix = "cannot use this model:";
+        if !line.to_ascii_lowercase().starts_with(prefix) {
+            return None;
+        }
+        let model = line.get(prefix.len()..)?.trim();
+        let model = model
+            .split_once(". Available models:")
+            .map(|(value, _)| value)
+            .unwrap_or(model)
+            .trim();
+        (!model.is_empty()).then(|| model.to_owned())
+    })
+}
+
+fn clear_cursor_chat_model(database: &Database, project_id: &str) -> Result<(), String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE provider_route_profiles
+             SET model = NULL, effort = NULL, updated_at = CURRENT_TIMESTAMP
+             WHERE project_id = ?1 AND participant_kind = 'cursor' AND route = 'chat'",
+            params![project_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn start_room_chat(
     app: AppHandle,
@@ -215,6 +245,14 @@ pub(crate) async fn start_room_chat(
             return Err(error);
         }
     };
+    let unavailable_cursor_model = if participant.kind == "cursor" {
+        cursor_unavailable_model(&result.stderr)
+    } else {
+        None
+    };
+    if unavailable_cursor_model.is_some() {
+        clear_cursor_chat_model(database, &request.project_id)?;
+    }
     let total_ms = chat_started.elapsed().as_millis() as u64;
     persist_chat_receipt(
         database,
@@ -231,7 +269,11 @@ pub(crate) async fn start_room_chat(
     )?;
     let authentication_detail = authentication_attention(&result.summary, &result.stderr);
     if !result.success || authentication_detail.is_some() {
-        let reason = if let Some(detail) = authentication_detail {
+        let reason = if let Some(model) = unavailable_cursor_model {
+            format!(
+                "Cursor rejected the saved model `{model}`. It was cleared; refresh Cursor models and choose an exact identifier before retrying."
+            )
+        } else if let Some(detail) = authentication_detail {
             detail
         } else if result.stopped {
             "Chat stopped by you.".to_owned()

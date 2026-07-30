@@ -340,6 +340,23 @@ fn model_discovery_keeps_selectable_lines_and_skips_headings() {
 }
 
 #[test]
+fn codex_model_catalog_uses_current_visible_ids_and_skips_hidden_entries() {
+    let response = serde_json::json!({
+        "result": {
+            "data": [
+                {"id": "gpt-5.6-sol", "hidden": false},
+                {"model": "gpt-5.6-terra", "hidden": false},
+                {"id": "legacy-hidden", "hidden": true}
+            ]
+        }
+    });
+    assert_eq!(
+        parse_codex_model_catalog(&response).expect("parse Codex model catalogue"),
+        vec!["gpt-5.6-sol".to_owned(), "gpt-5.6-terra".to_owned()]
+    );
+}
+
+#[test]
 fn cursor_model_discovery_keeps_compound_presets_verbatim() {
     let models = parse_provider_model_list(
         "Available models\n\

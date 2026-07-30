@@ -129,6 +129,43 @@ fn cursor_command_passes_the_selected_compound_model_through_unchanged() {
 }
 
 #[test]
+fn cursor_fatal_stderr_is_detected_before_the_idle_watchdog() {
+    assert!(provider_fatal_stderr(
+        "cursor",
+        "Cannot use this model: cursor-grok-4.5"
+    ));
+    assert!(provider_fatal_stderr(
+        "cursor",
+        "Failed to load models: [internal]"
+    ));
+    assert!(provider_fatal_stderr("cursor", "Authentication required"));
+    assert!(!provider_fatal_stderr(
+        "cursor",
+        "Working on the repository"
+    ));
+    assert!(!provider_fatal_stderr(
+        "codex",
+        "Cannot use this model: stale"
+    ));
+}
+
+#[test]
+fn cursor_unavailable_model_extracts_the_actionable_identifier() {
+    assert_eq!(
+        cursor_unavailable_model(
+            "Cannot use this model: cursor-grok-4.5. Available models: cursor-grok-4.5-high"
+        )
+        .as_deref(),
+        Some("cursor-grok-4.5")
+    );
+    assert_eq!(
+        cursor_unavailable_model("  cannot use this model: cursor-grok-4.5  ").as_deref(),
+        Some("cursor-grok-4.5")
+    );
+    assert_eq!(cursor_unavailable_model("Cursor is ready"), None);
+}
+
+#[test]
 fn antigravity_review_uses_plan_without_permission_bypass() {
     let request = TurnRequest {
         mode: ProviderMode::Review,
