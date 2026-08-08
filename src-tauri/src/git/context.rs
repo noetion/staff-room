@@ -102,7 +102,7 @@ pub(crate) fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_owned();
     }
-    const MARKER: &str = "\n[truncated by Agent Room]";
+    const MARKER: &str = "\n[truncated by The Staff Room]";
     if max_bytes <= MARKER.len() {
         let mut end = max_bytes;
         while end > 0 && !value.is_char_boundary(end) {
@@ -345,13 +345,39 @@ pub(crate) fn skill_context(skills: &[SelectedSkill]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "Agent Room selected these repository-local skills for this objective:\n{entries}\n\nBefore taking action, open every selected SKILL.md from the managed worktree and read it completely. Follow referenced resources only when the skill routes the current task to them. Provider-global skills remain provider-owned and are not copied into the context packet."
+        "The Staff Room selected these repository-local skills for this objective:\n{entries}\n\nBefore taking action, open every selected SKILL.md from the managed worktree and read it completely. Follow referenced resources only when the skill routes the current task to them. Provider-global skills remain provider-owned and are not copied into the context packet."
     )
 }
 
 pub(crate) fn project_memory(repository: &Path) -> String {
+    let current = repository.join(".staff-room").join("memory.md");
+    if current.is_file() {
+        return read_context_file(&current, SOURCE_BUDGET_BYTES / 2);
+    }
     read_context_file(
         &repository.join(".agent-room").join("memory.md"),
         SOURCE_BUDGET_BYTES / 2,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_memory_prefers_current_path_and_reads_legacy_fallback() {
+        let root = std::env::temp_dir().join(format!("staff-room-memory-test-{}", Uuid::new_v4()));
+        let legacy = root.join(".agent-room").join("memory.md");
+        let current = root.join(".staff-room").join("memory.md");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "legacy context").unwrap();
+
+        assert_eq!(project_memory(&root), "legacy context");
+
+        std::fs::create_dir_all(current.parent().unwrap()).unwrap();
+        std::fs::write(&current, "current context").unwrap();
+
+        assert_eq!(project_memory(&root), "current context");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

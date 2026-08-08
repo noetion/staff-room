@@ -72,7 +72,7 @@ fn unhandled_run_failure_finishes_the_active_activation_transactionally() {
     connection
         .execute(
             "INSERT INTO projects (id, name, goal, repository_path)
-             VALUES ('project-1', 'Agent Room', 'Test failure', 'C:\\repo')",
+             VALUES ('project-1', 'The Staff Room', 'Test failure', 'C:\\repo')",
             [],
         )
         .expect("insert project");
@@ -379,7 +379,7 @@ fn interrupted_runs_become_recoverable_on_restart() {
     connection
         .execute(
             "INSERT INTO projects (id, name, goal, repository_path)
-             VALUES ('project-1', 'Agent Room', 'Test restart', 'C:\\repo')",
+             VALUES ('project-1', 'The Staff Room', 'Test restart', 'C:\\repo')",
             [],
         )
         .expect("insert project");
@@ -459,7 +459,7 @@ fn chat_receipt_does_not_require_an_autonomous_run() {
         .execute(
             "INSERT INTO projects (id, name, goal, repository_path)
              VALUES (?1, ?2, ?3, ?4)",
-            params!["project-1", "Agent Room", "Test chat", "C:\\repo"],
+            params!["project-1", "The Staff Room", "Test chat", "C:\\repo"],
         )
         .expect("insert project");
     let database = Database(Mutex::new(connection));
@@ -541,7 +541,7 @@ fn cross_provider_handoff_uses_each_session_watermark() {
         .execute(
             "INSERT INTO projects (id, name, goal, repository_path)
              VALUES (?1, ?2, ?3, ?4)",
-            params!["project-1", "Agent Room", "Test chat", "C:\\repo"],
+            params!["project-1", "The Staff Room", "Test chat", "C:\\repo"],
         )
         .expect("insert project");
     let database = Database(Mutex::new(connection));

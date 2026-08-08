@@ -1,69 +1,87 @@
-# Agent Room
+# The Staff Room
 
-Agent Room is a local-first Windows desktop room for working with installed coding-agent CLIs against an attached Git repository.
+*A local-first staff room for your coding agents: they do the work, you decide what ships.*
 
-The v1 safety model is assisted and human-gated:
+**Safety invariant:** no agent write reaches the attached checkout until the user presses Apply or confirms Promote.
 
-- Ask runs read-only and does not create a worktree.
-- Quick Edit runs in an isolated worktree and shows an open diff review. Nothing reaches the attached checkout until the user presses Apply.
-- Ship runs Build, Verify, read-only Review, one bounded revision when needed, and Final Review in managed isolation.
-- A successful Ship stops at `awaiting-promotion`. Nothing reaches the attached checkout until the user presses Promote and confirms the action.
-- Autonomous Ship is locked until the separate autonomous acceptance contract passes.
-- Local push-to-talk inserts editable text at the composer caret. Dictation never sends a message or authorizes Apply, Promote, Discard, or Abandon.
+![The Staff Room moving from a read-only question through an isolated edit to the human promotion gate](docs/assets/staff-room-demo.gif)
+
+The Staff Room is a Windows desktop application for working with installed Claude Code, Codex, Cursor, and Antigravity CLIs against an attached Git repository. Rust owns repository access, isolation, verification, and promotion. React renders the room; it does not hold the authority to bypass those controls.
+
+## The safety model
+
+- **Ask** is read-only and creates no worktree.
+- **Quick Edit** works in managed isolation. The attached checkout changes only after the user reviews the diff and presses **Apply**.
+- **Ship** runs Build, Verify, read-only Review, at most one bounded revision, and Final Review in a managed worktree. It stops at `awaiting-promotion` until the user presses **Promote** and confirms.
+- **Autonomous Ship** remains locked. Its separate [acceptance contract](docs/AUTONOMOUS_ACCEPTANCE_CONTRACT.md) is public and still marked **NOT ACCEPTED**.
+- **Voice** is local push-to-talk. A transcript is editable text only; it cannot send a message or authorize Apply, Promote, Discard, or Abandon.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI["React renderer\nrequests and evidence"] -->|"typed Tauri commands"| Core["Rust coordinator\npolicy and custody"]
+    Core --> DB["SQLite\nprojects, runs, receipts"]
+    Core --> Git["Git\nidentity, worktrees, promotion"]
+    Core --> CLI["Installed provider CLIs\nClaude, Codex, Cursor, Antigravity"]
+    CLI -->|"bounded output"| Core
+```
+
+The renderer can request an operation and display evidence. The Rust coordinator decides which repository is in scope, issues one-time operation leases, selects a provider mode, owns child-process limits, and revalidates Git state before promotion. See [the architecture and enforcement map](docs/ARCHITECTURE.md).
 
 ## Trust boundary
 
-Rust owns attached repository roots and operation IDs. Agent commands no longer accept repository paths chosen by the renderer. Every repository action reloads the project from SQLite, canonicalizes its Git root, and verifies that its identity still matches the attached project.
+The important claims are traceable to code:
 
-Review uses an explicit read-only provider mode. Connection tests use a non-writing probe and accept only an exact `READY` response. Cursor is not granted unconditional workspace trust.
+- [`project_repository`](src-tauri/src/db/projects.rs) reloads the attached project from SQLite and revalidates its canonical Git root.
+- [`allocate_operation_id`](src-tauri/src/commands/projects.rs) issues a Rust-owned, one-use operation lease.
+- [`ProviderMode::Probe` and `ProviderMode::Review`](src-tauri/src/providers/mod.rs) force non-writing provider routes for connection tests and review.
+- [`approve_run_promotion`](src-tauri/src/commands/run.rs) requires an explicit confirmation and a still-valid workspace fingerprint.
+- [`active_promotions`](src-tauri/src/types.rs) prevents duplicate promotion of the same run.
+- [`backup_v1_database`](src-tauri/src/db/projects.rs) creates and integrity-checks a consistent SQLite backup before the legacy schema migration.
 
-SQLite is backed up through SQLite's online backup API before the legacy migration. The backup is integrity-checked before it is atomically finalized.
+Connection tests accept only an exact `READY` response. Provider claims do not decide completion; Git state, process results, verification commands, and review evidence do.
 
-## Voice setup
+## Local voice
 
-Voice is optional and local. Open Settings, then choose:
+Voice is optional and offline. In Settings, select a trusted whisper.cpp `whisper-cli` executable and compatible ggml `.bin` model. The Staff Room copies both into local application data. Capture is capped at 30 seconds, transcription at two minutes, and the temporary WAV is removed after success, failure, or timeout.
 
-1. a trusted `whisper-cli` executable built from whisper.cpp;
-2. a compatible whisper.cpp ggml `.bin` model.
+Debug builds accept `STAFF_ROOM_WHISPER_CLI` and `STAFF_ROOM_WHISPER_MODEL`. Release builds require assets chosen through Settings, so an inherited environment variable or `PATH` entry cannot silently select an executable. See [the voice threat model](docs/VOICE.md).
 
-The files are copied into Agent Room's local application-data directory. Microphone capture is capped at 30 seconds and local transcription at two minutes. Audio is written only to a temporary WAV for the local CLI invocation and is deleted after success, failure, or timeout. The transcript remains in the composer until the user reviews and sends it.
+## Build and run
 
-Debug builds also accept `AGENT_ROOM_WHISPER_CLI` and `AGENT_ROOM_WHISPER_MODEL` paths for local development and test fixtures. Release builds require assets selected through Settings so inherited environment variables or `PATH` cannot silently choose an executable.
+Prerequisites:
 
-Agent speech, text-to-speech, per-agent voices, and realtime voice conversation are not part of v1. See [docs/VOICE.md](docs/VOICE.md).
-
-## Run
+- Windows 10 or 11 with WebView2
+- Node.js 22 and npm
+- Rust stable with the MSVC toolchain
+- Visual Studio Build Tools with Desktop development with C++
+- Git
+- at least one supported provider CLI for live use; no provider is needed for the automated test suite
 
 ```powershell
-npm install
+npm ci
 npm run tauri dev
 ```
 
-Frontend-only preview:
-
-```powershell
-npm run dev
-```
-
-The browser preview never starts provider CLIs or microphone capture.
+For a frontend-only preview, run `npm run dev`. Browser preview never starts provider CLIs or microphone capture.
 
 ## Verify
-
-The aggregate local gate is:
 
 ```powershell
 npm run check
 ```
 
-It runs frontend tests and build, design-token checks, Rust tests, and the visual QA harness without paid provider calls.
+The aggregate gate runs frontend tests and production build, design-token checks, Rust tests, and visual/accessibility QA without paid provider calls. Individual commands and the unsigned NSIS build are documented in [docs/BUILD.md](docs/BUILD.md).
 
 ## Release boundaries
 
-- Windows-first personal-use v1.
-- Existing local coding CLIs provide model access and authentication.
+- Windows-first, personal-use v1; macOS and Linux are not claimed.
+- Installed CLIs own model access and authentication.
 - No cloud speech service or speech API key.
-- No automatic promotion.
-- No accepted autonomous mode until [docs/AUTONOMOUS_ACCEPTANCE_CONTRACT.md](docs/AUTONOMOUS_ACCEPTANCE_CONTRACT.md) is fully evidenced.
-- Live provider and packaged microphone observations remain part of the final audit.
+- No automatic Apply or Promote path.
+- No accepted autonomous mode until its evidence contract passes.
+- The installer is unsigned and Windows SmartScreen may warn.
+- This branch is `1.0.0-rc.1` until the packaged-app and live-provider observations in the [public release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md) are complete.
 
-See [docs/V1_ACCEPTANCE.md](docs/V1_ACCEPTANCE.md) for the assisted contract and [docs/V1_IMPLEMENTATION_PLAN.md](docs/V1_IMPLEMENTATION_PLAN.md) for the implementation decision.
+The source is available under the [MIT License](LICENSE). Security reports should follow [SECURITY.md](SECURITY.md).

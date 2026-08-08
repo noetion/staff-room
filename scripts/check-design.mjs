@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Agent Room - design token lint.
+ * The Staff Room - design token lint.
  *
  * Enforces one rule: design values live in src/design/, everything else
  * references them. It flags RAW values only. A declaration that resolves

@@ -302,7 +302,7 @@ fn approve_run_promotion_inner(
         body,
         Some(context_bytes),
     );
-    notify(app, "Agent Room complete", body);
+    notify(app, "The Staff Room complete", body);
     Ok(PromotionActionResult {
         promoted: true,
         cleanup_warning: promotion.cleanup_warning,

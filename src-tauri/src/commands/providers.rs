@@ -455,7 +455,8 @@ pub(crate) async fn stop_run(
         }
         Some(entry) if entry.sender.send(true).is_ok() => Ok(StopRunResult {
             cancelled: true,
-            reason: "Cancellation requested. Agent Room will preserve recoverable work.".to_owned(),
+            reason: "Cancellation requested. The Staff Room will preserve recoverable work."
+                .to_owned(),
         }),
         Some(_) => Ok(StopRunResult {
             cancelled: false,
@@ -597,7 +598,7 @@ pub(crate) async fn test_provider_connection(
         &participant,
         Phase::Chat,
         ProviderMode::Probe,
-        "This is an Agent Room connection test. Reply with exactly READY. Do not inspect or modify files.",
+        "This is a Staff Room connection test. Reply with exactly READY. Do not inspect or modify files.",
         &repository,
         None,
         profile.model.as_deref(),
@@ -734,7 +735,7 @@ async fn discover_codex_models(
     let discovery = async {
         stdin
             .write_all(
-                br#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"agent-room-model-refresh","title":"Agent Room","version":"0.1.0"},"capabilities":{"experimentalApi":true}}}
+                br#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"staff-room-model-refresh","title":"The Staff Room","version":"1.0.0-rc.1"},"capabilities":{"experimentalApi":true}}}
 "#,
             )
             .await

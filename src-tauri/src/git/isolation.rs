@@ -123,12 +123,12 @@ pub(crate) fn commit_managed_changes(worktree: &Path, objective: &str) -> Result
         worktree,
         &[
             "-c".to_owned(),
-            "user.name=Agent Room".to_owned(),
+            "user.name=The Staff Room".to_owned(),
             "-c".to_owned(),
-            "user.email=agent-room@local".to_owned(),
+            "user.email=staff-room@local".to_owned(),
             "commit".to_owned(),
             "-m".to_owned(),
-            format!("Agent Room: {subject}"),
+            format!("The Staff Room: {subject}"),
         ],
     )?;
     Ok(true)
@@ -146,10 +146,10 @@ pub(crate) fn diff_evidence(worktree: &Path, base_head: &str) -> String {
         Ok(diff) => diff,
         Err(error) => {
             return format!(
-                "DELTA UNAVAILABLE: Agent Room could not compute the repository delta ({error}). \
+            "DELTA UNAVAILABLE: The Staff Room could not compute the repository delta ({error}). \
                  You have not been shown the change. Do not approve; \
                  return status `changes_required` citing missing evidence."
-            )
+        )
         }
     };
     let stat = match git_static(worktree, &["diff", "--stat", base_head, "HEAD"]) {

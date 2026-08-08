@@ -1,4 +1,4 @@
-# phase-a.ps1 - Agent Room acceptance: setup S1-S3 + Phase A
+# phase-a.ps1 - The Staff Room acceptance: setup S1-S3 + Phase A
 #
 #   .\phase-a.ps1
 #
@@ -6,12 +6,16 @@
 # and writes docs/V1_ACCEPTANCE_PHASE_A.md.
 # Costs zero provider tokens.
 
-param([switch]$SkipFixture)
+param(
+  [switch]$SkipFixture,
+  [switch]$SeedMessages,
+  [string]$FixturePath = (Join-Path $env:TEMP "staff-room-fixture")
+)
 
 $ErrorActionPreference = "Continue"
 
-$repo   = "<repo>"
-$fix    = "<fixture-repo>"
+$repo   = Split-Path -Parent $PSCommandPath
+$fix    = [System.IO.Path]::GetFullPath($FixturePath)
 $out    = Join-Path $repo "docs\V1_ACCEPTANCE_PHASE_A.md"
 $rows   = @()
 
@@ -28,30 +32,30 @@ function Note($id, $result, $evidence) {
   Write-Host ("  -> {0}" -f $result) -ForegroundColor $c
 }
 
-Write-Host "Agent Room - Phase A acceptance (zero provider tokens)" -ForegroundColor White
+Write-Host "The Staff Room - Phase A acceptance (zero provider tokens)" -ForegroundColor White
 Write-Host ("=" * 60) -ForegroundColor DarkGray
 
 # ---------------------------------------------------------------- locate DB
 $dbCandidates = @(
-  "$env:APPDATA\com.agentroom.desktop\agent-room.db",
-  "$env:LOCALAPPDATA\com.agentroom.desktop\agent-room.db"
+  "$env:APPDATA\com.staffroom.desktop\staff-room.db",
+  "$env:LOCALAPPDATA\com.staffroom.desktop\staff-room.db"
 )
 $db = $dbCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($db) { Write-Host "Database: $db" -ForegroundColor DarkGray }
 else     { Write-Host "Database not found - launch the app once first." -ForegroundColor Yellow }
 
-$worktreeRoot = "$env:LOCALAPPDATA\com.agentroom.desktop\worktrees"
+$worktreeRoot = "$env:LOCALAPPDATA\com.staffroom.desktop\worktrees"
 
 # ---------------------------------------------------------------- S1 fixture
 if (-not $SkipFixture) {
   Write-Host "`nS1  building fixture repo at $fix" -ForegroundColor White
-  if (Test-Path $fix) { Remove-Item $fix -Recurse -Force }
+  if (Test-Path $fix) { throw "Fixture path already exists. Remove it manually or pass a new -FixturePath." }
   New-Item -ItemType Directory -Force $fix | Out-Null
   Push-Location $fix
   git init -q
   @'
 {
-  "name": "ar-fixture",
+  "name": "staff-room-fixture",
   "version": "1.0.0",
   "type": "module",
   "scripts": { "test": "node test.js" }
@@ -84,7 +88,7 @@ $leaks = @()
 foreach ($t in $leakTargets) {
   if (Test-Path $t) {
     $leaks += Get-ChildItem $t -Recurse -File -Include *.js,*.ts,*.tsx,*.rs,*.html,*.css -ErrorAction SilentlyContinue |
-      Select-String -Pattern 'C:\\+Users\\+example' -List -ErrorAction SilentlyContinue
+      Select-String -Pattern 'C:\\+Users\\+[^\\]+' -List -ErrorAction SilentlyContinue
   }
 }
 if ($leaks) {
@@ -92,19 +96,25 @@ if ($leaks) {
   $leaks | ForEach-Object { Write-Host ("    " + $_.Path) -ForegroundColor Yellow }
   Note 3 "FAIL" ("developer path present in " + $leaks.Count + " file(s): " + (($leaks | ForEach-Object { Split-Path $_.Path -Leaf }) -join ", "))
 } else {
-  Note 3 "PASS" "no <user-home> path found in dist, src, or src-tauri/src"
+  Note 3 "PASS" "no absolute Windows user path found in dist, src, or src-tauri/src"
 }
 
-# ------------------------------------------------- A25 automated: seed 500
-Write-Host "`n[25] seeding 500 messages" -ForegroundColor White
+# ------------------------------------------------- A25 opt-in: seed 500 into the exact fixture only
+Write-Host "`n[25] 500-message room" -ForegroundColor White
 $seeded = $false
-if ($db) {
-  $seedJs = Join-Path $env:TEMP "ar-seed.mjs"
+if (-not $SeedMessages) {
+  Write-Host "  disabled by default; attach the fixture, close the app, then rerun with -SkipFixture -SeedMessages" -ForegroundColor DarkGray
+} elseif ($db) {
+  $seedJs = Join-Path $env:TEMP "staff-room-seed.mjs"
   @'
 import { DatabaseSync } from "node:sqlite";
+import path from "node:path";
 const db = new DatabaseSync(process.argv[2]);
-const p = db.prepare("SELECT id FROM projects LIMIT 1").get();
-if (!p) { console.log("NOPROJECT"); process.exit(2); }
+const normalize = (value) => path.resolve(value.replace(/^\\\\\?\\/, "")).replaceAll("/", "\\").toLowerCase();
+const expected = normalize(process.argv[3]);
+const p = db.prepare("SELECT id, repository_path FROM projects").all()
+  .find((project) => normalize(project.repository_path) === expected);
+if (!p) { console.log("NOFIXTURE"); process.exit(2); }
 const ins = db.prepare(
   "INSERT INTO messages (id, project_id, run_id, sender_kind, message_kind, body, created_at) VALUES (?,?,?,?,?,?,?)"
 );
@@ -115,12 +125,13 @@ for (let i = 0; i < 500; i++) {
 }
 console.log("OK");
 '@ | Set-Content $seedJs -Encoding utf8
-  $r = & node --experimental-sqlite $seedJs $db 2>&1
-  if ($r -match "OK") { $seeded = $true; Write-Host "  inserted 500 rows" -ForegroundColor DarkGray }
-  elseif ($r -match "NOPROJECT") { Write-Host "  no project attached yet - attach one, then re-run with -SkipFixture" -ForegroundColor Yellow }
+  $r = & node --experimental-sqlite $seedJs $db $fix 2>&1
+  if ($r -match "OK") { $seeded = $true; Write-Host "  inserted 500 rows into the exact fixture project" -ForegroundColor DarkGray }
+  elseif ($r -match "NOFIXTURE") { Write-Host "  exact fixture is not attached - attach $fix, close the app, then rerun with -SkipFixture -SeedMessages" -ForegroundColor Yellow }
   else { Write-Host "  could not seed (needs Node 22+ for node:sqlite): $r" -ForegroundColor Yellow }
+} else {
+  Write-Host "  database not found; launch the app once, attach the fixture, close it, then rerun with -SkipFixture -SeedMessages" -ForegroundColor Yellow
 }
-if (-not $seeded) { Note 25 "SKIP" "could not seed automatically - verify manually or install Node 22+" }
 
 # ------------------------------------------------- A18 worktree inventory
 $wtBefore = @()
@@ -149,7 +160,11 @@ Note  4 (Ask  4 "Prior messages and runs are intact after relaunch, no migration
 Note  2 (Ask  2 "Attach $fix as a second project. Do the two rooms have separate history, sessions, model profiles and settings?") "observed"
 Note 29 (Ask 29 "Open the composer participant list. Is Antigravity ABSENT from Ask and Quick Edit, and does its card read 'Ship only'?") "observed"
 Note 28 (Ask 28 "Resize to 1024, 1280, 1440 and 1800 px. No horizontal overflow at any width?") "observed"
-Note 25 (Ask 25 "Reload the room. Are the MOST RECENT messages shown (not the oldest 500), and does it scroll smoothly?") "observed"
+if ($seeded) {
+  Note 25 (Ask 25 "Reload the fixture room. Are the MOST RECENT messages shown (not the oldest 500), and does it scroll smoothly?") "500 synthetic messages inserted into the exact fixture project"
+} else {
+  Note 25 "SKIP" "message seeding was not requested or the exact fixture project could not be resolved"
+}
 Note 27 (Ask 27 "Look at any failed run or failed provider card. Does every failure name a cause AND offer an action?") "observed"
 Note 18 (Ask 18 "If a non-active run with a worktree exists, click Abandon. Worktree removed and run marked abandoned? (skip if none)") "observed"
 

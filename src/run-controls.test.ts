@@ -10,7 +10,7 @@ describe("run control contract", () => {
     };
     const requested: StopRunResult = {
       cancelled: true,
-      reason: "Cancellation requested. Agent Room will preserve recoverable work.",
+      reason: "Cancellation requested. The Staff Room will preserve recoverable work.",
     };
 
     expect(unavailable.cancelled).toBe(false);

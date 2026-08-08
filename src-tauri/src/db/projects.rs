@@ -407,7 +407,7 @@ pub(crate) fn reconcile_interrupted_runs(connection: &Connection) -> rusqlite::R
         "UPDATE runs
          SET state = 'stopped',
              current_owner = NULL,
-             stop_reason = 'Agent Room closed or restarted while this run was active. The managed worktree was preserved for recovery.',
+             stop_reason = 'The Staff Room closed or restarted while this run was active. The managed worktree was preserved for recovery.',
              finished_at = CURRENT_TIMESTAMP
          WHERE state IN ('selecting', 'working', 'verifying', 'reviewing', 'revising')",
         [],

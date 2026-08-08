@@ -18,7 +18,7 @@ export function Wordmark({ corner, size }: WordmarkProps) {
       style={{ "--wordmark-size": size } as WordmarkStyle}
       aria-hidden="true"
     >
-      AGENT ROOM
+      THE STAFF ROOM
     </div>
   );
 }

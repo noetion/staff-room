@@ -128,14 +128,14 @@ fn create_isolation_at_root(
     let base_head = git_static(repository, &["rev-parse", "HEAD"])?;
     let base_branch = git_static(repository, &["branch", "--show-current"])?;
     if base_branch.trim().is_empty() {
-        return Err("Agent Room requires an attached branch, not a detached HEAD.".to_owned());
+        return Err("The Staff Room requires an attached branch, not a detached HEAD.".to_owned());
     }
     let short = run_id
         .chars()
         .filter(|value| *value != '-')
         .take(10)
         .collect::<String>();
-    let branch = format!("agent-room/{short}");
+    let branch = format!("staff-room/{short}");
     std::fs::create_dir_all(root).map_err(|error| error.to_string())?;
     let worktree = root.join(&short);
     if worktree.exists() {
@@ -414,8 +414,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_directory = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_directory)?;
-            let connection = Connection::open(data_directory.join("agent-room.db"))?;
+            let local_data_directory = app.path().app_local_data_dir()?;
+            let database_path = prepare_app_data(&data_directory, &local_data_directory)
+                .map_err(std::io::Error::other)?;
+            let connection = Connection::open(database_path)?;
             migrate(&connection)?;
             reconcile_interrupted_runs(&connection)?;
             app.manage(Database(Mutex::new(connection)));
@@ -454,7 +456,7 @@ pub fn run() {
             voice_stop
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Agent Room");
+        .expect("error while running The Staff Room");
 }
 
 #[cfg(test)]

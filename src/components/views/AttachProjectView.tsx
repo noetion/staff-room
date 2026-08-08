@@ -12,13 +12,13 @@ type AttachProjectViewProps = {
 export function AttachProjectView({ projects, native, onAttach, onSelect }: AttachProjectViewProps) {
   return (
     <section className="utility-screen attach-project" aria-labelledby="attach-project-title">
-      <span className="ghost-wordmark" aria-hidden="true">AGENT ROOM</span>
+      <span className="ghost-wordmark" aria-hidden="true">THE STAFF ROOM</span>
       <div className="attach-project-content">
         <header className="attach-project-copy">
           <h1 id="attach-project-title">
             Point a coding agent at a repository. <span>Watch it work.</span>
           </h1>
-          <p>Attach a Git repository to create an independently scoped Agent Room.</p>
+          <p>Attach a Git repository to create an independently scoped room.</p>
         </header>
         <Button type="button" className="attach-project-action" onClick={onAttach} disabled={!native}>
           Choose a repository <ChevronRight size={16} aria-hidden="true" />

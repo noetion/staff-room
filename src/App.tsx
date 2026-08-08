@@ -440,7 +440,7 @@ export function App() {
         setStreamTitle(
           event.agent
             ? `${agentNames[event.agent]} / ${event.phase}`
-            : `Agent Room / ${event.phase}`,
+            : `The Staff Room / ${event.phase}`,
         );
         setActivity((current) => [
           ...current,
@@ -1149,7 +1149,7 @@ export function App() {
       setRun((current) => ({
         ...current,
         state: "stopped",
-        stopReason: "Stop requested. Agent Room is preserving recoverable work.",
+        stopReason: "Stop requested. The Staff Room is preserving recoverable work.",
       }));
     }
   }
@@ -1223,7 +1223,7 @@ export function App() {
     return (
       <main className="boot-screen" aria-busy="true">
         <span className="eyebrow">Local workspace</span>
-        <h1>Opening Agent Room</h1>
+        <h1>Opening The Staff Room</h1>
         <p>Loading projects, provider state, and the latest room evidence.</p>
       </main>
     );
@@ -1233,7 +1233,7 @@ export function App() {
     return (
       <main className="boot-screen">
         <span className="eyebrow">Startup stopped</span>
-        <h1>Agent Room could not open</h1>
+        <h1>The Staff Room could not open</h1>
         <ErrorState
           cause={bootError}
           action={(

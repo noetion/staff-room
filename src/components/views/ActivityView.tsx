@@ -34,7 +34,7 @@ export function ActivityView({ messages, query, renderMessage }: ActivityViewPro
           const senderName = message.sender === "human"
             ? "You"
             : message.sender === "system"
-              ? "Agent Room"
+              ? "The Staff Room"
               : agentNames[message.sender];
 
           return (

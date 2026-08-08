@@ -4,14 +4,14 @@ import { useEffect, useState } from "react";
 type ThemePreference = "system" | "light" | "dark";
 
 function themePreference(): ThemePreference {
-  const preference = localStorage.getItem("ar-theme");
+  const preference = localStorage.getItem("staff-room-theme") ?? localStorage.getItem("ar-theme");
   return preference === "light" || preference === "dark" || preference === "system"
     ? preference
     : "system";
 }
 
 function applyTheme(preference: ThemePreference) {
-  localStorage.setItem("ar-theme", preference);
+  localStorage.setItem("staff-room-theme", preference);
   // "System" must leave the attribute off. Baking the resolved value in pinned
   // the app to whatever the OS happened to be at the moment of the click, and
   // disagreed with the boot script in main.tsx, which clears it.

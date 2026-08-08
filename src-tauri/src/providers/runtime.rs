@@ -206,7 +206,7 @@ pub(crate) fn capabilities_for(
                 }
                 .to_owned(),
                 autonomy_note: if ready {
-                    "The verified capability table declares print mode, stream JSON, native auto permission mediation, and session resume. Agent Room supplies the outer time and revision bounds."
+                    "The verified capability table declares print mode, stream JSON, native auto permission mediation, and session resume. The Staff Room supplies the outer time and revision bounds."
                 } else if installed {
                     "Claude Code is installed, but its current help does not prove every unattended-mode flag."
                 } else {
@@ -407,7 +407,7 @@ pub(crate) fn model_options(
         ),
         _ => (
             vec![],
-            "Enter an exact model identifier or leave blank for the provider default. Agent Room does not run account model discovery during startup."
+            "Enter an exact model identifier or leave blank for the provider default. The Staff Room does not run account model discovery during startup."
                 .to_owned(),
         ),
     };
@@ -489,7 +489,7 @@ pub(crate) fn probe_provider(kind: &str) -> Participant {
         }
         .to_owned(),
         connection_detail: if installed {
-            "Connection has not been tested in Agent Room.".to_owned()
+            "Connection has not been tested in The Staff Room.".to_owned()
         } else {
             "CLI executable was not found.".to_owned()
         },

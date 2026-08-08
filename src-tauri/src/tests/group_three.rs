@@ -40,7 +40,7 @@ fn legacy_provider_profile_migrates_to_every_route_without_overwriting() {
     connection
         .execute(
             "INSERT INTO projects (id, name, goal, repository_path)
-             VALUES ('project-1', 'Agent Room', 'Test', 'C:\\repo')",
+             VALUES ('project-1', 'The Staff Room', 'Test', 'C:\\repo')",
             [],
         )
         .expect("insert project");
@@ -499,7 +499,7 @@ fn cursor_chat_adapter_supports_stream_fragments_and_terminal_result() {
 
 #[test]
 fn unborn_git_repository_is_detected_before_cursor_launch() {
-    let root = std::env::temp_dir().join(format!("agent-room-unborn-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("staff-room-unborn-{}", Uuid::new_v4()));
     let repository = root.join("repository");
     std::fs::create_dir_all(&repository).expect("create unborn repository");
     git(&repository, &["init".to_owned()]).expect("initialize unborn repository");

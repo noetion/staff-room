@@ -44,18 +44,18 @@ The scroll-performance check is intentionally deferred to the final audit. No pa
 
 These are deliberately left for the final audit and must not be claimed from unit tests:
 
-| Observation | Pass condition |
-| --- | --- |
-| Fresh packaged launch | Attach view opens, a repository attaches, and no fabricated native data appears |
-| Two-project isolation | Switching projects during or after async work never displays or applies another project's result |
-| Human Ship | A verified change reaches `awaiting-promotion`; base checkout is unchanged before Promote; confirmed Promote applies only the reviewed delta |
-| Quick Edit | Diff stays visible until Apply or Discard; project switch and cleanup behavior are correct |
-| Provider matrix | Each installed provider's Ask, Quick Edit, Build, Review, cancellation, and connection claims match observed CLI behavior |
-| Packaged voice | Microphone capture works with configured local assets and inserts an editable transcript at the caret |
-| Voice denial/failure | Missing permission, device, engine, model, silence, or inference failure leaves typed text usable and unchanged |
-| Voice retention | Temporary WAV and transcript output files are deleted after success and failure |
-| Installer/migration | A pre-v1 database produces a verified `.v1.bak` and retains project data |
+| Observation | Pass condition | Result | Evidence |
+| --- | --- | --- | --- |
+| Fresh packaged launch | Attach view opens, a repository attaches, and no fabricated native data appears | NOT RUN | Record packaged-build observation |
+| Two-project isolation | Switching projects during or after async work never displays or applies another project's result | NOT RUN | Record packaged-build observation |
+| Human Ship | A verified change reaches `awaiting-promotion`; base checkout is unchanged before Promote; confirmed Promote applies only the reviewed delta | NOT RUN | Record run ID and repository observation |
+| Quick Edit | Diff stays visible until Apply or Discard; project switch and cleanup behavior are correct | NOT RUN | Record run ID and repository observation |
+| Provider matrix | Codex, Claude, and Cursor are observed in Ask, Quick Edit, Build, Review, cancellation, and connection probes when installed. Antigravity is recorded N/A for Ask and Quick Edit and observed only in its supported Build, Review, cancellation, and connection routes. | NOT RUN | Record provider versions and a PASS/N/A route matrix |
+| Packaged voice | Microphone capture works with configured local assets and inserts an editable transcript at the caret | NOT RUN | Record configured CLI/model versions and observation |
+| Voice denial/failure | Missing permission, device, engine, model, silence, or inference failure leaves typed text usable and unchanged | NOT RUN | Record exercised failure and observation |
+| Voice retention | Temporary WAV and transcript output files are deleted after success and failure | NOT RUN | Record inspected local-data path and observation |
+| Installer/migration | A pre-v1 database produces a verified `.v1.bak` and retains project data | NOT RUN | Record source and migrated database checks |
 
 ## Release verdict rule
 
-Human-gated v1 can be marked accepted only when `npm run check` passes and every final observation above is recorded as PASS on the target packaged build. Autonomous mode cannot inherit that verdict.
+Human-gated v1 can be marked accepted only when `npm run check` passes, every applicable final observation above is recorded as PASS on the target packaged build, and every unsupported provider-route cell is explicitly recorded as N/A. Autonomous mode cannot inherit that verdict.

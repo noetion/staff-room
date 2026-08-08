@@ -5,7 +5,7 @@ src-tauri/target/
 .vite/
 .pnpm-store/
 *.log
-.agent-room/
+.staff-room/
 artifacts/
 
 run-build.ps1
@@ -14,5 +14,4 @@ docs/BLOCKED.md
 
 # redesign driver run logs
 docs/redesign/logs/
-docs/redesign/qa/*.png
-docs/redesign/qa/*.png
+docs/redesign/qa/

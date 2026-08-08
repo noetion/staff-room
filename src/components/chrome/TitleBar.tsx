@@ -44,10 +44,10 @@ export function TitleBar({
     <header className="chrome-titlebar glass glass--refract">
       <div className="chrome-brand">
         <span className="chrome-brand-mark"><span /></span>
-        <strong>Agent Room</strong>
+        <strong>The Staff Room</strong>
       </div>
       <button type="button" className="chrome-project-switch" onClick={onOpenRepository} aria-label={`Open ${project.name} repository details`}>
-        <span className="chrome-project-monogram">AR</span>
+        <span className="chrome-project-monogram">SR</span>
         <span>
           <strong>{project.name}</strong>
           <small>{project.branch}</small>

@@ -19,7 +19,7 @@ fn debug_path_override(key: &str) -> Option<Option<PathBuf>> {
 }
 
 fn installed_voice_model(app: &AppHandle) -> Result<Option<PathBuf>, String> {
-    if let Some(resolved) = debug_path_override("AGENT_ROOM_WHISPER_MODEL") {
+    if let Some(resolved) = debug_path_override("STAFF_ROOM_WHISPER_MODEL") {
         return Ok(resolved);
     }
     let path = app
@@ -32,7 +32,7 @@ fn installed_voice_model(app: &AppHandle) -> Result<Option<PathBuf>, String> {
 }
 
 fn installed_voice_engine(app: &AppHandle) -> Result<Option<PathBuf>, String> {
-    if let Some(resolved) = debug_path_override("AGENT_ROOM_WHISPER_CLI") {
+    if let Some(resolved) = debug_path_override("STAFF_ROOM_WHISPER_CLI") {
         return Ok(resolved);
     }
     let local = app
@@ -75,7 +75,7 @@ fn voice_snapshot(app: &AppHandle, recording: bool) -> Result<VoiceStatus, Strin
         ),
         (_, _, false) => (
             false,
-            "No default microphone is available to Agent Room.".to_owned(),
+            "No default microphone is available to The Staff Room.".to_owned(),
         ),
     };
     Ok(VoiceStatus {
@@ -99,9 +99,9 @@ fn microphone_error(context: &str, error: impl std::fmt::Display) -> String {
         || lowered.contains("permission")
     {
         if cfg!(windows) {
-            return "Windows is blocking microphone access for Agent Room. Open Settings > Privacy & security > Microphone, turn on \"Let desktop apps access your microphone\", then try again.".to_owned();
+            return "Windows is blocking microphone access for The Staff Room. Open Settings > Privacy & security > Microphone, turn on \"Let desktop apps access your microphone\", then try again.".to_owned();
         }
-        return "The system denied microphone access to Agent Room. Grant microphone permission in your system settings, then try again.".to_owned();
+        return "The system denied microphone access to The Staff Room. Grant microphone permission in your system settings, then try again.".to_owned();
     }
     format!("{context}: {text}")
 }
@@ -276,7 +276,7 @@ pub(crate) async fn voice_stop(
     }
     if audio.samples.is_empty() {
         return Err(
-            "No audio reached Agent Room from the microphone. Check that the right input device is selected in your system settings, then try again."
+            "No audio reached The Staff Room from the microphone. Check that the right input device is selected in your system settings, then try again."
                 .to_owned(),
         );
     }

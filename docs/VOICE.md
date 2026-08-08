@@ -25,10 +25,10 @@ It does not create a new agent route. The same reviewed text goes through Ask, Q
 
 ### Local runtime
 
-Settings accepts a trusted whisper.cpp `whisper-cli` executable and compatible ggml `.bin` model. Agent Room copies them to its local application-data voice directory. Debug builds also support these development and test-fixture overrides:
+Settings accepts a trusted whisper.cpp `whisper-cli` executable and compatible ggml `.bin` model. The Staff Room copies them to its local application-data voice directory. Debug builds also support these development and test-fixture overrides:
 
-- `AGENT_ROOM_WHISPER_CLI`
-- `AGENT_ROOM_WHISPER_MODEL`
+- `STAFF_ROOM_WHISPER_CLI`
+- `STAFF_ROOM_WHISPER_MODEL`
 
 Release builds ignore those overrides and inherited `PATH` lookup. The executable and model are not bundled in this repository. Their provenance and license must be verified before distribution.
 

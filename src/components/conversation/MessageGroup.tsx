@@ -26,7 +26,7 @@ function position(index: number, count: number): MessagePosition {
 
 function senderName(message: RoomMessage) {
   if (message.sender === "human") return "You";
-  if (message.sender === "system") return "Agent Room";
+  if (message.sender === "system") return "The Staff Room";
   return agentNames[message.sender];
 }
 

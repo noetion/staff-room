@@ -5,7 +5,7 @@ mod group_three;
 mod group_two;
 
 fn test_repository() -> (PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!("agent-room-test-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("staff-room-test-{}", Uuid::new_v4()));
     let repository = root.join("repository");
     std::fs::create_dir_all(&repository).expect("create test repository");
     git(&repository, &["init".to_owned()]).expect("initialize repository");
@@ -14,7 +14,7 @@ fn test_repository() -> (PathBuf, PathBuf) {
         &[
             "config".to_owned(),
             "user.name".to_owned(),
-            "Agent Room Test".to_owned(),
+            "The Staff Room Test".to_owned(),
         ],
     )
     .expect("configure test name");
@@ -23,7 +23,7 @@ fn test_repository() -> (PathBuf, PathBuf) {
         &[
             "config".to_owned(),
             "user.email".to_owned(),
-            "agent-room-test@local".to_owned(),
+            "staff-room-test@local".to_owned(),
         ],
     )
     .expect("configure test email");

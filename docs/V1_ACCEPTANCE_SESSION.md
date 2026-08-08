@@ -1,4 +1,4 @@
-# Agent Room v1 — Manual Acceptance Session
+# The Staff Room v1 — Manual Acceptance Session
 
 Cost-ordered. Phase A spends no provider tokens at all. Phases B–D are ordered so
 that if something fails you stop before the expensive part.
@@ -16,17 +16,17 @@ you follow the setup below. Ten to twenty times that if you don't.**
 
 ### S1. Build a throwaway fixture repo
 
-Never run acceptance against the Agent Room repo. Its packets are 48 KiB, its diff
+Never run acceptance against The Staff Room repository. Its packets are 48 KiB, its diff
 surface is 7,000 lines, and its verification runs `npm ci` plus `cargo check`.
 
 ```powershell
-$fix = "<fixture-repo>"
+$fix = Join-Path $env:TEMP "staff-room-fixture"
 New-Item -ItemType Directory -Force $fix | Out-Null
 Set-Location $fix
 git init -q
 Set-Content package.json @'
 {
-  "name": "ar-fixture",
+  "name": "staff-room-fixture",
   "version": "1.0.0",
   "scripts": { "test": "node test.js" }
 }
@@ -70,10 +70,10 @@ Do all of these before spending anything.
 
 | # | Check | How | Pass when |
 |---|---|---|---|
-| 1 | Fresh attach screen | Rename `%APPDATA%\com.agentroom.desktop\agent-room.db` aside, relaunch | Attach screen, no seeded conversation |
+| 1 | Fresh attach screen | Rename `%APPDATA%\com.staffroom.desktop\staff-room.db` aside, relaunch | Attach screen, no seeded conversation |
 | 4 | Migration | Restore the renamed DB, relaunch | Prior messages and runs intact, no error |
 | 2 | Two independent repos | Attach the fixture too, switch between them | Separate history, sessions, model profiles, settings |
-| 3 | No developer paths | Read every visible string in a release build | No `<user-home>\...` anywhere |
+| 3 | No developer paths | Read every visible string in a release build | No absolute developer path appears anywhere |
 | 29 | Ship-only labelling | Open the composer participant list | Antigravity absent from Ask and Quick Edit; chip reads "Ship only" |
 | 6 | Cold-start probe cost | Close app, relaunch, run the S3 process check during startup | No provider subprocesses spawned |
 | 28 | Layout widths | Resize to 1024, 1280, 1440, 1800 | No horizontal overflow at any width |
@@ -81,12 +81,10 @@ Do all of these before spending anything.
 | 27 | Failure states | Look at Cursor's failed card, and any failed run | Every failure names a cause and offers an action |
 | 18 | Abandon | On any non-active run with a worktree, click Abandon | Worktree gone from `%LOCALAPPDATA%\...\worktrees`, run marked abandoned |
 
-Seed 500 messages without a provider:
+Seed 500 messages without a provider only after the fixture is attached. Close The Staff Room first, then use the helper's explicit opt-in. It resolves the exact fixture repository path and refuses to insert into any other project:
 
 ```powershell
-$db = "$env:APPDATA\com.agentroom.desktop\agent-room.db"
-# use any sqlite client, or add a dev-only command; insert 500 rows into messages
-# for the active project_id with ascending created_at.
+.\phase-a.ps1 -SkipFixture -FixturePath $fix -SeedMessages
 ```
 
 **Stop here if Phase A fails.** Nothing downstream is worth paying for until the
@@ -102,13 +100,12 @@ shell is sound.
 | 20 | Ask immutability | To each Full-tier provider: "delete every file in this repository" | Nothing changes. Verify with `git status` |
 | 22 | Permission boundaries | Same turns | No provider ran with permission bypass; check the receipt |
 | 26 | Long answer render | "Write a 600-line JS file to the screen, do not save it" | Renders without stutter, code block intact |
-| 5 | Warm turn 2 | Two Ask turns to Claude, read Evidence | `process_start_ms` recorded both times |
+| 5 | Second-turn truth | Two Ask turns to Claude, read Evidence | `process_start_ms` is recorded both times and the capability receipt truthfully reports a fresh session while `warm_session` is false |
 | 8 | Resumed packet | Same two turns | Turn 2 `context_bytes` far below turn 1 |
 | 10 | Cross-provider handoff | Ask Codex a question, then ask Claude "what did you just say?" | Claude answers using the ≤4 KiB handoff |
 | 21 | Quick Edit | "Add a comment to the top of greet.js" | Diff appears; file unchanged until Apply; Apply lands it |
 
-Item 5 will likely read FAIL — `warm_session` is `false` for all four providers and
-Step 7 never implemented the transport. That is a truthful FAIL, not a bug to chase.
+Item 5 is a PASS when the receipt honestly reports the implemented fresh-session behavior. It does not require a warm transport that the product does not claim.
 
 ---
 

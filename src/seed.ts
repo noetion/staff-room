@@ -1,10 +1,10 @@
 import type { NativeEnvironment, Project, RoomMessage, Run } from "./model";
 
 export const seedProject: Project = {
-  id: "agent-room",
-  name: "Agent Room",
+  id: "staff-room",
+  name: "The Staff Room",
   goal: "Remove manual context transfer between coding agents.",
-  repositoryPath: "<repo>",
+  repositoryPath: "C:\\Projects\\fixture-repo",
   branch: "main",
 };
 
@@ -143,7 +143,7 @@ export const seedMessages: RoomMessage[] = [
     kind: "status",
     sender: "system",
     body: "This room keeps the objective, repository evidence, handoffs, and review findings together.",
-    reason: "Start with one objective. Agent Room selects only an available participant.",
+    reason: "Start with one objective. The Staff Room selects only an available participant.",
     createdAt: new Date().toISOString(),
   },
   {

@@ -56,10 +56,10 @@
   mask-image: linear-gradient(to bottom, transparent, black var(--s-3));
 }
 
-@supports (backdrop-filter: url(#ar-refract)) {
+@supports (backdrop-filter: url(#staff-room-refract)) {
   :root[data-refraction="on"] .glass--refract {
-    backdrop-filter: url(#ar-refract) blur(var(--glass-blur)) saturate(180%);
-    -webkit-backdrop-filter: url(#ar-refract) blur(var(--glass-blur)) saturate(180%);
+    backdrop-filter: url(#staff-room-refract) blur(var(--glass-blur)) saturate(180%);
+    -webkit-backdrop-filter: url(#staff-room-refract) blur(var(--glass-blur)) saturate(180%);
   }
 }
 

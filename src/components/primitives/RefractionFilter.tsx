@@ -188,7 +188,7 @@ export function RefractionFilter({ composerVisible, surfaceKey }: RefractionFilt
 
   return (
     <svg aria-hidden="true" className="refraction-defs" width="0" height="0">
-      <filter id="ar-refract" colorInterpolationFilters="sRGB">
+      <filter id="staff-room-refract" colorInterpolationFilters="sRGB">
         <feImage
           href={mapDataUrl}
           result="map"

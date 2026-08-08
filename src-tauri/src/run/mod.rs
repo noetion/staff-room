@@ -153,7 +153,7 @@ pub(crate) async fn execute_room_run(
             None => {
                 runtime.cancellations.lock().await.remove(&request.run_id);
                 return Err(
-                    "This preserved run predates branch-identity safety. Start a new Ship run so Agent Room can prove the target branch."
+                    "This preserved run predates branch-identity safety. Start a new Ship run so The Staff Room can prove the target branch."
                         .to_owned(),
                 );
             }
@@ -1008,7 +1008,7 @@ pub(crate) async fn execute_room_run(
                 "working",
                 Some(&builder.kind),
                 "Resume unavailable",
-                "The provider reported a new or unknown session, so Agent Room resent the full revision packet.",
+                "The provider reported a new or unknown session, so The Staff Room resent the full revision packet.",
                 Some(full_revision_context_bytes),
             );
             revision_result = invoke_provider(
@@ -1254,7 +1254,7 @@ pub(crate) async fn execute_room_run(
                 "working",
                 Some(&reviewer.kind),
                 "Resume unavailable",
-                "The provider reported a new or unknown session, so Agent Room resent the full final-review packet.",
+                "The provider reported a new or unknown session, so The Staff Room resent the full final-review packet.",
                 Some(full_final_context_bytes),
             );
             final_result = invoke_provider(
@@ -1599,7 +1599,7 @@ pub(crate) async fn execute_room_run(
         "promoting",
         None,
         "Promoting verified work",
-        "Agent Room is checking that the base checkout has not changed.",
+        "The Staff Room is checking that the base checkout has not changed.",
         Some(max_context_bytes),
     );
     let (promoted, promotion_mode, cleanup_warning) = if has_changes {
@@ -1655,7 +1655,7 @@ pub(crate) async fn execute_room_run(
             "Verification and review passed. The managed branch was fast-forwarded into the base checkout."
         }
         Some(PromotionMode::WorkingTree) => {
-            "Verification and review passed. Agent Room safely applied the verified delta to your existing uncommitted checkout without committing or stashing your work."
+            "Verification and review passed. The Staff Room safely applied the verified delta to your existing uncommitted checkout without committing or stashing your work."
         }
         None => {
             "Verification and review passed. The objective intentionally produced no repository change."
@@ -1715,7 +1715,7 @@ pub(crate) async fn execute_room_run(
     );
     notify(
         &app,
-        "Agent Room complete",
+        "The Staff Room complete",
         match promotion_mode {
             Some(PromotionMode::WorkingTree) => {
                 "Verified work was applied without committing or stashing your existing changes."
@@ -1832,7 +1832,7 @@ pub(crate) fn finalize_unhandled_run_error(
     );
     notify(
         app,
-        "Agent Room needs attention",
+        "The Staff Room needs attention",
         "Ship stopped after an unexpected coordinator error. Its worktree was preserved.",
     );
     Ok(true)

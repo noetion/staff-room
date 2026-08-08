@@ -142,7 +142,7 @@ fn v1_project_migration_preserves_project_scoped_row_counts() {
     connection
         .execute(
             "INSERT INTO projects (id, name, goal, repository_path)
-             VALUES ('agent-room', 'Agent Room', 'legacy', ?1)",
+             VALUES ('agent-room', 'The Staff Room', 'legacy', ?1)",
             [repository.to_string_lossy().into_owned()],
         )
         .expect("insert legacy project");

@@ -31,9 +31,9 @@ export function WindowControls({ native }: { native: boolean }) {
       <button
         type="button"
         className="chrome-window-control chrome-window-close"
-        aria-label="Close Agent Room"
+        aria-label="Close The Staff Room"
         disabled={!native}
-        title={native ? "Close Agent Room" : "Inert in browser preview mode"}
+        title={native ? "Close The Staff Room" : "Inert in browser preview mode"}
         onClick={() => {
           if (native) void getCurrentWindow().close();
         }}

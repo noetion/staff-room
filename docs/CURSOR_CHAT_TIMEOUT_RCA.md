@@ -8,7 +8,7 @@ The room shows `Chat produced no output for 300 seconds and was stopped.` after 
 
 ## Evidence
 
-The recent durable run artifacts under the Agent Room local-data directory show:
+The recent durable run artifacts under The Staff Room local-data directory show:
 
 - `chat.stdout.log` is empty.
 - `chat.stderr.log` begins with `Cannot use this model: cursor-grok-4.5` and includes the current available identifiers, including `cursor-grok-4.5-high`, `cursor-grok-4.5-medium`, and `cursor-grok-4.5-low`.

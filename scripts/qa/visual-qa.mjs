@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Agent Room — automated visual QA harness.
+ * The Staff Room — automated visual QA harness.
  *
  * Runs headless against the Vite preview build and fails on measurable UI
  * defects. This is the "eyes" for an unattended redesign run: nobody is
@@ -114,7 +114,7 @@ async function gotoView(page, base, view, theme) {
   await page.goto(base, { waitUntil: "domcontentloaded" });
   await page.evaluate((t) => {
     document.documentElement.dataset.theme = t;
-    try { localStorage.setItem("ar-theme", t); } catch { /* preview */ }
+    try { localStorage.setItem("staff-room-theme", t); } catch { /* preview */ }
   }, theme);
   if (view !== "rooms") {
     const nav = page.getByRole("button", { name: new RegExp(view, "i") }).first();
@@ -557,7 +557,7 @@ async function main() {
   const info = server.resolvedUrls?.local?.[0];
   if (!info) throw new Error("vite preview did not report a URL");
   const base = info.replace(/\/$/, "");
-  process.stdout.write(`Agent Room visual QA — ${base}\n\n`);
+  process.stdout.write(`The Staff Room visual QA — ${base}\n\n`);
 
   const browser = await launch();
 

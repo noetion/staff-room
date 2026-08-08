@@ -36,7 +36,7 @@ pub(crate) fn final_failure(
         if state == "stopped" {
             "The run was stopped."
         } else {
-            "Agent Room needs attention."
+            "The Staff Room needs attention."
         },
         &[],
         &[],
@@ -72,9 +72,9 @@ pub(crate) fn final_failure(
     notify(
         app,
         if state == "stopped" {
-            "Agent Room stopped"
+            "The Staff Room stopped"
         } else {
-            "Agent Room needs attention"
+            "The Staff Room needs attention"
         },
         &truncate_utf8(&detail, 240),
     );

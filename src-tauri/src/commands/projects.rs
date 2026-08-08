@@ -35,7 +35,8 @@ pub(crate) async fn consume_operation_id(
         .await
         .remove(id)
         .ok_or_else(|| {
-            "This operation ID was not issued by Agent Room or has already been used.".to_owned()
+            "This operation ID was not issued by The Staff Room or has already been used."
+                .to_owned()
         })?;
     if issued.project_id != project_id || issued.kind != kind {
         return Err(

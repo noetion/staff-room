@@ -10,10 +10,10 @@ pub(crate) const PROCESS_IDLE_TIMEOUT_SECONDS: u64 = 5 * 60;
 pub(crate) const MAX_RECOVERY_ATTEMPTS: u32 = 2;
 pub(crate) const MAX_SELECTED_SKILLS: usize = 3;
 pub(crate) const CHAT_HANDOFF_BUDGET_BYTES: usize = 4 * 1024;
-pub(crate) const HANDOFF_START: &str = "AGENT_ROOM_RESULT_START";
-pub(crate) const HANDOFF_END: &str = "AGENT_ROOM_RESULT_END";
-pub(crate) const SHIP_INTENT_START: &str = "AGENT_ROOM_SHIP_INTENT_START";
-pub(crate) const SHIP_INTENT_END: &str = "AGENT_ROOM_SHIP_INTENT_END";
+pub(crate) const HANDOFF_START: &str = "STAFF_ROOM_RESULT_START";
+pub(crate) const HANDOFF_END: &str = "STAFF_ROOM_RESULT_END";
+pub(crate) const SHIP_INTENT_START: &str = "STAFF_ROOM_SHIP_INTENT_START";
+pub(crate) const SHIP_INTENT_END: &str = "STAFF_ROOM_SHIP_INTENT_END";
 pub(crate) const AUTONOMOUS_SHIP_SKILL_PATH: &str = ".agents/skills/autonomous-ship/SKILL.md";
 pub(crate) const AUTONOMOUS_SHIP_SKILL: &str =
     include_str!("../../.agents/skills/autonomous-ship/SKILL.md");

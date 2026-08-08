@@ -9,7 +9,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import "./design/index.css";
 
-const theme = localStorage.getItem("ar-theme");
+const theme = localStorage.getItem("staff-room-theme") ?? localStorage.getItem("ar-theme");
 
 if (theme === "light" || theme === "dark") {
   document.documentElement.dataset.theme = theme;

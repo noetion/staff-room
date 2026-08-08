@@ -16,7 +16,7 @@ type EmptyStateProps = {
 export function EmptyState({ wordmark = false, title, body, suggestions, onSuggestion }: EmptyStateProps) {
   return (
     <section className="empty-state">
-      {wordmark && <span className="ghost-wordmark" aria-hidden="true">AGENT ROOM</span>}
+      {wordmark && <span className="ghost-wordmark" aria-hidden="true">THE STAFF ROOM</span>}
       <div className="empty-state-content">
         <h2>{title}</h2>
         {body && <p>{body}</p>}

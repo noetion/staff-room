@@ -6,7 +6,7 @@ Status: implemented and verified on `feature/cursor-context-and-git-fix`.
 
 The room showed three related provider failures:
 
-1. Cursor displayed its internal instruction to read an Agent Room prompt file as if it were the answer.
+1. Cursor displayed its internal instruction to read a Staff Room prompt file as if it were the answer.
 2. Cursor returned `git rev-parse HEAD failed ... ambiguous argument 'HEAD'` while working in the `fixture` room.
 3. Antigravity showed `Connection failed` even though model refresh had just reported that it fetched the signed-in CLI account.
 
@@ -15,11 +15,11 @@ The room showed three related provider failures:
 ### Cursor instruction rendered as output
 
 The durable run artifact at
-`<user-data>/com.staffroom.desktop/runs/<run-id>`
-contains the normal Agent Room prompt in `chat.prompt.txt`. The first Cursor user event in
+`C:/Users/example/AppData/Local/com.staffroom.desktop/runs/<run-id>`
+contains the normal The Staff Room prompt in `chat.prompt.txt`. The first Cursor user event in
 `chat.stdout.log` contains this as the provider input:
 
-`Read the file at <user-data>/com.staffroom.desktop/runs/<run-id>/chat.prompt.txt in full. It contains your complete assignment. Follow it exactly.`
+`Read the file at C:/Users/example/AppData/Local/com.staffroom.desktop/runs/<run-id>/chat.prompt.txt in full. It contains your complete assignment. Follow it exactly.`
 
 That text is the intentional short argv prompt used to avoid Windows command-line length limits.
 The Cursor event is a `type: "user"` event with `message.role: "user"`. The provider-specific
@@ -28,7 +28,7 @@ chat parser ignores it, but the generic `parse_result_text` fallback extracts ev
 
 ### Git `HEAD` failure
 
-The attached `<fixture-repo>` repository has `.git/HEAD` pointing to
+The attached synthetic `C:/Users/example/Projects/unborn-fixture` repository has `.git/HEAD` pointing to
 `refs/heads/master`, but it has no `refs/heads/master`, index, or commit object. It is an unborn
 branch. Git therefore rejects `rev-parse HEAD` with the same ambiguous `HEAD` diagnostic visible
 in the room. The repository can still be attached because the attachment check only requires a
@@ -60,7 +60,7 @@ required read before it can answer `READY`.
 - User-role and user-type provider events never replace the visible assistant response. Assistant
   fragments and terminal result events continue to render normally.
 - Cursor checks for an initial commit before session allocation or provider spawn. An unborn
-  repository receives an actionable message to create an initial commit, and Agent Room does not
+  repository receives an actionable message to create an initial commit, and The Staff Room does not
   create that commit on the user's behalf.
 - Antigravity connection probes retain `--mode plan` and gain permission auto-approval only for
   the fixed probe, allowing the headless CLI to complete its read-only readiness check.

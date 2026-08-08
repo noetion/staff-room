@@ -92,7 +92,7 @@ pub(crate) fn handoff_attention_reason(handoff: &AgentHandoff) -> String {
 
 pub(crate) fn extract_phase_handoff(value: &str, phase: Phase) -> Result<AgentHandoff, String> {
     if phase == Phase::Chat {
-        return Err("Chat responses do not require an Agent Room handoff.".to_owned());
+        return Err("Chat responses do not require a Staff Room handoff.".to_owned());
     }
     let handoff = extract_handoff(value)?;
     if handoff_status_allowed(&handoff, phase) {
@@ -168,7 +168,10 @@ pub(crate) fn authentication_attention(summary: &str, stderr: &str) -> Option<St
         || onboarding.iter().any(|signal| stderr.contains(signal))
         || provider_error.iter().any(|signal| stderr.contains(signal))
     {
-        Some("The provider requires sign-in or onboarding before Agent Room can use it.".to_owned())
+        Some(
+            "The provider requires sign-in or onboarding before The Staff Room can use it."
+                .to_owned(),
+        )
     } else {
         None
     }

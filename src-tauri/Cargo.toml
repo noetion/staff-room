@@ -1,12 +1,13 @@
 [package]
-name = "agent-room"
-version = "0.1.0"
-description = "A local room for coordinated coding agents"
-authors = ["Agent Room"]
+name = "staff-room"
+version = "1.0.0-rc.1"
+description = "A local-first staff room for coding agents where the user decides what ships"
+authors = ["Jonathan Asare"]
+license = "MIT"
 edition = "2021"
 
 [lib]
-name = "agent_room_lib"
+name = "staff_room_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

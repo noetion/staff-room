@@ -1,6 +1,6 @@
 import type { AgentKind, ExecutionReceipt } from "../model";
 
-export function initials(kind?: AgentKind): string { if (!kind) return "AR"; return { codex: "CX", claude: "CL", cursor: "CU", antigravity: "AG" }[kind]; }
+export function initials(kind?: AgentKind): string { if (!kind) return "SR"; return { codex: "CX", claude: "CL", cursor: "CU", antigravity: "AG" }[kind]; }
 
 /**
  * SQLite writes `CURRENT_TIMESTAMP` as `YYYY-MM-DD HH:MM:SS` in UTC with no zone

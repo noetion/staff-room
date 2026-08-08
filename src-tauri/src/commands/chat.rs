@@ -170,15 +170,15 @@ pub(crate) async fn start_room_chat(
     );
     let mut prompt = if active_run.is_some() {
         format!(
-            "You are in a read-only side chat attached to an active Agent Room Ship worktree. \
+            "You are in a read-only side chat attached to an active The Staff Room Ship worktree. \
              Answer the user's question directly and concisely using the worktree's current state. \
              Do not modify files, interrupt or steer the active builder, start another Ship run, \
-             run full project verification, or emit an Agent Room Ship intent or handoff.\n\nUser message:\n{message}"
+             run full project verification, or emit a Staff Room Ship intent or handoff.\n\nUser message:\n{message}"
         )
     } else {
         format!(
             "You are in Ask mode for the current repository. Answer questions directly and concisely. \
-             Do not modify files, create a worktree, run broad project verification, or use an Agent Room handoff. \
+             Do not modify files, create a worktree, run broad project verification, or use a Staff Room handoff. \
              For substantial or unattended implementation work, do not edit first; use the autonomous Ship intent when its trigger matches.\n\nUser message:\n{message}"
         )
     };
