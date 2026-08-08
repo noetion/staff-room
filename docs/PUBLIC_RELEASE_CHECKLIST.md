@@ -10,7 +10,7 @@
 
 | Gate | Required evidence | Status |
 | --- | --- | --- |
-| Full-history secrets and privacy scan | `gitleaks git --redact` has no unresolved findings; generated history containing local paths is removed or explicitly approved | PASS on rewritten candidate; direct GitHub clone verification remains before visibility change |
+| Full-history secrets and privacy scan | `gitleaks git --redact` has no unresolved findings; generated history containing local paths is removed or explicitly approved | PASS on rewritten private GitHub refs and direct clone; server-side history gate still blocks visibility |
 | Repository identity | Publication repository is `jonathanjasare/staff-room`; a new-repository route keeps `rooms` private and clearly superseded, while a reuse route renames it and verifies the old-URL redirect | Human publication step |
 | GitHub server-side history | Publish the clean graph to a new repository, or audit PR, fork, and Actions exposure and obtain GitHub Support confirmation that cached views and old refs are purged | Human publication step; a force-push alone is insufficient |
 | Product rename | Case-insensitive search leaves only documented legacy migration identifiers and changelog history | PASS on RC branch |
@@ -20,7 +20,7 @@
 | README and architecture | First screen carries name, fixed tagline, demo, and invariant; enforcement symbols map to code | PASS on RC branch |
 | Automated verification | Clean install and `npm run check` pass on Windows | PASS on 2026-08-08 |
 | Dependency audit | `npm audit` and `cargo audit` have no unresolved advisory | PASS for Windows RC; warning disposition recorded below |
-| Repository-size audit | Largest 20 historical objects classified; generated outputs removed from publishable history | PASS on rewritten candidate; removed paths are unreachable from every retained ref |
+| Repository-size audit | Largest 20 historical objects classified; generated outputs removed from publishable history | PASS on rewritten private GitHub refs; removed paths are unreachable from every retained ref |
 | Packaged build | `npm run tauri build` produces an installer named for The Staff Room | PASS: unsigned NSIS installer produced |
 | Human-gated acceptance | Every applicable observation in `V1_ACCEPTANCE.md` is recorded PASS and every unsupported provider-route cell is recorded N/A against the candidate | Human acceptance step |
 | Autonomous honesty | `AUTONOMOUS_ACCEPTANCE_COMPLETE` is `false`; README links the NOT ACCEPTED contract | PASS on RC branch |
@@ -35,7 +35,7 @@ The approved rewrite was prepared on 2026-08-08 from an exact mirror of every Gi
 
 The rewritten release commit differs from the pre-rewrite candidate only in `docs/CURSOR_PROVIDER_CONTEXT_RCA.md` and `docs/providers/antigravity.md`, where a private room label, three diagnostic run identifiers, and a cross-project codename were replaced with neutral public examples. A subsequent release-record commit updates this checklist only. No product code or README media changed.
 
-Only `main` and `chore/staff-room-public-v1` are retained. The six removed remote branches contained no commit beyond `main`, and the remote had no tags. Full-ref scans confirm that removed redesign artifacts, attachment paths, private username and project-root variants, and identified run-specific values are absent from the rewritten graph. The remaining Windows home paths are explicitly synthetic examples (`example`, `<you>`, or `CodexSandboxOffline`). `git fsck --full --strict` passes and the all-history secrets scan, including archive depth 3, reports no findings. The backup remains private until the GitHub rewrite and a direct post-push clone are verified.
+Only `main` and `chore/staff-room-public-v1` are retained. The six removed remote branches contained no commit beyond `main`, and the remote had no tags. Full-ref scans confirm that removed redesign artifacts, attachment paths, private username and project-root variants, and identified run-specific values are absent from the rewritten graph. The remaining Windows home paths are explicitly synthetic examples (`example`, `<you>`, or `CodexSandboxOffline`). `git fsck --full --strict` passes and the all-history secrets scan, including archive depth 3, reports no findings. The private GitHub rewrite and a direct post-push clone are verified; the backup remains private until the final public repository and default branch are verified.
 
 A clean clone proves the advertised Git graph, but it cannot prove that GitHub has purged old commit pages, pull-request refs, forks, or cached views. GitHub also states that [Actions history and logs become public with a visibility change](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility). Following [GitHub's sensitive-data removal guidance](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository), the recommended publication route is a new `staff-room` repository created from this clean graph while `rooms` remains private. Reusing the existing repository requires a PR, fork, Actions-run, log, and artifact audit plus GitHub Support confirmation of old-object cleanup before visibility changes.
 
@@ -46,12 +46,13 @@ A clean clone proves the advertised Git graph, but it cannot prove that GitHub h
 - `cargo audit --file src-tauri/Cargo.lock`: PASS — 0 vulnerabilities. RustSec reported 18 allowed warnings: 16 unmaintained transitive crates and two unsound advisories that are absent from the supported Windows target dependency tree. Reassess before adding non-Windows support.
 - `gitleaks dir --redact`: PASS — no findings in the candidate tree.
 - `gitleaks git --redact --max-archive-depth 3`: PASS on the rewritten retained refs - no findings. Historical path and unreachable-object checks also pass.
+- Private GitHub ref update: PASS - the atomic guarded push updated `main` and `chore/staff-room-public-v1`, deleted the six redundant branches, and left no advertised tags or pull-request refs. A direct GitHub clone at abbreviated pre-record release tip `b85cd7b9a7f8` passed the history, working-tree, path, and integrity scans.
 - Demo: PASS — selected Remotion cut, 1920×1080 at 30 fps, 12.05 seconds; README GIF is 960×540 at 12 fps, 12.16 seconds, and 2.55 MiB. The opening product state visibly includes Codex, Claude, Cursor, and Antigravity, and the final hold leaves Promote and Abandon untouched.
 - Installer: PASS — `The Staff Room_1.0.0-rc.1_x64-setup.exe`, 3.93 MiB, SHA-256 `040E0125B89FA9DB03AEC680C966CA39926561561E0DE65C89983A98A61BEB60`, Authenticode status `NotSigned` as documented.
 
 ## Manual rollout
 
-1. Force-update only the two retained refs on the still-private `rooms` repository, delete the six redundant remote refs, and verify a direct clean clone and all-ref history scan.
+1. Completed 2026-08-08: atomically update the two retained refs on the still-private `rooms` repository, delete the six redundant remote refs, and verify a direct clean clone and all-ref history scan.
 2. Choose the publication target: preferably create a new `staff-room` repository from the clean graph and keep `rooms` private; otherwise complete the GitHub old-object cleanup gate above.
 3. Review and merge `chore/staff-room-public-v1`, then verify that the publication target's `main` is the reviewed Staff Room candidate before any visibility change.
 4. Complete packaged and opt-in live-provider acceptance against synthetic repositories.
