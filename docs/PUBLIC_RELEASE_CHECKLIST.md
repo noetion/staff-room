@@ -10,8 +10,9 @@
 
 | Gate | Required evidence | Status |
 | --- | --- | --- |
-| Full-history secrets and privacy scan | `gitleaks git --redact` has no unresolved findings; generated history containing local paths is removed or explicitly approved | BLOCKED pending approved history rewrite |
-| Repository identity | GitHub repository renamed to `staff-room`; old URL redirects; local remote updated | Human publication step |
+| Full-history secrets and privacy scan | `gitleaks git --redact` has no unresolved findings; generated history containing local paths is removed or explicitly approved | PASS on rewritten candidate; direct GitHub clone verification remains before visibility change |
+| Repository identity | Publication repository is `jonathanjasare/staff-room`; a new-repository route keeps `rooms` private and clearly superseded, while a reuse route renames it and verifies the old-URL redirect | Human publication step |
+| GitHub server-side history | Publish the clean graph to a new repository, or audit PR, fork, and Actions exposure and obtain GitHub Support confirmation that cached views and old refs are purged | Human publication step; a force-push alone is insufficient |
 | Product rename | Case-insensitive search leaves only documented legacy migration identifiers and changelog history | PASS on RC branch |
 | Data migration | Tests prove the old SQLite database and voice assets are copied, integrity-checked, and not deleted | PASS: 2 focused migration tests plus aggregate Rust gate |
 | License | Root MIT license plus npm and Cargo metadata | PASS |
@@ -19,7 +20,7 @@
 | README and architecture | First screen carries name, fixed tagline, demo, and invariant; enforcement symbols map to code | PASS on RC branch |
 | Automated verification | Clean install and `npm run check` pass on Windows | PASS on 2026-08-08 |
 | Dependency audit | `npm audit` and `cargo audit` have no unresolved advisory | PASS for Windows RC; warning disposition recorded below |
-| Repository-size audit | Largest 20 historical objects classified; generated outputs removed from publishable history | BLOCKED pending approved history rewrite |
+| Repository-size audit | Largest 20 historical objects classified; generated outputs removed from publishable history | PASS on rewritten candidate; removed paths are unreachable from every retained ref |
 | Packaged build | `npm run tauri build` produces an installer named for The Staff Room | PASS: unsigned NSIS installer produced |
 | Human-gated acceptance | Every applicable observation in `V1_ACCEPTANCE.md` is recorded PASS and every unsupported provider-route cell is recorded N/A against the candidate | Human acceptance step |
 | Autonomous honesty | `AUTONOMOUS_ACCEPTANCE_COMPLETE` is `false`; README links the NOT ACCEPTED contract | PASS on RC branch |
@@ -28,11 +29,15 @@
 
 ## History and repository-size audit
 
-The pre-publication scan found generated redesign driver JSON and QA screenshots in existing Git history. The JSON contains absolute local paths and 40-character commit hashes that trigger the Sourcegraph-token detector. The current release tree deletes those generated artifacts, but deletion does not remove their historical blobs.
+The pre-publication scan found generated redesign driver JSON and QA screenshots in the remote Git history. Those artifacts contained private absolute paths and commit-shaped values that triggered the Sourcegraph-token detector. The current release tree had already deleted the artifacts, so a bounded history rewrite was required to make their old blobs unreachable.
 
-Before visibility changes, perform a reviewed `git filter-repo` rewrite against the exact generated paths, enumerate every remote branch and tag, and delete redundant refs or rewrite every retained ref so none keeps the old objects reachable. Rescan all rewritten refs, not only the future default branch, and force-push only after explicit approval. Preserve a private backup ref until the public repository and default branch are verified. This rewrite is intentionally not automated by the release branch because it changes existing commit identities and remote history.
+The approved rewrite was prepared on 2026-08-08 from an exact mirror of every GitHub ref. A complete private backup bundle was verified before mutation; its SHA-256 is `AD7A9319E48C52C75EC95E81CEA1894A69C2DBB0572FB56B44E887DC817BECB4`. `git filter-repo` removed `docs/redesign/**` from history and replaced private workstation paths and run-specific values in retained text. Fresh review found additional private context after the first pass, so the final mirror was rebuilt from the untouched backup with stricter replacements.
 
-The largest-object audit also found an accidentally committed Windows cache database in historical objects. Retained documentation revisions contain private absolute paths even though the candidate tree is sanitized. The approved rewrite therefore must cover generated redesign logs and QA, the cache database, and private-path-bearing historical revisions; deleting current files alone is insufficient.
+The rewritten release commit differs from the pre-rewrite candidate only in `docs/CURSOR_PROVIDER_CONTEXT_RCA.md` and `docs/providers/antigravity.md`, where a private room label, three diagnostic run identifiers, and a cross-project codename were replaced with neutral public examples. A subsequent release-record commit updates this checklist only. No product code or README media changed.
+
+Only `main` and `chore/staff-room-public-v1` are retained. The six removed remote branches contained no commit beyond `main`, and the remote had no tags. Full-ref scans confirm that removed redesign artifacts, attachment paths, private username and project-root variants, and identified run-specific values are absent from the rewritten graph. The remaining Windows home paths are explicitly synthetic examples (`example`, `<you>`, or `CodexSandboxOffline`). `git fsck --full --strict` passes and the all-history secrets scan, including archive depth 3, reports no findings. The backup remains private until the GitHub rewrite and a direct post-push clone are verified.
+
+A clean clone proves the advertised Git graph, but it cannot prove that GitHub has purged old commit pages, pull-request refs, forks, or cached views. GitHub also states that [Actions history and logs become public with a visibility change](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/managing-repository-settings/setting-repository-visibility). Following [GitHub's sensitive-data removal guidance](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository), the recommended publication route is a new `staff-room` repository created from this clean graph while `rooms` remains private. Reusing the existing repository requires a PR, fork, Actions-run, log, and artifact audit plus GitHub Support confirmation of old-object cleanup before visibility changes.
 
 ## RC verification record — 2026-08-08
 
@@ -40,20 +45,21 @@ The largest-object audit also found an accidentally committed Windows cache data
 - `npm audit`: PASS — 0 vulnerabilities.
 - `cargo audit --file src-tauri/Cargo.lock`: PASS — 0 vulnerabilities. RustSec reported 18 allowed warnings: 16 unmaintained transitive crates and two unsound advisories that are absent from the supported Windows target dependency tree. Reassess before adding non-Windows support.
 - `gitleaks dir --redact`: PASS — no findings in the candidate tree.
-- `gitleaks git --redact`: BLOCKED — 284 Sourcegraph-token detector findings, all in generated redesign logs, plus separately confirmed private paths and generated binary history that require the approved rewrite.
+- `gitleaks git --redact --max-archive-depth 3`: PASS on the rewritten retained refs - no findings. Historical path and unreachable-object checks also pass.
 - Demo: PASS — selected Remotion cut, 1920×1080 at 30 fps, 12.05 seconds; README GIF is 960×540 at 12 fps, 12.16 seconds, and 2.55 MiB. The opening product state visibly includes Codex, Claude, Cursor, and Antigravity, and the final hold leaves Promote and Abandon untouched.
 - Installer: PASS — `The Staff Room_1.0.0-rc.1_x64-setup.exe`, 3.93 MiB, SHA-256 `040E0125B89FA9DB03AEC680C966CA39926561561E0DE65C89983A98A61BEB60`, Authenticode status `NotSigned` as documented.
 
 ## Manual rollout
 
-1. Complete and record all machine-verifiable rows on the release branch.
-2. Obtain explicit approval for the bounded history rewrite; back up refs, rewrite only identified generated paths, and rerun the secret and size audits.
-3. Complete packaged and opt-in live-provider acceptance against synthetic repositories.
-4. Change candidate versions from `1.0.0-rc.1` to `1.0.0`, rerun the full gate, and create the signed source tag.
-5. Rename the GitHub repository to `staff-room`, update the local remote, and verify the old URL redirects.
-6. Enable private vulnerability reporting, set the fixed description and topics, then change visibility to public.
-7. Review the public landing page and clone it into a clean directory. Confirm README media, license detection, checks, and history scan.
-8. Pin the repository in profile position 3, after `evalseal` and `tripwire`.
+1. Force-update only the two retained refs on the still-private `rooms` repository, delete the six redundant remote refs, and verify a direct clean clone and all-ref history scan.
+2. Choose the publication target: preferably create a new `staff-room` repository from the clean graph and keep `rooms` private; otherwise complete the GitHub old-object cleanup gate above.
+3. Review and merge `chore/staff-room-public-v1`, then verify that the publication target's `main` is the reviewed Staff Room candidate before any visibility change.
+4. Complete packaged and opt-in live-provider acceptance against synthetic repositories.
+5. Change candidate versions from `1.0.0-rc.1` to `1.0.0`, rerun the full gate, and create the signed source tag.
+6. Enable private vulnerability reporting and set the fixed description and topics.
+7. Change visibility to public only after every P0 publication gate is complete.
+8. Review the public landing page and clone it into a clean directory. Confirm README media, license detection, checks, and history scan.
+9. Pin the repository in profile position 3, after `evalseal` and `tripwire`.
 
 ## Rollback
 
