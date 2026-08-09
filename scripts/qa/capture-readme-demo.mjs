@@ -15,10 +15,10 @@ function installTauriDemoMock() {
   let callbackId = 0;
 
   const project = {
-    id: "staff-room-demo",
-    name: "The Staff Room",
-    goal: "Coordinate coding agents without surrendering custody of the repository.",
-    repositoryPath: "C:\\Projects\\fixture-repo",
+    id: "checkout-service-demo",
+    name: "Checkout Service",
+    goal: "Keep checkout reliable under retries and concurrent requests.",
+    repositoryPath: "C:\\Projects\\checkout-service",
     branch: "main",
   };
 
@@ -98,40 +98,56 @@ function installTauriDemoMock() {
       id: "status-attached",
       kind: "status",
       sender: "system",
-      body: "The synthetic release repository is attached and ready.",
-      reason: "The Staff Room keeps every action scoped to C:\\Projects\\fixture-repo.",
-      createdAt: "2026-08-08T09:00:00.000Z",
+      body: "Checkout Service is attached and ready.",
+      reason: "The Staff Room keeps every action scoped to C:\\Projects\\checkout-service.",
+      createdAt: new Date(Date.now() - 30_000).toISOString(),
     },
     {
-      id: "ask-human",
+      id: "diagnose-human",
       kind: "human",
       sender: "human",
-      body: "Where is the public release still exposed?",
-      createdAt: "2026-08-08T09:00:01.000Z",
+      body: "@claude Checkout retries are double-charging customers. Find the failure mode before we change anything.",
+      createdAt: new Date(Date.now() - 20_000).toISOString(),
       runId: "chat-demo",
     },
     {
-      id: "ask-agent",
+      id: "diagnose-agent",
       kind: "agent",
-      sender: "codex",
-      body: "Two blockers remain: sanitize repository history and verify the packaged Windows build. I have not changed the checkout.",
-      createdAt: "2026-08-08T09:00:02.000Z",
+      sender: "claude",
+      body: "The handler creates the charge before it atomically claims the idempotency key. Two concurrent retries can both pass the lookup. Claim the key first, then return the original payment for duplicates.",
+      createdAt: new Date(Date.now() - 18_000).toISOString(),
       runId: "chat-demo",
+    },
+  ];
+
+  const cursorMessages = [
+    ...baseMessages,
+    {
+      id: "cursor-human",
+      kind: "human",
+      sender: "human",
+      body: "@cursor Add one regression test that sends two concurrent requests with the same idempotency key and proves only one charge is created.",
+      createdAt: new Date(Date.now() - 14_000).toISOString(),
+      runId: "quick-edit-demo",
     },
   ];
 
   const shipEvidence = {
     id: "ship-evidence",
     kind: "evidence",
-    sender: "codex",
-    body: "The release candidate is built in an isolated worktree. Tests and review are complete; promotion is waiting for you.",
-    changedFiles: ["README.md", "SECURITY.md", "src-tauri/src/db/app_data.rs"],
-    verification: [
-      { label: "Frontend tests", status: "passed", detail: "24 passed" },
-      { label: "Rust tests", status: "passed", detail: "63 passed" },
-      { label: "Visual acceptance", status: "passed", detail: "89 checks passed" },
+    sender: "antigravity",
+    body: "Payment creation is now idempotent. Retry coverage passes; the attached checkout is unchanged until you promote.",
+    changedFiles: [
+      "src/payments/create-payment.ts",
+      "src/payments/idempotency-store.ts",
+      "tests/payments/retry-idempotency.test.ts",
     ],
-    createdAt: "2026-08-08T09:00:05.000Z",
+    verification: [
+      { label: "Payment regression", status: "passed", detail: "passed" },
+      { label: "Concurrent retries", status: "passed", detail: "one charge created" },
+      { label: "Full test suite", status: "passed", detail: "passed" },
+    ],
+    createdAt: new Date(Date.now() - 5_000).toISOString(),
     runId: "ship-demo",
   };
 
@@ -141,27 +157,28 @@ function installTauriDemoMock() {
 
   function latestRun() {
     const stage = currentStage();
-    if (stage !== "review" && stage !== "promotion") return undefined;
+    if (stage !== "build" && stage !== "review" && stage !== "promotion") return undefined;
+    const building = stage === "build";
     const promoted = stage === "promotion";
     return {
       id: "ship-demo",
-      objective: "Prepare The Staff Room for a safe public release.",
-      state: promoted ? "awaiting-promotion" : "reviewing",
-      currentOwner: promoted ? undefined : "claude",
-      writer: "codex",
-      reviewer: "claude",
+      objective: "Make payment creation idempotent and prove it with a regression test.",
+      state: promoted ? "awaiting-promotion" : building ? "working" : "reviewing",
+      currentOwner: promoted ? undefined : building ? "antigravity" : "codex",
+      writer: "antigravity",
+      reviewer: "codex",
       route: [
-        { agent: "codex", label: "Build", state: "complete" },
-        { agent: "codex", label: "Verify", state: "complete" },
-        { agent: "claude", label: "Review", state: promoted ? "complete" : "current" },
+        { agent: "antigravity", label: "Build", state: building ? "current" : "complete" },
+        { agent: "antigravity", label: "Verify", state: building ? "next" : "complete" },
+        { agent: "codex", label: "Review", state: promoted ? "complete" : building ? "next" : "current" },
         { label: "Promote", state: promoted ? "current" : "next" },
       ],
-      reviewCount: promoted ? 2 : 1,
+      reviewCount: promoted ? 2 : building ? 0 : 1,
       revisionCount: 0,
       recoveryCount: 0,
-      startedAt: "2026-08-08T09:00:03.000Z",
-      worktreePath: "C:\\Projects\\fixture-repo\\.staff-room\\worktrees\\ship-demo",
-      branch: "staff-room/public-release",
+      startedAt: new Date(Date.now() - 12_000).toISOString(),
+      worktreePath: "C:\\Projects\\checkout-service\\.staff-room\\worktrees\\ship-demo",
+      branch: "staff-room/payment-idempotency",
       contextBytes: 18432,
       degradedReview: false,
       instructionFiles: ["AGENTS.md"],
@@ -172,7 +189,11 @@ function installTauriDemoMock() {
   function snapshot() {
     const stage = currentStage();
     return {
-      messages: stage === "ask" ? baseMessages : [...baseMessages, shipEvidence],
+      messages: stage === "cursor"
+        ? cursorMessages
+        : stage === "review" || stage === "promotion"
+          ? [...cursorMessages, shipEvidence]
+          : baseMessages,
       hasMore: false,
       latestRun: latestRun(),
       receipts: [],
@@ -212,8 +233,8 @@ function installTauriDemoMock() {
         return {
           enabled: true,
           commands: [
-            { label: "Frontend tests", command: "npm test", enabled: true },
-            { label: "Rust tests", command: "cargo test", enabled: true },
+            { label: "Payment tests", command: "npm test -- payments", enabled: true },
+            { label: "Full test suite", command: "npm test", enabled: true },
           ],
         };
       case "voice_status":
@@ -223,30 +244,34 @@ function installTauriDemoMock() {
       case "quick_edit_start":
         return {
           editId: "quick-edit-demo",
-          participant: "codex",
-          summary: "Tightened the README opening without touching implementation code.",
-          diff: "--- a/README.md\n+++ b/README.md\n@@\n-Coordinate coding agents.\n+Coordinate coding agents without surrendering custody of your repository.",
+          participant: "cursor",
+          summary: "Added a focused concurrency regression test. It fails until payment creation claims the idempotency key atomically.",
+          diff: "--- /dev/null\n+++ b/tests/payments/retry-idempotency.test.ts\n@@\n+it('creates one charge for concurrent retries', async () => {\n+  const [first, retry] = await Promise.all([\n+    createPayment(request, 'checkout-42'),\n+    createPayment(request, 'checkout-42'),\n+  ]);\n+  expect(retry.id).toBe(first.id);\n+  expect(gateway.charges).toHaveLength(1);\n+});",
           stopped: false,
         };
       case "start_room_chat":
-        return { runId: "chat-demo", participant: "codex", summary: "Release exposure reviewed.", stopped: false };
+        return { runId: "chat-demo", participant: "codex", summary: "Payment retry path reviewed.", stopped: false };
       case "quick_edit_apply":
         return {};
       case "start_room_run":
         return {
           runId: "ship-demo",
           state: "awaiting-promotion",
-          summary: "Release candidate verified and reviewed.",
-          builder: "codex",
-          reviewer: "claude",
+          summary: "Idempotent payment creation verified and reviewed.",
+          builder: "antigravity",
+          reviewer: "codex",
           degradedReview: false,
-          changedFiles: ["README.md"],
-          gitStatus: "M README.md",
+          changedFiles: [
+            "src/payments/create-payment.ts",
+            "src/payments/idempotency-store.ts",
+            "tests/payments/retry-idempotency.test.ts",
+          ],
+          gitStatus: "M src/payments/create-payment.ts\nA src/payments/idempotency-store.ts\nA tests/payments/retry-idempotency.test.ts",
           verification: [],
           stopped: false,
           promoted: false,
-          worktreePath: "C:\\Projects\\fixture-repo\\.staff-room\\worktrees\\ship-demo",
-          branch: "staff-room/public-release",
+          worktreePath: "C:\\Projects\\checkout-service\\.staff-room\\worktrees\\ship-demo",
+          branch: "staff-room/payment-idempotency",
           contextBytes: 18432,
           instructionFiles: ["AGENTS.md"],
           skillFiles: ["ship/SKILL.md"],
@@ -319,24 +344,29 @@ async function main() {
 
   try {
     await page.goto(`${base}/?demoStage=ask`, { waitUntil: "domcontentloaded" });
-    await page.getByRole("button", { name: "Ship", exact: true }).click();
     await settle(page);
-    await page.screenshot({ path: resolve(output, "01-ask.png") });
+    await page.screenshot({ path: resolve(output, "01-claude-diagnosis.png") });
 
+    await page.goto(`${base}/?demoStage=cursor`, { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: "Quick edit", exact: true }).click();
-    await page.getByRole("combobox", { name: "Quick Edit instruction" }).fill("Tighten the README opening.");
-    await page.getByRole("combobox", { name: "Quick Edit instruction" }).press("Enter");
+    await page.getByRole("button", { name: "Cursor", exact: true }).click();
+    await page.getByRole("combobox").fill("@cursor Add the focused concurrent-retry regression test.");
+    await page.getByRole("button", { name: /Preview edit/ }).click();
     await page.getByRole("region", { name: "Quick Edit review" }).waitFor();
     await settle(page);
-    await page.screenshot({ path: resolve(output, "02-quick-edit.png") });
+    await page.screenshot({ path: resolve(output, "02-cursor-test.png") });
+
+    await page.goto(`${base}/?demoStage=build`, { waitUntil: "domcontentloaded" });
+    await settle(page);
+    await page.screenshot({ path: resolve(output, "03-antigravity-build.png") });
 
     await page.goto(`${base}/?demoStage=review`, { waitUntil: "domcontentloaded" });
     await settle(page);
-    await page.screenshot({ path: resolve(output, "03-review.png") });
+    await page.screenshot({ path: resolve(output, "04-codex-review.png") });
 
     await page.goto(`${base}/?demoStage=promotion`, { waitUntil: "domcontentloaded" });
     await settle(page);
-    await page.screenshot({ path: resolve(output, "04-awaiting-promotion.png") });
+    await page.screenshot({ path: resolve(output, "05-awaiting-promotion.png") });
   } finally {
     await context.close();
     await browser.close();

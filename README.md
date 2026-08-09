@@ -4,7 +4,9 @@
 
 **Safety invariant:** no agent write reaches the attached checkout until the user presses Apply or confirms Promote.
 
-![The Staff Room moving from a read-only question through an isolated edit to the human promotion gate](docs/assets/staff-room-demo.gif)
+![Claude diagnoses a payment race, Cursor adds a regression test, Antigravity builds the fix, Codex reviews it, and the human controls promotion](docs/assets/staff-room-demo.gif)
+
+Representative workflow: Claude diagnoses the race, Cursor turns it into a regression test, Antigravity implements the fix in isolation, and Codex reviews the evidence before the human promotion gate. [Watch the 1080p version](docs/assets/staff-room-demo.mp4).
 
 The Staff Room is a Windows desktop application for working with installed Claude Code, Codex, Cursor, and Antigravity CLIs against an attached Git repository. Rust owns repository access, isolation, verification, and promotion. React renders the room; it does not hold the authority to bypass those controls.
 
