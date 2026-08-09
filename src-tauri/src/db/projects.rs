@@ -403,6 +403,15 @@ pub(crate) fn reconcile_interrupted_runs(connection: &Connection) -> rusqlite::R
          WHERE state = 'promoting'",
         [],
     )?;
+    let abandoning = connection.execute(
+        "UPDATE runs
+         SET state = 'waiting',
+             current_owner = NULL,
+             stop_reason = 'Abandonment state unknown â€” confirm Abandon again to finish cleanup.',
+             finished_at = CURRENT_TIMESTAMP
+         WHERE state = 'abandoning'",
+        [],
+    )?;
     let interrupted = connection.execute(
         "UPDATE runs
          SET state = 'stopped',
@@ -412,5 +421,5 @@ pub(crate) fn reconcile_interrupted_runs(connection: &Connection) -> rusqlite::R
          WHERE state IN ('selecting', 'working', 'verifying', 'reviewing', 'revising')",
         [],
     )?;
-    Ok(promoting + interrupted)
+    Ok(promoting + abandoning + interrupted)
 }

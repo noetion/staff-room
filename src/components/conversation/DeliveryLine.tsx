@@ -34,7 +34,7 @@ export function DeliveryLine({
   if (state === "answered" && receipt?.firstOutputMs != null) {
     return (
       <span className="delivery-line">
-        Answered · {latencyLabel(receipt)} first token
+        Answered · {latencyLabel(receipt)}
       </span>
     );
   }

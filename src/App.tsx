@@ -1037,6 +1037,7 @@ export function App() {
     setQuickEditAction("apply");
     try {
       const result = await quickEditApply(project.id, quickEdit.editId);
+      if (!result.completed) return;
       setQuickEdit(undefined);
       if (result.cleanupWarning) {
         setUiError(`The edit was applied, but temporary isolation cleanup needs attention: ${result.cleanupWarning}`);
@@ -1156,7 +1157,6 @@ export function App() {
 
   async function handleAbandon() {
     if (!native || activeStates.includes(run.state) || !run.worktreePath) return;
-    if (!window.confirm("Abandon this Ship run and delete its preserved worktree? This cannot be undone.")) return;
     setUiError("");
     try {
       await abandonRun(project.id, run.id);
@@ -1168,7 +1168,6 @@ export function App() {
 
   async function handlePromote() {
     if (!native || run.state !== "awaiting-promotion" || !run.worktreePath) return;
-    if (!window.confirm("Promote this reviewed and verified change into the attached checkout?")) return;
     setUiError("");
     setRun((current) => ({ ...current, state: "promoting", stopReason: undefined }));
     try {

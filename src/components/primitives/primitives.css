@@ -80,14 +80,12 @@
 .aurora__drift {
   position: absolute;
   inset: calc(var(--s-8) * -2);
-  animation: aurora-drift var(--aurora-drift-duration) linear infinite;
-  will-change: transform;
+  /* Keep the viewport-sized gradient static so timeline scrolling stays composited. */
 }
 
 .aurora__layer {
   position: absolute;
   inset: 0;
-  filter: blur(var(--s-8));
   transform: translateZ(0);
   transition: opacity var(--dur-3) var(--ease-out);
 }
@@ -189,12 +187,6 @@
 .status-chip.connection-failed {
   color: var(--state-bad);
   background: color-mix(in srgb, var(--state-bad) 10%, transparent);
-}
-
-@keyframes aurora-drift {
-  0%, 100% { transform: translate3d(0, 0, 0); }
-  35% { transform: translate3d(calc(var(--s-8) / 2), calc(var(--s-7) * -1), 0); }
-  70% { transform: translate3d(calc(var(--s-7) * -1), calc(var(--s-6) / 2), 0); }
 }
 
 .room--signature {

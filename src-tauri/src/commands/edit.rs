@@ -48,6 +48,7 @@ pub(crate) async fn quick_edit_start(
         project_id: request.project_id.clone(),
         repository,
         worktree: worktree.clone(),
+        reviewed_diff: None,
     };
     runtime
         .quick_edits
@@ -113,13 +114,51 @@ pub(crate) async fn quick_edit_start(
             &result,
         ));
     }
+    let reviewed_diff = match quick_edit_diff(&worktree) {
+        Ok(diff) => diff,
+        Err(error) => {
+            runtime.quick_edits.lock().await.remove(&request.edit_id);
+            let _ = remove_quick_edit_worktree(&state.repository, &state.worktree);
+            return Err(error);
+        }
+    };
+    {
+        let mut quick_edits = runtime.quick_edits.lock().await;
+        let stored = quick_edits
+            .get_mut(&request.edit_id)
+            .ok_or_else(|| "This Quick Edit is no longer available.".to_owned())?;
+        stored.reviewed_diff = Some(reviewed_diff.clone());
+    }
     Ok(QuickEditResult {
         edit_id: request.edit_id,
         participant: participant.kind,
         summary: result.summary,
-        diff: quick_edit_diff(&worktree)?,
+        diff: reviewed_diff,
         stopped: result.stopped,
     })
+}
+
+pub(crate) fn require_reviewed_quick_edit(
+    reviewed_diff: Option<&str>,
+    current_diff: &str,
+) -> Result<(), String> {
+    let reviewed_diff =
+        reviewed_diff.ok_or_else(|| "The Quick Edit has no recorded reviewed diff.".to_owned())?;
+    if reviewed_diff != current_diff {
+        return Err(
+            "The isolated Quick Edit changed after you reviewed it. Discard it and run the edit again."
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn serialize_git_patch(diff: &str) -> String {
+    let mut patch = diff.to_owned();
+    if !patch.ends_with('\n') {
+        patch.push('\n');
+    }
+    patch
 }
 
 #[tauri::command]
@@ -139,16 +178,34 @@ pub(crate) async fn quick_edit_apply(
         return Err("This Quick Edit belongs to another project.".to_owned());
     }
     let diff = quick_edit_diff(&state.worktree)?;
+    require_reviewed_quick_edit(state.reviewed_diff.as_deref(), &diff)?;
     if diff.trim().is_empty() {
         return Err("The Quick Edit produced no changes to apply.".to_owned());
     }
+    let confirmed = app
+        .dialog()
+        .message("Apply this reviewed Quick Edit to the attached checkout?")
+        .title("Confirm Quick Edit")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Apply".to_owned(),
+            "Cancel".to_owned(),
+        ))
+        .blocking_show();
+    if !confirmed {
+        return Ok(QuickEditActionResult {
+            completed: false,
+            cleanup_warning: None,
+        });
+    }
+    let diff = quick_edit_diff(&state.worktree)?;
+    require_reviewed_quick_edit(state.reviewed_diff.as_deref(), &diff)?;
     let patch = app
         .path()
         .app_cache_dir()
         .map_err(|error| error.to_string())?
         .join("quick-edits")
         .join(format!(".apply-{}.patch", request.edit_id));
-    std::fs::write(&patch, diff).map_err(|error| error.to_string())?;
+    std::fs::write(&patch, serialize_git_patch(&diff)).map_err(|error| error.to_string())?;
     let apply_result = (|| {
         git(
             &state.repository,
@@ -172,6 +229,7 @@ pub(crate) async fn quick_edit_apply(
     apply_result?;
     runtime.quick_edits.lock().await.remove(&request.edit_id);
     Ok(QuickEditActionResult {
+        completed: true,
         cleanup_warning: remove_quick_edit_worktree(&state.repository, &state.worktree).err(),
     })
 }
@@ -194,6 +252,7 @@ pub(crate) async fn quick_edit_discard(
     remove_quick_edit_worktree(&state.repository, &state.worktree)?;
     runtime.quick_edits.lock().await.remove(&request.edit_id);
     Ok(QuickEditActionResult {
+        completed: true,
         cleanup_warning: None,
     })
 }

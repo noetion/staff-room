@@ -28,11 +28,11 @@ Ask consumes a project-bound chat operation ID and uses a provider adapter's rea
 
 ### Quick Edit
 
-Quick Edit snapshots the attached checkout and performs the requested work inside a managed worktree. The resulting diff remains isolated until the user presses Apply. Apply revalidates the project and snapshot before changing the attached checkout; Discard removes the managed result.
+Quick Edit starts a managed worktree from the attached checkout's current `HEAD` and performs the requested work there. The resulting diff remains isolated until the user presses Apply and confirms in a native dialog. Apply proves the isolated diff still exactly matches the reviewed preview, then uses Git's patch check against the attached checkout before changing it; Discard removes the managed result.
 
 ### Ship
 
-Ship owns a state machine across Build, Verify, Review, optional bounded Revision, Final Review, and `awaiting-promotion`. Review routes use `ProviderMode::Review` and a mutation guard. Verification and review evidence are persisted. Promotion begins only after a separate confirmed user action, serializes per project, and rechecks both the base checkout and reviewed worktree before applying the verified delta.
+Ship owns a state machine across Build, Verify, Review, optional bounded Revision with post-revision Final Review, and `awaiting-promotion`. Review routes use `ProviderMode::Review` and a mutation guard. Verification and review evidence are persisted. Promotion begins only after a separate native confirmation owned by the Rust coordinator, serializes per project, and rechecks both the base checkout and reviewed worktree before applying the verified delta.
 
 ## Enforcement map
 
@@ -44,7 +44,8 @@ Ship owns a state machine across Build, Verify, Review, optional bounded Revisio
 | Only exact connection proof is accepted | `connection_test_ready` | `src-tauri/src/providers/parse.rs` | Any response other than exact `READY` fails the probe |
 | Provider work is time and output bounded | `PROCESS_TIMEOUT_SECONDS`, `PROCESS_IDLE_TIMEOUT_SECONDS`, `PROCESS_OUTPUT_LIMIT` | `src-tauri/src/types.rs`, `src-tauri/src/run/process.rs` | Terminates or fails the phase and records evidence |
 | Reviewed content cannot silently change | `review_mutation_guard` | `src-tauri/src/git/isolation.rs`, `src-tauri/src/commands/run.rs` | Promotion is rejected when the reviewed fingerprint differs |
-| Human confirmation gates Ship output | `approve_run_promotion` | `src-tauri/src/commands/run.rs` | Accepts only a persisted run in `awaiting-promotion` |
+| Quick Edit applies only the reviewed preview | `require_reviewed_quick_edit` | `src-tauri/src/commands/edit.rs` | Apply is rejected if the isolated diff changed before or during native confirmation |
+| Human confirmation gates Ship output | `approve_run_promotion` | `src-tauri/src/commands/run.rs` | Requires a native confirmation and a persisted run in `awaiting-promotion` |
 | Promotion is serialized per project | `active_promotions` | `src-tauri/src/types.rs`, `src-tauri/src/commands/run.rs` | Rejects a second concurrent promotion |
 | Legacy schema migration is recoverable | `backup_v1_database` | `src-tauri/src/db/projects.rs` | Requires an integrity-checked, atomically finalized backup |
 | Product rename preserves pre-release local data | `prepare_app_data` | `src-tauri/src/db/app_data.rs` | Uses SQLite online backup, verifies `quick_check`, preserves the source, and refuses a corrupt copy |

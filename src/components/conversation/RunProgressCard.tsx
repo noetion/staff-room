@@ -36,6 +36,9 @@ export function RunProgressCard({
     Boolean(run.worktreePath) &&
     ["waiting", "failed", "stopped"].includes(run.state) &&
     (run.recoveryCount ?? 0) < 2;
+  const abandonable =
+    Boolean(run.worktreePath) &&
+    ["awaiting-promotion", "waiting", "failed", "stopped"].includes(run.state);
 
   return (
     <article
@@ -102,7 +105,7 @@ export function RunProgressCard({
                 Abandon
               </button>
             </>
-          ) : Boolean(run.worktreePath) ? (
+          ) : abandonable ? (
             <button type="button" className="run-progress-card__action" onClick={onAbandon}>
               <X aria-hidden="true" />
               Abandon

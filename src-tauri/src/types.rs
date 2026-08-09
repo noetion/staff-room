@@ -50,6 +50,7 @@ pub(crate) struct QuickEditState {
     pub(crate) project_id: String,
     pub(crate) repository: PathBuf,
     pub(crate) worktree: PathBuf,
+    pub(crate) reviewed_diff: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -350,6 +351,7 @@ pub(crate) struct QuickEditActionRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct QuickEditActionResult {
+    pub(crate) completed: bool,
     pub(crate) cleanup_warning: Option<String>,
 }
 

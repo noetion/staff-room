@@ -29,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tauri_plugin_notification::NotificationExt;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -301,6 +301,7 @@ fn promote_worktree(
                 &[
                     "worktree".to_owned(),
                     "remove".to_owned(),
+                    "--force".to_owned(),
                     worktree.to_string_lossy().into_owned(),
                 ],
             ) {
@@ -384,6 +385,7 @@ fn discard_isolation(
         &[
             "worktree".to_owned(),
             "remove".to_owned(),
+            "--force".to_owned(),
             isolation.worktree.to_string_lossy().into_owned(),
         ],
     ) {

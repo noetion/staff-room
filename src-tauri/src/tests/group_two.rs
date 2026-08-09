@@ -215,6 +215,20 @@ fn dirty_checkout_ship_preserves_isolation_when_the_user_edits_during_the_run() 
 }
 
 #[test]
+fn abandonment_removes_untracked_verification_artifacts() {
+    let (root, repository) = test_repository();
+    let managed_root = root.join("managed");
+    let isolation = create_isolation_at_root(&repository, "abandon-dirty-test", &managed_root)
+        .expect("create isolation");
+    std::fs::write(isolation.worktree.join("generated.lock"), "verification output\n")
+        .expect("write untracked verification artifact");
+
+    assert!(discard_isolation(&repository, &isolation, &managed_root).is_none());
+    assert!(!isolation.worktree.exists());
+    remove_test_repository(&root);
+}
+
+#[test]
 fn dirty_checkout_ship_preserves_index_rename_deletion_and_binary_state() {
     let (root, repository) = test_repository();
     let managed_root = root.join("managed");
@@ -303,6 +317,8 @@ fn clean_checkout_ship_still_fast_forwards_the_verified_branch() {
     std::fs::write(isolation.worktree.join("plan.md"), "agent change\n")
         .expect("write agent change");
     commit_managed_changes(&isolation.worktree, "Update plan").expect("commit agent change");
+    std::fs::write(isolation.worktree.join("generated.lock"), "verification output\n")
+        .expect("write untracked verification artifact");
     let promotion = promote_worktree(&repository, &isolation, &managed_root)
         .expect("fast-forward verified branch");
 
@@ -318,6 +334,7 @@ fn clean_checkout_ship_still_fast_forwards_the_verified_branch() {
             .replace("\r\n", "\n"),
         "agent change\n"
     );
+    assert!(!repository.join("generated.lock").exists());
     assert!(!isolation.worktree.exists());
     remove_test_repository(&root);
 }
@@ -400,6 +417,13 @@ fn interrupted_runs_become_recoverable_on_restart() {
         .expect("insert promoting run");
     connection
         .execute(
+            "INSERT INTO runs (id, project_id, objective, state, worktree_path)
+             VALUES ('run-3', 'project-1', 'Abandonment', 'abandoning', 'C:\\worktree')",
+            [],
+        )
+        .expect("insert abandoning run");
+    connection
+        .execute(
             "INSERT INTO activations
              (id, run_id, phase, participant_kind, state, context_bytes)
              VALUES ('activation-1', 'run-1', 'build', 'codex', 'running', 0)",
@@ -409,7 +433,7 @@ fn interrupted_runs_become_recoverable_on_restart() {
 
     assert_eq!(
         reconcile_interrupted_runs(&connection).expect("reconcile runs"),
-        2
+        3
     );
     let run: (String, Option<String>, Option<String>) = connection
         .query_row(
@@ -438,6 +462,15 @@ fn interrupted_runs_become_recoverable_on_restart() {
         .expect("read promoting run");
     assert_eq!(promoting.0, "waiting");
     assert!(promoting.1.contains("Promotion state unknown"));
+    let abandoning: (String, String) = connection
+        .query_row(
+            "SELECT state, stop_reason FROM runs WHERE id = 'run-3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read abandoning run");
+    assert_eq!(abandoning.0, "waiting");
+    assert!(abandoning.1.contains("confirm Abandon again"));
 }
 
 #[test]

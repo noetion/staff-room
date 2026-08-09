@@ -1,6 +1,260 @@
 use super::*;
 
 #[test]
+fn quick_edit_apply_requires_the_exact_reviewed_diff() {
+    assert!(
+        require_reviewed_quick_edit(Some("diff --git a/a b/a\n"), "diff --git a/a b/a\n").is_ok()
+    );
+    let changed = require_reviewed_quick_edit(
+        Some("diff --git a/a b/a\n-old\n+reviewed\n"),
+        "diff --git a/a b/a\n-old\n+changed\n",
+    )
+    .expect_err("a post-review mutation must fail closed");
+    assert!(changed.contains("changed after you reviewed"));
+    assert!(require_reviewed_quick_edit(None, "diff").is_err());
+}
+
+#[test]
+fn quick_edit_patch_serialization_terminates_the_last_hunk() {
+    assert_eq!(serialize_git_patch("diff --git a/a b/a"), "diff --git a/a b/a\n");
+    assert_eq!(
+        serialize_git_patch("diff --git a/a b/a\n"),
+        "diff --git a/a b/a\n"
+    );
+}
+
+#[test]
+fn ship_route_only_shows_revision_stages_when_they_ran() {
+    let direct = stored_run_route(
+        "awaiting-promotion",
+        1,
+        0,
+        Some("codex"),
+        Some("claude"),
+        Some("review"),
+    );
+    assert_eq!(
+        direct
+            .iter()
+            .map(|step| step.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Build", "Verify", "Review", "Promote"]
+    );
+    assert_eq!(
+        direct
+            .iter()
+            .map(|step| step.state.as_str())
+            .collect::<Vec<_>>(),
+        vec!["complete", "complete", "complete", "current"]
+    );
+
+    let revised = stored_run_route(
+        "awaiting-promotion",
+        2,
+        1,
+        Some("codex"),
+        Some("claude"),
+        Some("final-review"),
+    );
+    assert_eq!(
+        revised
+            .iter()
+            .map(|step| step.label.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "Build",
+            "Verify",
+            "Review",
+            "Revise",
+            "Final review",
+            "Promote"
+        ]
+    );
+    assert_eq!(revised[4].state, "complete");
+    assert_eq!(revised[5].state, "current");
+
+    let failed_verification = stored_run_route(
+        "failed",
+        0,
+        0,
+        Some("codex"),
+        Some("claude"),
+        Some("verify"),
+    );
+    assert_eq!(failed_verification[0].state, "complete");
+    assert_eq!(failed_verification[1].state, "current");
+
+    let stopped_final_review = stored_run_route(
+        "stopped",
+        2,
+        1,
+        Some("codex"),
+        Some("claude"),
+        Some("final-review"),
+    );
+    assert_eq!(stopped_final_review[3].state, "complete");
+    assert_eq!(stopped_final_review[4].state, "current");
+}
+
+#[test]
+fn abandonment_claim_excludes_promotion_and_preserves_evidence() {
+    let connection = Connection::open_in_memory().expect("open test database");
+    migrate(&connection).expect("migrate test database");
+    connection
+        .execute(
+            "INSERT INTO projects (id, name, goal, repository_path)
+             VALUES ('project-1', 'The Staff Room', 'Test', 'C:\\repo')",
+            [],
+        )
+        .expect("insert project");
+    connection
+        .execute(
+            "INSERT INTO runs
+             (id, project_id, objective, state, worktree_path, branch, isolation_kind,
+              review_count, revision_count, context_bytes)
+             VALUES ('run-1', 'project-1', 'Test', 'awaiting-promotion', 'C:\\worktree',
+                     'staff-room/test', 'worktree', 2, 1, 4096)",
+            [],
+        )
+        .expect("insert awaiting run");
+    let database = Database(Mutex::new(connection));
+    let request = ProjectRunRequest {
+        project_id: "project-1".to_owned(),
+        run_id: "run-1".to_owned(),
+    };
+
+    let claim = claim_run_for_abandonment(&database, &request).expect("claim abandonment");
+    assert_eq!(claim.previous_state, "awaiting-promotion");
+    let promotion_claimed = database
+        .0
+        .lock()
+        .expect("lock database")
+        .execute(
+            "UPDATE runs SET state = 'promoting'
+             WHERE id = 'run-1' AND project_id = 'project-1'
+               AND state = 'awaiting-promotion'",
+            [],
+        )
+        .expect("attempt promotion claim");
+    assert_eq!(promotion_claimed, 0);
+
+    finish_abandonment(&database, &request).expect("finish abandonment");
+    let persisted: (String, i64, i64, i64, Option<String>) = database
+        .0
+        .lock()
+        .expect("lock database")
+        .query_row(
+            "SELECT state, review_count, revision_count, context_bytes, worktree_path
+             FROM runs WHERE id = 'run-1'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("read abandoned run");
+    assert_eq!(persisted, ("abandoned".to_owned(), 2, 1, 4096, None));
+}
+
+#[test]
+fn completed_run_cannot_be_relabelled_as_abandoned() {
+    let connection = Connection::open_in_memory().expect("open test database");
+    migrate(&connection).expect("migrate test database");
+    connection
+        .execute(
+            "INSERT INTO projects (id, name, goal, repository_path)
+             VALUES ('project-1', 'The Staff Room', 'Test', 'C:\\repo')",
+            [],
+        )
+        .expect("insert project");
+    connection
+        .execute(
+            "INSERT INTO runs
+             (id, project_id, objective, state, worktree_path, branch, isolation_kind)
+             VALUES ('run-1', 'project-1', 'Test', 'complete', 'C:\\worktree',
+                     'staff-room/test', 'worktree')",
+            [],
+        )
+        .expect("insert completed run");
+    let database = Database(Mutex::new(connection));
+    let request = ProjectRunRequest {
+        project_id: "project-1".to_owned(),
+        run_id: "run-1".to_owned(),
+    };
+
+    let error = claim_run_for_abandonment(&database, &request)
+        .expect_err("completed runs must preserve promotion history");
+    assert!(error.contains("inactive Ship result"));
+    let state: String = database
+        .0
+        .lock()
+        .expect("lock database")
+        .query_row("SELECT state FROM runs WHERE id = 'run-1'", [], |row| {
+            row.get(0)
+        })
+        .expect("read completed run");
+    assert_eq!(state, "complete");
+}
+
+#[test]
+fn recovery_and_abandonment_claims_are_mutually_exclusive() {
+    let connection = Connection::open_in_memory().expect("open test database");
+    migrate(&connection).expect("migrate test database");
+    connection
+        .execute(
+            "INSERT INTO projects (id, name, goal, repository_path)
+             VALUES ('project-1', 'The Staff Room', 'Test', 'C:\\repo')",
+            [],
+        )
+        .expect("insert project");
+    connection
+        .execute(
+            "INSERT INTO runs
+             (id, project_id, objective, state, worktree_path, branch, isolation_kind)
+             VALUES ('recover-first', 'project-1', 'Recover', 'waiting', 'C:\\recover',
+                     'staff-room/recover', 'worktree'),
+                    ('abandon-first', 'project-1', 'Abandon', 'waiting', 'C:\\abandon',
+                     'staff-room/abandon', 'worktree')",
+            [],
+        )
+        .expect("insert preserved runs");
+    let database = Database(Mutex::new(connection));
+
+    let recovery = StartRunRequest {
+        run_id: "recover-first".to_owned(),
+        project_id: "project-1".to_owned(),
+        objective: "Recover".to_owned(),
+        requested_agent: None,
+    };
+    claim_run_for_recovery(&database, &recovery, "waiting", 0)
+        .expect("recovery claims the preserved run");
+    let abandon_after_recovery = ProjectRunRequest {
+        run_id: "recover-first".to_owned(),
+        project_id: "project-1".to_owned(),
+    };
+    assert!(claim_run_for_abandonment(&database, &abandon_after_recovery).is_err());
+
+    let abandon_before_recovery = ProjectRunRequest {
+        run_id: "abandon-first".to_owned(),
+        project_id: "project-1".to_owned(),
+    };
+    claim_run_for_abandonment(&database, &abandon_before_recovery)
+        .expect("abandonment claims the preserved run");
+    let blocked_recovery = StartRunRequest {
+        run_id: "abandon-first".to_owned(),
+        project_id: "project-1".to_owned(),
+        objective: "Abandon".to_owned(),
+        requested_agent: None,
+    };
+    assert!(claim_run_for_recovery(&database, &blocked_recovery, "waiting", 0).is_err());
+}
+
+#[test]
 fn autonomous_ship_setting_is_fail_closed_until_acceptance() {
     let connection = Connection::open_in_memory().expect("open test database");
     migrate(&connection).expect("migrate test database");

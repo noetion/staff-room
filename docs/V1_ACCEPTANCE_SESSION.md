@@ -70,8 +70,8 @@ Do all of these before spending anything.
 
 | # | Check | How | Pass when |
 |---|---|---|---|
-| 1 | Fresh attach screen | Rename `%APPDATA%\com.staffroom.desktop\staff-room.db` aside, relaunch | Attach screen, no seeded conversation |
-| 4 | Migration | Restore the renamed DB, relaunch | Prior messages and runs intact, no error |
+| 1 | Fresh attach screen | With the app closed, hold aside both `%APPDATA%\com.staffroom.desktop\staff-room.db*` and any `%APPDATA%\com.agentroom.desktop\agent-room.db*`, then relaunch | Attach screen, no seeded or migrated conversation |
+| 4 | Migration | Restore the held databases, relaunch | Prior messages and runs intact, no error |
 | 2 | Two independent repos | Attach the fixture too, switch between them | Separate history, sessions, model profiles, settings |
 | 3 | No developer paths | Read every visible string in a release build | No absolute developer path appears anywhere |
 | 29 | Ship-only labelling | Open the composer participant list | Antigravity absent from Ask and Quick Edit; chip reads "Ship only" |

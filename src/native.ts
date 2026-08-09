@@ -75,6 +75,7 @@ export interface VoiceTranscription {
 }
 
 export interface QuickEditActionResult {
+  completed: boolean;
   cleanupWarning?: string;
 }
 

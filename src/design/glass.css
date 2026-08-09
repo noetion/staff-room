@@ -7,7 +7,6 @@
 }
 
 :root {
-  --aurora-drift-duration: 40s;
   --refraction-resize-delay: 150ms;
   --wordmark-tracking: -0.05em;
 }

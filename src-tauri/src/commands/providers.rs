@@ -255,7 +255,12 @@ pub(crate) fn load_room_snapshot(
             "SELECT id, objective, state, current_owner, writer, reviewer,
                     review_count, revision_count, started_at, stop_reason,
                     native_session_id, worktree_path, branch, context_bytes, degraded_review,
-                    artifact_path, instruction_files_json, skill_files_json, recovery_count
+                    artifact_path, instruction_files_json, skill_files_json, recovery_count,
+                    (SELECT phase FROM run_events
+                     WHERE run_id = runs.id
+                       AND phase IN ('prepare', 'build', 'verify', 'review', 'revise',
+                                     'final-review', 'promote')
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1)
              FROM runs WHERE project_id = ?1 ORDER BY started_at DESC LIMIT 1",
             [&project_id],
             |row| {
@@ -284,8 +289,10 @@ pub(crate) fn load_room_snapshot(
                     route: stored_run_route(
                         &row.get::<_, String>(2)?,
                         row.get::<_, i64>(6)?.max(0) as u32,
+                        row.get::<_, i64>(7)?.max(0) as u32,
                         row.get::<_, Option<String>>(4)?.as_deref(),
                         row.get::<_, Option<String>>(5)?.as_deref(),
+                        row.get::<_, Option<String>>(19)?.as_deref(),
                     ),
                 })
             },
@@ -398,27 +405,39 @@ pub(crate) fn load_room_snapshot(
 pub(crate) fn stored_run_route(
     state: &str,
     review_count: u32,
+    revision_count: u32,
     writer: Option<&str>,
     reviewer: Option<&str>,
+    last_phase: Option<&str>,
 ) -> Vec<StoredRouteStep> {
-    let phases = [
-        ("Build", writer),
-        ("Verify", None),
-        ("Review", reviewer),
-        ("Revise", writer),
-        ("Final review", reviewer),
-        ("Promote", None),
-    ];
+    let mut phases = vec![("Build", writer), ("Verify", None), ("Review", reviewer)];
+    let revised = revision_count > 0 || state == "revising" || review_count > 1;
+    if revised {
+        phases.push(("Revise", writer));
+        phases.push(("Final review", reviewer));
+    }
+    phases.push(("Promote", None));
+    let promote_index = phases.len() - 1;
+    let last_phase_index = match last_phase {
+        Some("prepare" | "build") => 0,
+        Some("verify") => 1,
+        Some("review") if review_count > 1 => 4,
+        Some("review") => 2,
+        Some("revise") => 3,
+        Some("final-review") => 4,
+        Some("promote") => promote_index,
+        _ => 0,
+    };
     let current = match state {
         "selecting" | "working" => 0,
         "verifying" => 1,
         "reviewing" if review_count > 1 => 4,
         "reviewing" => 2,
         "revising" => 3,
-        "awaiting-promotion" => 5,
-        "promoting" => 5,
+        "awaiting-promotion" | "promoting" => promote_index,
         "complete" => phases.len(),
-        _ => 0,
+        "waiting" | "failed" | "stopped" | "abandoned" => last_phase_index,
+        _ => last_phase_index,
     };
     phases
         .iter()
@@ -469,77 +488,162 @@ pub(crate) async fn stop_run(
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct AbandonClaim {
+    pub(crate) previous_state: String,
+    pub(crate) worktree_path: String,
+    pub(crate) branch: String,
+    pub(crate) isolation_kind: String,
+}
+
+pub(crate) fn claim_run_for_abandonment(
+    database: &Database,
+    request: &ProjectRunRequest,
+) -> Result<AbandonClaim, String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    let row: (String, Option<String>, String, String) = connection
+        .query_row(
+            "SELECT state, worktree_path, branch, isolation_kind
+             FROM runs WHERE id = ?1 AND project_id = ?2",
+            params![request.run_id, request.project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "The Ship run could not be found.".to_owned())?;
+    let (previous_state, worktree_path, branch, isolation_kind) = row;
+    if !matches!(
+        previous_state.as_str(),
+        "awaiting-promotion" | "waiting" | "failed" | "stopped"
+    ) {
+        return Err(
+            "Only a preserved, inactive Ship result can be abandoned. Stop active work first."
+                .to_owned(),
+        );
+    }
+    let worktree_path = worktree_path
+        .ok_or_else(|| "This Ship run has no preserved worktree to abandon.".to_owned())?;
+    let claimed = connection
+        .execute(
+            "UPDATE runs SET state = 'abandoning'
+             WHERE id = ?1 AND project_id = ?2 AND state = ?3",
+            params![request.run_id, request.project_id, previous_state],
+        )
+        .map_err(|error| error.to_string())?;
+    if claimed == 0 {
+        return Err("This Ship run changed before abandonment could begin.".to_owned());
+    }
+    Ok(AbandonClaim {
+        previous_state,
+        worktree_path,
+        branch,
+        isolation_kind,
+    })
+}
+
+pub(crate) fn restore_abandonment(
+    database: &Database,
+    request: &ProjectRunRequest,
+    previous_state: &str,
+) -> Result<(), String> {
+    let restored = database
+        .0
+        .lock()
+        .map_err(|error| error.to_string())?
+        .execute(
+            "UPDATE runs SET state = ?1
+             WHERE id = ?2 AND project_id = ?3 AND state = 'abandoning'",
+            params![previous_state, request.run_id, request.project_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if restored == 1 {
+        Ok(())
+    } else {
+        Err("The Ship run could not be restored after abandonment stopped.".to_owned())
+    }
+}
+
+pub(crate) fn finish_abandonment(
+    database: &Database,
+    request: &ProjectRunRequest,
+) -> Result<(), String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    let finished = transaction
+        .execute(
+            "UPDATE runs SET
+                 state = 'abandoned', current_owner = NULL,
+                 stop_reason = 'Abandoned by the user.',
+                 finished_at = CURRENT_TIMESTAMP, worktree_path = NULL
+             WHERE id = ?1 AND project_id = ?2 AND state = 'abandoning'",
+            params![request.run_id, request.project_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if finished != 1 {
+        return Err("The claimed Ship run could not be finalized as abandoned.".to_owned());
+    }
+    transaction
+        .execute(
+            "INSERT INTO run_events
+             (id, run_id, event_type, phase, state, current_owner, detail, context_bytes)
+             SELECT ?1, id, 'transition', 'ship', 'abandoned', NULL,
+                    'Abandoned by the user.', context_bytes
+             FROM runs WHERE id = ?2 AND project_id = ?3",
+            params![
+                Uuid::new_v4().to_string(),
+                request.run_id,
+                request.project_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 #[tauri::command]
-pub(crate) fn abandon_run(
+pub(crate) async fn abandon_run(
     app: AppHandle,
     database: State<'_, Database>,
     request: ProjectRunRequest,
 ) -> Result<(), String> {
-    type AbandonRow = (String, Option<String>, String, String);
     let database = database.inner();
-    let row = {
-        let connection = database.0.lock().map_err(|error| error.to_string())?;
-        connection
-            .query_row(
-                "SELECT state, worktree_path, branch, isolation_kind
-                 FROM runs WHERE id = ?1 AND project_id = ?2",
-                params![request.run_id, request.project_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "The Ship run could not be found.".to_owned())?
-    };
-    let (state, worktree_path, branch, isolation_kind): AbandonRow = row;
-    if run_state_allows_side_chat(&state) || state == "promoting" || state == "selecting" {
-        return Err("An active Ship run cannot be abandoned. Stop it first.".to_owned());
-    }
-    let worktree = PathBuf::from(
-        worktree_path
-            .ok_or_else(|| "This Ship run has no preserved worktree to abandon.".to_owned())?,
-    );
-    if !worktree.exists() {
-        return Err("The preserved worktree no longer exists.".to_owned());
-    }
     let managed_root = app
         .path()
         .app_cache_dir()
         .map_err(|error| error.to_string())?
         .join("worktrees");
+    let repository = project_repository(database, &request.project_id)?;
+    let confirmed = app
+        .dialog()
+        .message("Abandon this Ship run and delete its preserved worktree? This cannot be undone.")
+        .title("Confirm Ship abandonment")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Abandon".to_owned(),
+            "Cancel".to_owned(),
+        ))
+        .blocking_show();
+    if !confirmed {
+        return Ok(());
+    }
+    let claim = claim_run_for_abandonment(database, &request)?;
+    let worktree = PathBuf::from(&claim.worktree_path);
     let isolation = IsolationContext {
-        worktree,
-        branch,
+        worktree: worktree.clone(),
+        branch: claim.branch,
         base_branch: String::new(),
         base_head: String::new(),
         snapshot_head: String::new(),
-        isolation_kind,
+        isolation_kind: claim.isolation_kind,
         workspace_fingerprint: None,
     };
-    let repository = project_repository(database, &request.project_id)?;
-    if let Some(error) = discard_isolation(&repository, &isolation, &managed_root) {
-        return Err(format!("Could not remove the preserved isolation: {error}"));
+    if worktree.exists() {
+        if let Some(error) = discard_isolation(&repository, &isolation, &managed_root) {
+            restore_abandonment(database, &request, &claim.previous_state)?;
+            return Err(format!("Could not remove the preserved isolation: {error}"));
+        }
     }
-    update_run(
-        database,
-        &request.run_id,
-        "abandoned",
-        None,
-        0,
-        0,
-        None,
-        0,
-        None,
-        true,
-    )?;
-    database
-        .0
-        .lock()
-        .map_err(|error| error.to_string())?
-        .execute(
-            "UPDATE runs SET worktree_path = NULL WHERE id = ?1 AND project_id = ?2",
-            params![request.run_id, request.project_id],
-        )
-        .map_err(|error| error.to_string())?;
+    finish_abandonment(database, &request)?;
     emit_event(
         &app,
         &request.run_id,

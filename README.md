@@ -11,8 +11,8 @@ The Staff Room is a Windows desktop application for working with installed Claud
 ## The safety model
 
 - **Ask** is read-only and creates no worktree.
-- **Quick Edit** works in managed isolation. The attached checkout changes only after the user reviews the diff and presses **Apply**.
-- **Ship** runs Build, Verify, read-only Review, at most one bounded revision, and Final Review in a managed worktree. It stops at `awaiting-promotion` until the user presses **Promote** and confirms.
+- **Quick Edit** works in managed isolation. The attached checkout changes only after the user reviews the diff, presses **Apply**, and confirms in a native dialog. Rust rejects the operation if the isolated diff has changed since preview.
+- **Ship** runs Build, Verify, and read-only Review in a managed worktree. If review or verification finds a problem, it performs at most one bounded Revision followed by Final Review. It stops at `awaiting-promotion` until the user presses **Promote** and confirms in a native dialog.
 - **Autonomous Ship** remains locked. Its separate [acceptance contract](docs/AUTONOMOUS_ACCEPTANCE_CONTRACT.md) is public and still marked **NOT ACCEPTED**.
 - **Voice** is local push-to-talk. A transcript is editable text only; it cannot send a message or authorize Apply, Promote, Discard, or Abandon.
 
@@ -36,7 +36,7 @@ The important claims are traceable to code:
 - [`project_repository`](src-tauri/src/db/projects.rs) reloads the attached project from SQLite and revalidates its canonical Git root.
 - [`allocate_operation_id`](src-tauri/src/commands/projects.rs) issues a Rust-owned, one-use operation lease.
 - [`ProviderMode::Probe` and `ProviderMode::Review`](src-tauri/src/providers/mod.rs) force non-writing provider routes for connection tests and review.
-- [`approve_run_promotion`](src-tauri/src/commands/run.rs) requires an explicit confirmation and a still-valid workspace fingerprint.
+- [`approve_run_promotion`](src-tauri/src/commands/run.rs) owns the native confirmation prompt and requires a still-valid workspace fingerprint.
 - [`active_promotions`](src-tauri/src/types.rs) prevents duplicate promotion of the same run.
 - [`backup_v1_database`](src-tauri/src/db/projects.rs) creates and integrity-checks a consistent SQLite backup before the legacy schema migration.
 

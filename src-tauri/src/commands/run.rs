@@ -73,6 +73,21 @@ pub(crate) async fn approve_run_promotion(
     request: ProjectRunRequest,
 ) -> Result<PromotionActionResult, String> {
     project_repository(database.inner(), &request.project_id)?;
+    let confirmed = app
+        .dialog()
+        .message("Promote this reviewed and verified change into the attached checkout?")
+        .title("Confirm Ship promotion")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Promote".to_owned(),
+            "Cancel".to_owned(),
+        ))
+        .blocking_show();
+    if !confirmed {
+        return Ok(PromotionActionResult {
+            promoted: false,
+            cleanup_warning: None,
+        });
+    }
     {
         let mut promotions = runtime.active_promotions.lock().await;
         if !promotions.insert(request.project_id.clone()) {

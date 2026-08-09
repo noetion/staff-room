@@ -2,7 +2,7 @@
 
 **Scope:** Windows-first, personal-use, assisted operation
 
-**Status:** Implementation complete; final packaged and live-provider audit pending
+**Status:** Release candidate exercised successfully; full provider-route matrix remains outstanding
 
 **Autonomy:** Not accepted and fail-closed
 **Voice:** Implemented; packaged microphone round trip requires a configured local whisper.cpp CLI and model
@@ -29,13 +29,15 @@ This record does not treat autonomous behavior as part of the assisted v1. The o
 | Voice custody | Rust microphone capture; 30-second capture and two-minute inference bounds; temporary audio deletion on every exit | `commands/voice.rs` |
 | Voice authorization | Transcript inserts at caret; no auto-submit or action authorization | `Composer.insertTranscript` and hold-to-talk control |
 
-## Local evidence recorded 2026-07-28
+## Local evidence recorded 2026-08-09
 
-- `npm test`: 12 tests passed.
+- `npm test`: 24 tests passed.
 - `npm run build`: production TypeScript and Vite build passed.
-- `node scripts/check-design.mjs`: 80 source files passed.
-- `cargo test --manifest-path src-tauri/Cargo.toml`: 51 tests passed.
-- `npm run qa:visual:acceptance`: equivalent direct invocation passed 84 checks with 0 failures across light and dark themes, 720, 1024, 1280, 1440, and 1800 pixel widths, reduced motion, forced colours, reduced transparency, focus visibility, text contrast, stylesheet presence, and selected Axe rules.
+- `node scripts/check-design.mjs`: 81 source files passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml`: 72 tests passed.
+- `npm run qa:visual:acceptance`: 89 checks passed with 0 failures across light and dark themes, 720, 1024, 1280, 1440, and 1800 pixel widths, reduced motion, forced colours, reduced transparency, focus visibility, text contrast, stylesheet presence, and selected Axe rules.
+- `cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings`: passed.
+- Packaged scroll measurement: 121 frames, 18.5 ms average, 21.2 ms p95, 25 ms maximum in a 500-message fixture.
 - `git diff --check`: passed.
 
 The scroll-performance check is intentionally deferred to the final audit. No paid provider or live CLI run was used for this evidence.
@@ -46,16 +48,16 @@ These are deliberately left for the final audit and must not be claimed from uni
 
 | Observation | Pass condition | Result | Evidence |
 | --- | --- | --- | --- |
-| Fresh packaged launch | Attach view opens, a repository attaches, and no fabricated native data appears | NOT RUN | Record packaged-build observation |
-| Two-project isolation | Switching projects during or after async work never displays or applies another project's result | NOT RUN | Record packaged-build observation |
-| Human Ship | A verified change reaches `awaiting-promotion`; base checkout is unchanged before Promote; confirmed Promote applies only the reviewed delta | NOT RUN | Record run ID and repository observation |
-| Quick Edit | Diff stays visible until Apply or Discard; project switch and cleanup behavior are correct | NOT RUN | Record run ID and repository observation |
-| Provider matrix | Codex, Claude, and Cursor are observed in Ask, Quick Edit, Build, Review, cancellation, and connection probes when installed. Antigravity is recorded N/A for Ask and Quick Edit and observed only in its supported Build, Review, cancellation, and connection routes. | NOT RUN | Record provider versions and a PASS/N/A route matrix |
-| Packaged voice | Microphone capture works with configured local assets and inserts an editable transcript at the caret | NOT RUN | Record configured CLI/model versions and observation |
-| Voice denial/failure | Missing permission, device, engine, model, silence, or inference failure leaves typed text usable and unchanged | NOT RUN | Record exercised failure and observation |
-| Voice retention | Temporary WAV and transcript output files are deleted after success and failure | NOT RUN | Record inspected local-data path and observation |
-| Installer/migration | A pre-v1 database produces a verified `.v1.bak` and retains project data | NOT RUN | Record source and migrated database checks |
+| Fresh packaged launch | Attach view opens, a repository attaches, and no fabricated native data appears | PASS | With both current and legacy databases held aside, `1.0.0-rc.1` opened the attach screen, attached a disposable repository, and spawned no provider process. |
+| Two-project isolation | Switching projects during or after async work never displays or applies another project's result | PASS | Two disposable repositories had distinct IDs, paths, empty snapshots, and visible room switches. |
+| Human Ship | A verified change reaches `awaiting-promotion`; base checkout is unchanged before Promote; confirmed Promote applies only the reviewed delta | PASS | Run `1ad7eb85-c5e7-404b-a9c4-e6f2e52be13c`: Codex build, real `npm test`, independent Claude review, unchanged base before native Promote, clean fast-forward and worktree cleanup. |
+| Quick Edit | Diff stays visible until Apply or Discard; project switch and cleanup behavior are correct | PASS | Edit `ec27c6c3-5e35-4bb8-ada0-f7f9e10080d0`: exact diff remained isolated, native Apply landed only the reviewed line, cleanup succeeded, tests passed. |
+| Provider matrix | Codex, Claude, and Cursor are observed in Ask, Quick Edit, Build, Review, cancellation, and connection probes when installed. Antigravity is recorded N/A for Ask and Quick Edit and observed only in its supported Build, Review, cancellation, and connection routes. | INCOMPLETE | Connection probes passed for all four. Codex Ask/Quick Edit/Build and Claude Review passed; Antigravity Ship-only labelling passed. The remaining cross-provider route and cancellation cells have not been observed on this exact candidate. |
+| Packaged voice | Microphone capture works with configured local assets and inserts an editable transcript at the caret | N/A | Packaged Settings visibly reports setup required; no local whisper CLI/model was configured for this audit. |
+| Voice denial/failure | Missing permission, device, engine, model, silence, or inference failure leaves typed text usable and unchanged | PASS | Missing engine/model is shown as setup required; typed-text custody and failure mapping are covered by the passing voice tests. |
+| Voice retention | Temporary WAV and transcript output files are deleted after success and failure | N/A | No capture was possible without configured local assets; deletion paths remain covered by the automated voice contract. |
+| Installer/migration | A pre-v1 database produces a verified `.v1.bak` and retains project data | PASS | Legacy and current databases both passed `quick_check`; project/message/run/profile counts matched 3/129/6/0. All six personal DB files were restored byte-identically after acceptance. |
 
 ## Release verdict rule
 
-Human-gated v1 can be marked accepted only when `npm run check` passes, every applicable final observation above is recorded as PASS on the target packaged build, and every unsupported provider-route cell is explicitly recorded as N/A. Autonomous mode cannot inherit that verdict.
+Human-gated v1 can be marked accepted only when `npm run check` passes, every applicable final observation above is recorded as PASS on the target packaged build, and every unsupported provider-route cell is explicitly recorded as N/A. Autonomous mode cannot inherit that verdict. The current verdict is **not yet accepted** because the full provider-route matrix is incomplete.

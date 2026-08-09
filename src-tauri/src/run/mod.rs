@@ -10,6 +10,35 @@ pub(crate) use verification::*;
 
 use crate::*;
 
+pub(crate) fn claim_run_for_recovery(
+    database: &Database,
+    request: &StartRunRequest,
+    expected_state: &str,
+    expected_recovery_count: u32,
+) -> Result<(), String> {
+    let connection = database.0.lock().map_err(|error| error.to_string())?;
+    let claimed = connection
+        .execute(
+            "UPDATE runs SET state = 'selecting', current_owner = NULL
+             WHERE id = ?1 AND project_id = ?2 AND state = ?3 AND recovery_count = ?4",
+            params![
+                request.run_id,
+                request.project_id,
+                expected_state,
+                expected_recovery_count
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if claimed == 1 {
+        Ok(())
+    } else {
+        Err(
+            "This preserved run was claimed by another action. Reload the room and try again."
+                .to_owned(),
+        )
+    }
+}
+
 pub(crate) async fn execute_room_run(
     app: AppHandle,
     database: &Database,
@@ -158,6 +187,7 @@ pub(crate) async fn execute_room_run(
                 );
             }
         };
+        claim_run_for_recovery(database, &request, &state, prior_recovery_count)?;
         (
             IsolationContext {
                 worktree: path,
@@ -205,14 +235,14 @@ pub(crate) async fn execute_room_run(
 
     if is_recovery {
         let connection = database.0.lock().map_err(|error| error.to_string())?;
-        connection
+        let resumed = connection
             .execute(
                 "UPDATE runs SET state = 'working', current_owner = ?1, writer = ?1,
                    reviewer = ?2, review_count = 0, revision_count = 0,
                    degraded_review = ?3, stop_reason = NULL, finished_at = NULL,
                    artifact_path = ?4, instruction_files_json = ?5,
                    skill_files_json = ?6, recovery_count = ?7
-                 WHERE id = ?8",
+                 WHERE id = ?8 AND project_id = ?9 AND state = 'selecting'",
                 params![
                     builder.kind,
                     reviewer.kind,
@@ -221,10 +251,17 @@ pub(crate) async fn execute_room_run(
                     serde_json::to_string(&instruction_files).unwrap_or_else(|_| "[]".to_owned()),
                     serde_json::to_string(&skill_files).unwrap_or_else(|_| "[]".to_owned()),
                     recovery_count,
-                    request.run_id
+                    request.run_id,
+                    request.project_id
                 ],
             )
             .map_err(|error| error.to_string())?;
+        if resumed != 1 {
+            return Err(
+                "This preserved run changed before recovery could start. Reload the room and try again."
+                    .to_owned(),
+            );
+        }
     } else {
         let connection = database.0.lock().map_err(|error| error.to_string())?;
         let transaction = connection

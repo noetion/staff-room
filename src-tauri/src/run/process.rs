@@ -23,15 +23,18 @@ pub(crate) async fn preallocate_cursor_session(executable: &Path) -> Result<Stri
         .ok_or_else(|| "Cursor did not return a chat ID from create-chat.".to_owned())
 }
 
-pub(crate) async fn wait_for_idle(mut activity: watch::Receiver<u64>, timeout_seconds: u64) {
+pub(crate) async fn wait_for_idle(
+    mut activity: watch::Receiver<u64>,
+    timeout_seconds: u64,
+) -> bool {
     loop {
         tokio::select! {
             changed = activity.changed() => {
                 if changed.is_err() {
-                    return;
+                    return false;
                 }
             }
-            _ = sleep(Duration::from_secs(timeout_seconds)) => return,
+            _ = sleep(Duration::from_secs(timeout_seconds)) => return true,
         }
     }
 }
@@ -179,7 +182,7 @@ pub(crate) async fn invoke_provider(
         &TurnRequest {
             mode,
             phase: phase.as_str(),
-            prompt: if matches!(kind, "cursor" | "antigravity") {
+            prompt: if matches!(kind, "cursor" | "antigravity") && mode != ProviderMode::Probe {
                 &argv_prompt
             } else {
                 prompt
@@ -415,10 +418,14 @@ pub(crate) async fn invoke_provider(
             kill_tree(&mut child).await;
             child.wait().await.map_err(|error| error.to_string())?
         },
-        _ = wait_for_idle(activity_receiver, idle_timeout_seconds(phase)) => {
-            let (result, was_idle_timeout) = stop_for_idle(&mut child).await?;
-            idle_timed_out = was_idle_timeout;
-            result
+        reached_idle_timeout = wait_for_idle(activity_receiver, idle_timeout_seconds(phase)) => {
+            if reached_idle_timeout {
+                let (result, was_idle_timeout) = stop_for_idle(&mut child).await?;
+                idle_timed_out = was_idle_timeout;
+                result
+            } else {
+                child.wait().await.map_err(|error| error.to_string())?
+            }
         },
         changed = completion_receiver.changed() => {
             if changed.is_ok() && *completion_receiver.borrow() {
@@ -550,6 +557,16 @@ mod tests {
         let changed = cancellation.changed().await;
 
         assert!(!cancellation_requested(&cancellation, changed));
+    }
+
+    #[tokio::test]
+    async fn closed_activity_channel_is_not_an_idle_timeout() {
+        let (sender, receiver) = watch::channel(0_u64);
+        drop(sender);
+
+        let reached_idle_timeout = wait_for_idle(receiver, 60).await;
+
+        assert!(!reached_idle_timeout);
     }
 
     #[cfg(windows)]
