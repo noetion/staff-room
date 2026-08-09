@@ -10,6 +10,7 @@ All notable changes to The Staff Room are recorded here. The project follows Sem
 - MIT licensing metadata.
 - A restrictive production Content Security Policy.
 - Windows continuous integration for the reproducible local verification gate.
+- A representative four-agent README walkthrough with a linked 1080p version.
 - A startup migration that copies the pre-release SQLite database and local voice assets into the renamed application-data directory. The old data is retained, and the copied database must pass SQLite `quick_check` before use.
 
 ### Changed
@@ -27,4 +28,4 @@ All notable changes to The Staff Room are recorded here. The project follows Sem
 
 ### Release status
 
-This is a release candidate. Public visibility, the repository rename, metadata, profile pin, and the `1.0.0` tag remain behind the explicit human gate in [docs/PUBLIC_RELEASE_CHECKLIST.md](docs/PUBLIC_RELEASE_CHECKLIST.md).
+This is a release candidate. The `1.0.0` tag remains behind the complete human acceptance gate in [docs/PUBLIC_RELEASE_CHECKLIST.md](docs/PUBLIC_RELEASE_CHECKLIST.md).

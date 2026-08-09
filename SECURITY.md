@@ -2,11 +2,11 @@
 
 ## Supported versions
 
-Security fixes are made against the latest published `1.x` source release. Pre-release builds are supported only until the next release candidate is published.
+The project is currently in pre-release. Security fixes target the latest published source revision.
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a suspected vulnerability or include credentials, private source, repository paths, or provider output in a public report.
+Please do not open a public issue for a suspected vulnerability or include credentials, private source, repository paths, or provider output in a public report.
 
 Use GitHub private vulnerability reporting from the repository's **Security** tab. Include:
 
@@ -16,7 +16,7 @@ Use GitHub private vulnerability reporting from the repository's **Security** ta
 - minimal reproduction steps using synthetic data;
 - impact and any known workaround.
 
-The maintainer will acknowledge a complete report within seven days, coordinate validation and remediation privately, and credit the reporter unless anonymity is requested. Enabling GitHub private vulnerability reporting is a publication gate in [docs/PUBLIC_RELEASE_CHECKLIST.md](docs/PUBLIC_RELEASE_CHECKLIST.md).
+Reports will be reviewed privately, and reporters will be credited unless anonymity is requested. Enabling GitHub private vulnerability reporting is a publication gate in [docs/PUBLIC_RELEASE_CHECKLIST.md](docs/PUBLIC_RELEASE_CHECKLIST.md).
 
 ## Security posture
 

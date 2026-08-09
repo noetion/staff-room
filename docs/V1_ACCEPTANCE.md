@@ -1,6 +1,6 @@
 # Human-gated v1 acceptance
 
-**Scope:** Windows-first, personal-use, assisted operation
+**Scope:** Windows, personal-use, assisted operation
 
 **Status:** Release candidate exercised successfully; full provider-route matrix remains outstanding
 

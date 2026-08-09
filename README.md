@@ -78,12 +78,12 @@ The aggregate gate runs frontend tests and production build, design-token checks
 
 ## Release boundaries
 
-- Windows-first, personal-use v1; macOS and Linux are not claimed.
+- The current release candidate supports Windows; macOS and Linux are not currently supported.
 - Installed CLIs own model access and authentication.
 - No cloud speech service or speech API key.
 - No automatic Apply or Promote path.
 - No accepted autonomous mode until its evidence contract passes.
 - The installer is unsigned and Windows SmartScreen may warn.
-- This branch is `1.0.0-rc.1` until the packaged-app and live-provider observations in the [public release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md) are complete.
+- The current release candidate is `1.0.0-rc.1`. It remains a release candidate until the packaged-app and live-provider observations in the [public release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md) are complete.
 
 The source is available under the [MIT License](LICENSE). Security reports should follow [SECURITY.md](SECURITY.md).
