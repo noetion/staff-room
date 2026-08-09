@@ -23,10 +23,10 @@
 | Repository-size audit | Largest 20 historical objects classified; generated outputs removed from publishable history | PASS on rewritten private GitHub refs; removed paths are unreachable from every retained ref |
 | Packaged build | `npm run tauri build` produces an installer named for The Staff Room | PASS: clean candidate produced the unsigned `The Staff Room_1.0.0-rc.1_x64-setup.exe` installer |
 | Autonomous honesty | `AUTONOMOUS_ACCEPTANCE_COMPLETE` is `false`; README links the NOT ACCEPTED contract | PASS on RC branch |
-| Security reporting | GitHub private vulnerability reporting enabled | PENDING: complete at the visibility transition |
+| Security reporting | GitHub private vulnerability reporting enabled | PASS: enabled and verified after the visibility transition on 2026-08-09 |
 | GitHub metadata | Fixed tagline description and topics `tauri`, `rust`, `ai-agents`, `developer-tools`, `local-first` | PASS on the private publication repository |
 
-The publication repository currently advertises `main` and `fix/public-release-safety`. Decide whether to retain or remove the review branch before changing visibility.
+The public repository advertises only `main` at commit `c0516cd`; it has no tags.
 
 ## `1.0.0` release gates
 
@@ -64,6 +64,15 @@ The exact candidate was assembled from base commit `ae03781981c4` plus the inten
 - Demo: PASS; README GIF is 1200×675 at 5 fps, 15 seconds, and 4,958,825 bytes. Its SHA-256 is `77B377FB30B3170629B901BD0AA5CD09044D13F7C59532490FA69EEAC74B03DD`. The linked MP4 remains 1920×1080 at 30 fps.
 - Installer: PASS; `The Staff Room_1.0.0-rc.1_x64-setup.exe`, 4,138,069 bytes, SHA-256 `917C03E2FA102DED7BF6940121188C26D4B84E40A3870B5E99469F99E2F57E69`, Authenticode status `NotSigned` as documented.
 
+## Public verification record - 2026-08-09
+
+- Visibility and security: PASS; the repository is public, vulnerability alerts and automatic security fixes remain enabled, and private vulnerability reporting is enabled.
+- Anonymous clone: PASS; a credential-free clone resolved to `c0516cd` on `main`, with no other branches or tags advertised.
+- Public setup and verification: PASS; clean `npm ci` reported 0 vulnerabilities and `npm run check` passed 24 frontend tests, the production build, design lint, 72 Rust tests, and 89 visual and accessibility checks.
+- Public privacy and integrity: PASS; the 60-commit public history and a tracked-tree archive passed gitleaks, and `git fsck --full --strict` passed.
+- Public landing page: PASS; the repository API and page return public status, MIT license detection, the expected description, and README references to both demo files. No public Staff Room package was found on the owner's public Packages page.
+- Hosted CI: PASS; both push-triggered CI runs for `c0516cd` completed successfully. Dependabot separately reported that its automatic `glib` update cannot resolve the fixed Linux-only transitive version within the current Tauri dependency range; the Windows candidate's documented Cargo audit disposition is unchanged.
+
 ## RC verification record — 2026-08-08
 
 - `npm run check`: PASS — 24 frontend tests, production build, design lint across 81 files, 64 Rust tests, and 89 visual/accessibility checks.
@@ -80,9 +89,9 @@ The exact candidate was assembled from base commit `ae03781981c4` plus the inten
 1. Completed 2026-08-08: atomically update the two retained refs on the still-private `rooms` repository, delete the six redundant remote refs, and verify a direct clean clone and all-ref history scan.
 2. Completed 2026-08-08: create the private `jonathanjasare/staff-room` publication repository from the clean graph and keep `rooms` private.
 3. Completed 2026-08-08: verify that the publication target advertises only `main`, has no tags, and resolves to the reviewed Staff Room candidate.
-4. Publish the repository as the explicitly labelled `1.0.0-rc.1` source candidate after every publication gate is complete. Do not create a stable tag or claim accepted v1.0 status.
-5. At the visibility transition, enable and verify private vulnerability reporting. The fixed description, required topics, vulnerability alerts, and automatic security-fix pull requests are already configured.
-6. Review the public landing page and clone it into a clean directory. Confirm README media, license detection, checks, and history scan.
+4. Completed 2026-08-09: publish the repository as the explicitly labelled `1.0.0-rc.1` source candidate without creating a stable tag or claiming accepted v1.0 status.
+5. Completed 2026-08-09: enable and verify private vulnerability reporting while retaining the fixed description, required topics, vulnerability alerts, and automatic security fixes.
+6. Completed 2026-08-09: review the public landing page and run the documented setup, full verification gate, integrity check, and privacy scans from a fresh anonymous clone.
 7. Complete packaged and opt-in live-provider acceptance against synthetic repositories.
 8. After the human acceptance matrix passes, change candidate versions from `1.0.0-rc.1` to `1.0.0`, rerun the full gate, and create the signed source tag.
 9. Pin the repository in profile position 3, after `evalseal` and `tripwire`.
