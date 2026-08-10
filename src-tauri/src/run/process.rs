@@ -817,18 +817,18 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("create test directory");
         let child_script = directory.join("child.ps1");
         let spawned_marker = directory.join("spawned.txt");
+        let started_marker = directory.join("started.txt");
         let escaped = |path: &Path| path.to_string_lossy().replace('\'', "''");
-        let completed_marker = directory.join("completed.txt");
         std::fs::write(
             &child_script,
             format!(
-                "Start-Sleep -Milliseconds 1200\nSet-Content -LiteralPath '{}' -Value completed\n",
-                escaped(&completed_marker)
+                "Set-Content -LiteralPath '{}' -Value started\nStart-Sleep -Seconds 30\n",
+                escaped(&started_marker)
             ),
         )
         .expect("write descendant script");
         let parent_script = format!(
-            "$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-File', '{}') -PassThru\nSet-Content -LiteralPath '{}' -Value $child.Id",
+            "$ErrorActionPreference = 'Stop'\n$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '{}') -PassThru\nSet-Content -LiteralPath '{}' -Value $child.Id",
             escaped(&child_script),
             escaped(&spawned_marker)
         );
@@ -837,28 +837,57 @@ mod tests {
             .args(["-NoProfile", "-Command", &parent_script])
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::inherit());
         prepare_owned_provider_command(&mut command);
         let mut child = command.spawn().expect("spawn provider parent");
         let job = ProviderJob::attach_and_resume(&child).expect("own and resume provider parent");
 
-        timeout(Duration::from_secs(5), async {
-            while !spawned_marker.exists() {
+        let descendant_pid = timeout(Duration::from_secs(20), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&spawned_marker) {
+                    if let Ok(pid) = contents.trim().parse::<u32>() {
+                        if started_marker.exists() {
+                            break pid;
+                        }
+                    }
+                }
                 sleep(Duration::from_millis(50)).await;
             }
         })
         .await
-        .expect("descendant was spawned");
+        .expect("a valid descendant PID was recorded");
+        assert_ne!(descendant_pid, 0, "descendant PID was nonzero");
 
-        timeout(Duration::from_secs(3), child.wait())
+        timeout(Duration::from_secs(20), child.wait())
             .await
             .expect("provider wrapper exited")
             .expect("wait for provider wrapper");
-        drop(job);
-        sleep(Duration::from_millis(1500)).await;
-
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{
+                OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE,
+            },
+        };
+        const PROCESS_SYNCHRONIZE: u32 = 0x0010_0000;
+        let descendant =
+            unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, descendant_pid) };
         assert!(
-            !completed_marker.exists(),
+            !descendant.is_null(),
+            "started descendant remained available before the job closed"
+        );
+        drop(job);
+        let wait_result = unsafe { WaitForSingleObject(descendant, 5_000) };
+        if wait_result != WAIT_OBJECT_0 {
+            unsafe {
+                TerminateProcess(descendant, 1);
+                WaitForSingleObject(descendant, 5_000);
+            }
+        }
+        unsafe {
+            CloseHandle(descendant);
+        }
+        assert_eq!(
+            wait_result, WAIT_OBJECT_0,
             "detached descendant survived the provider job"
         );
         std::fs::remove_dir_all(&directory).expect("remove test directory");
