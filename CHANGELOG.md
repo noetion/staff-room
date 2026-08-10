@@ -8,6 +8,7 @@ All notable changes to The Staff Room are recorded here. The project follows Sem
 
 - Completed packaged Windows acceptance for Ask, Quick Edit, human-gated Ship, cancellation, recovery, promotion interruption, and all supported provider routes.
 - Added Windows Job Object ownership for provider process trees, including detached descendants.
+- Added a fail-closed Windows release builder that remaps builder-local Rust paths and scans the compiled executable before distribution.
 
 ### Changed
 

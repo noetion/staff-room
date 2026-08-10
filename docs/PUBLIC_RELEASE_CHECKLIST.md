@@ -21,7 +21,7 @@
 | Automated verification | Clean install and `npm run check` pass on Windows | PASS on the 2026-08-10 stable candidate |
 | Dependency audit | `npm audit` and `cargo audit` have no unresolved advisory | PASS for Windows v1.0; warning disposition recorded below |
 | Repository-size audit | Largest 20 historical objects classified; generated outputs removed from publishable history | PASS on rewritten private GitHub refs; removed paths are unreachable from every retained ref |
-| Packaged build | `npm run tauri build` produces an installer named for The Staff Room | PASS: clean candidate produced the unsigned `The Staff Room_1.0.0_x64-setup.exe` installer |
+| Packaged build | `npm run bundle:windows` produces an installer named for The Staff Room and rejects builder-local paths in the compiled executable | PASS: clean candidate produced the unsigned installer and its compiled executable passed the path scan |
 | Autonomous honesty | `AUTONOMOUS_ACCEPTANCE_COMPLETE` is `false`; README links the NOT ACCEPTED contract | PASS on RC branch |
 | Security reporting | GitHub private vulnerability reporting enabled | PASS: enabled and verified after the visibility transition on 2026-08-09 |
 | GitHub metadata | Fixed tagline description and topics `tauri`, `rust`, `ai-agents`, `developer-tools`, `local-first` | PASS on the public repository |
@@ -73,7 +73,8 @@ The exact candidate was assembled from base commit `ae03781981c4` plus the inten
 - Human-gated acceptance: PASS; Ask, Quick Edit, the four paired Build/Review routes, all four connection probes, provider Build cancellation, Verify cancellation, Antigravity Review cancellation, app-close recovery, the two-attempt recovery limit, and promotion interruption were observed on synthetic repositories.
 - Staged stable-package revalidation: PASS. The process-custody build, a 4,143,689-byte installer with SHA-256 `62B8CDA33ED967851AFCFC6223BCB12BD71ABDA03EEDCD9DD9123AA29BC3D2F9`, passed fresh packaged probes for all four providers through the suspended, Job-owned launch path; Cursor also exercised Job-owned session preallocation, and no new agent process remained. After the preview catalogue, explicit-provider-routing, and recovery-message corrections, the full gate passed again. The final package installed successfully, passed a Codex probe, and visibly rejected an explicit unavailable `@cursor` Ship request without starting a run or falling back to ready Codex. The provider-launch implementation was unchanged between those two builds.
 - Provider versions: Codex `0.144.4`, Claude Code `2.1.221`, Cursor Agent `2026.08.04-aaa8809`, and Antigravity `1.1.11`.
-- Installer: PASS; `The Staff Room_1.0.0_x64-setup.exe`, 4,143,693 bytes, SHA-256 `F3DC6D656301377ABBF6BFF66611C2FF0DF0583FEE848E091382154297909538`, Authenticode status `NotSigned` as documented. Silent installation succeeded, the installed product reported `1.0.0`, and the packaged routing check passed.
+- Packaged acceptance installer: PASS; `The Staff Room_1.0.0_x64-setup.exe`, 4,143,693 bytes, SHA-256 `F3DC6D656301377ABBF6BFF66611C2FF0DF0583FEE848E091382154297909538`, Authenticode status `NotSigned` as documented. Silent installation succeeded, the installed product reported `1.0.0`, and the packaged routing check passed.
+- Publication installer: PASS; the exact fresh-clone candidate ran `npm run bundle:windows` from empty build outputs and produced `The Staff Room_1.0.0_x64-setup.exe`, 4,143,791 bytes, SHA-256 `74B01B0C2102A3AC8CEDB9E22A53B97F9DD9793A0DEE417362D8E89D84FCD333`, ProductVersion `1.0.0`, and Authenticode status `NotSigned`. The release builder remapped local Rust source roots, stripped native symbols, and found no repository, user-profile, Cargo-home, or Rustup-home path in the compiled executable. Silent installation returned success; the installed payload reported `1.0.0`, contained none of the audited private markers, and left the three personal SQLite custody files byte-identical. Tauri's NSIS bundle-type resource patch changes the installed executable hash from the pre-bundle binary, so the installer checksum is the distribution identity. Runtime source is unchanged from the packaged acceptance installer; the later source-only change records this evidence.
 - Local custody: PASS; the three pre-acceptance SQLite files were restored byte-for-byte to their recorded SHA-256 values after the synthetic run matrix and final packaged probes.
 
 ## Public verification record - 2026-08-09
@@ -106,7 +107,8 @@ The exact candidate was assembled from base commit `ae03781981c4` plus the inten
 6. Completed 2026-08-09: review the public landing page and run the documented setup, full verification gate, integrity check, and privacy scans from a fresh anonymous clone.
 7. Completed 2026-08-10: packaged and opt-in live-provider acceptance passed against synthetic repositories.
 8. Completed locally 2026-08-10: changed candidate versions from `1.0.0-rc.1` to `1.0.0` and reran the full gate. Create the public source tag only after final release approval.
-9. Pin the repository in profile position 3, after `evalseal` and `tripwire`.
+9. Completed locally 2026-08-10: added the fail-closed release builder, rebuilt the publication installer with remapped local paths, and verified the exact version, signing status, checksum, and compiled-binary path scan.
+10. Pin the repository in profile position 3, after `evalseal` and `tripwire`.
 
 ## Rollback
 

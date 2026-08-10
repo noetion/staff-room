@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The project is currently in pre-release. Security fixes target the latest published source revision.
+Security fixes target the latest published release. Older releases are not currently supported.
 
 ## Reporting a vulnerability
 

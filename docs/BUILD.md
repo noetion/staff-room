@@ -56,10 +56,10 @@ Release audit results and any justified exception belong in [PUBLIC_RELEASE_CHEC
 ## Unsigned NSIS installer
 
 ```powershell
-npm run tauri build
+npm run bundle:windows
 ```
 
-The installer is produced below `src-tauri/target/release/bundle/nsis/`. The supported v1 bundle target is NSIS only.
+The release script remaps builder-local Rust source paths, strips native symbols, and fails if the compiled executable still contains the repository, user-profile, Cargo-home, or Rustup-home path. The installer is produced below `src-tauri/target/release/bundle/nsis/`. The supported v1 bundle target is NSIS only.
 
 The installer is unsigned. Windows SmartScreen may display an unknown-publisher warning, and users must inspect the source and decide whether to continue. The project does not instruct users to disable SmartScreen or weaken system policy.
 
