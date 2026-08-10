@@ -119,7 +119,7 @@ export const previewEnvironment: NativeEnvironment = {
         autonomyNote: "Install agy to enable this participant.",
         capabilityProof: ["Preview data only"],
       },
-      models: ["Gemini 3.1 Pro (high)", "Gemini 3.1 Pro (low)", "Gemini 3 Flash", "Claude Sonnet 4.6 (thinking)", "Claude Opus 4.6 (thinking)", "GPT-OSS-120b"],
+      models: ["gemini-3.1-pro-high", "gemini-3.1-pro-low", "gemini-3.5-flash-low", "gemini-3.6-flash-low", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"],
       modelDiscoveryNote: "Preview list only. Recheck in the desktop app for models available to your account.",
       supportsEffort: true,
       effortOptions: ["low", "medium", "high"],

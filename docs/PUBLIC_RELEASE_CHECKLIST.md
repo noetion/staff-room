@@ -1,10 +1,10 @@
 # Public release checklist
 
-**Target outcome:** publish `jonathanjasare/staff-room` as a source-first Windows release candidate whose human-gated safety claims are reproducible and traceable to Rust enforcement.
+**Target outcome:** publish `jonathanjasare/staff-room` as a source-first human-gated Windows v1.0 whose safety claims are reproducible and traceable to Rust enforcement.
 
-**Current candidate:** `1.0.0-rc.1`
+**Current candidate:** `1.0.0`
 
-**Non-goals:** new product features, autonomous unlock, macOS or Linux support, code signing, automatic promotion, or a `1.0.0` claim before the complete human acceptance matrix passes.
+**Non-goals:** new product features, autonomous unlock, macOS or Linux support, code signing, or automatic promotion.
 
 ## Publication gates
 
@@ -18,24 +18,24 @@
 | License | Root MIT license plus npm and Cargo metadata | PASS |
 | Demo | Synthetic-path GIF is at most 60 seconds and 5 MB, ends at `awaiting-promotion`, and passes frame review | PASS: 15 seconds, 4.96 MB, 1200×675, frame-reviewed; linked MP4 is 1920×1080 |
 | README and architecture | First screen carries name, fixed tagline, demo, and invariant; enforcement symbols map to code | PASS on RC branch |
-| Automated verification | Clean install and `npm run check` pass on Windows | PASS on 2026-08-09 |
-| Dependency audit | `npm audit` and `cargo audit` have no unresolved advisory | PASS for Windows RC; warning disposition recorded below |
+| Automated verification | Clean install and `npm run check` pass on Windows | PASS on the 2026-08-10 stable candidate |
+| Dependency audit | `npm audit` and `cargo audit` have no unresolved advisory | PASS for Windows v1.0; warning disposition recorded below |
 | Repository-size audit | Largest 20 historical objects classified; generated outputs removed from publishable history | PASS on rewritten private GitHub refs; removed paths are unreachable from every retained ref |
-| Packaged build | `npm run tauri build` produces an installer named for The Staff Room | PASS: clean candidate produced the unsigned `The Staff Room_1.0.0-rc.1_x64-setup.exe` installer |
+| Packaged build | `npm run tauri build` produces an installer named for The Staff Room | PASS: clean candidate produced the unsigned `The Staff Room_1.0.0_x64-setup.exe` installer |
 | Autonomous honesty | `AUTONOMOUS_ACCEPTANCE_COMPLETE` is `false`; README links the NOT ACCEPTED contract | PASS on RC branch |
 | Security reporting | GitHub private vulnerability reporting enabled | PASS: enabled and verified after the visibility transition on 2026-08-09 |
-| GitHub metadata | Fixed tagline description and topics `tauri`, `rust`, `ai-agents`, `developer-tools`, `local-first` | PASS on the private publication repository |
+| GitHub metadata | Fixed tagline description and topics `tauri`, `rust`, `ai-agents`, `developer-tools`, `local-first` | PASS on the public repository |
 
-The public repository advertises only `main` at commit `c0516cd`; it has no tags.
+At the RC publication point, the public repository advertised only `main` at commit `c0516cd` and had no tags. The stable release branch and tag are handled by the rollout steps below.
 
 ## `1.0.0` release gates
 
 | Gate | Required evidence | Status |
 | --- | --- | --- |
-| Human-gated acceptance | Every applicable observation in `V1_ACCEPTANCE.md` is recorded PASS and every unsupported provider-route cell is recorded N/A against the candidate | BLOCKED: the provider matrix remains INCOMPLETE in `V1_ACCEPTANCE.md` |
-| Stable version | npm, Cargo, Tauri, changelog, installer, and source tag all identify the accepted `1.0.0` candidate | PENDING until human-gated acceptance passes |
+| Human-gated acceptance | Every applicable observation in `V1_ACCEPTANCE.md` is recorded PASS and every unsupported provider-route cell is recorded N/A against the candidate | PASS on 2026-08-10 |
+| Stable version | npm, Cargo, Tauri, changelog, installer, and source tag all identify the accepted `1.0.0` candidate | READY: source and installer identify `1.0.0`; the public source tag awaits final release approval |
 
-The incomplete provider matrix blocks the stable tag, not publication of an explicitly labelled release candidate. The README and acceptance record disclose the outstanding evidence and do not claim accepted v1.0 status.
+The complete human-gated matrix permits the stable release. Autonomous Ship remains a separate fail-closed tier. The public source tag and release are intentionally withheld until the maintainer gives final release approval.
 
 ## History and repository-size audit
 
@@ -63,6 +63,18 @@ The exact candidate was assembled from base commit `ae03781981c4` plus the inten
 - Packages: the authenticated API token lacks `read:packages`, so the API check is UNVERIFIED. The directly inspected repository page reports no published packages, and the sole workflow has no package-publishing step. Recheck the public repository page immediately after the visibility transition.
 - Demo: PASS; README GIF is 1200×675 at 5 fps, 15 seconds, and 4,958,825 bytes. Its SHA-256 is `77B377FB30B3170629B901BD0AA5CD09044D13F7C59532490FA69EEAC74B03DD`. The linked MP4 remains 1920×1080 at 30 fps.
 - Installer: PASS; `The Staff Room_1.0.0-rc.1_x64-setup.exe`, 4,138,069 bytes, SHA-256 `917C03E2FA102DED7BF6940121188C26D4B84E40A3870B5E99469F99E2F57E69`, Authenticode status `NotSigned` as documented.
+
+## Stable verification record - 2026-08-10
+
+- Full gate: PASS; `npm run check` completed 28 frontend tests, the production build, design lint across 82 files, 75 Rust tests, and 89 visual and accessibility checks.
+- Strict Rust lint: PASS; `cargo clippy --all-targets --manifest-path src-tauri/Cargo.toml -- -D warnings` completed without findings.
+- Dependency audit: PASS; `npm audit` reported 0 vulnerabilities. `cargo audit --file src-tauri/Cargo.lock` reported 0 blocking advisories and the same 18 allowed transitive warnings: 16 unmaintained crates and two advisories outside the supported Windows target dependency tree.
+- Candidate privacy scan: PASS; Gitleaks scanned 223 publishable working-tree files, 12.48 MB, with no findings. Ignored Rust build output was excluded from the publishable-tree scan.
+- Human-gated acceptance: PASS; Ask, Quick Edit, the four paired Build/Review routes, all four connection probes, provider Build cancellation, Verify cancellation, Antigravity Review cancellation, app-close recovery, the two-attempt recovery limit, and promotion interruption were observed on synthetic repositories.
+- Staged stable-package revalidation: PASS. The process-custody build, a 4,143,689-byte installer with SHA-256 `62B8CDA33ED967851AFCFC6223BCB12BD71ABDA03EEDCD9DD9123AA29BC3D2F9`, passed fresh packaged probes for all four providers through the suspended, Job-owned launch path; Cursor also exercised Job-owned session preallocation, and no new agent process remained. After the preview catalogue, explicit-provider-routing, and recovery-message corrections, the full gate passed again. The final package installed successfully, passed a Codex probe, and visibly rejected an explicit unavailable `@cursor` Ship request without starting a run or falling back to ready Codex. The provider-launch implementation was unchanged between those two builds.
+- Provider versions: Codex `0.144.4`, Claude Code `2.1.221`, Cursor Agent `2026.08.04-aaa8809`, and Antigravity `1.1.11`.
+- Installer: PASS; `The Staff Room_1.0.0_x64-setup.exe`, 4,143,693 bytes, SHA-256 `F3DC6D656301377ABBF6BFF66611C2FF0DF0583FEE848E091382154297909538`, Authenticode status `NotSigned` as documented. Silent installation succeeded, the installed product reported `1.0.0`, and the packaged routing check passed.
+- Local custody: PASS; the three pre-acceptance SQLite files were restored byte-for-byte to their recorded SHA-256 values after the synthetic run matrix and final packaged probes.
 
 ## Public verification record - 2026-08-09
 
@@ -92,8 +104,8 @@ The exact candidate was assembled from base commit `ae03781981c4` plus the inten
 4. Completed 2026-08-09: publish the repository as the explicitly labelled `1.0.0-rc.1` source candidate without creating a stable tag or claiming accepted v1.0 status.
 5. Completed 2026-08-09: enable and verify private vulnerability reporting while retaining the fixed description, required topics, vulnerability alerts, and automatic security fixes.
 6. Completed 2026-08-09: review the public landing page and run the documented setup, full verification gate, integrity check, and privacy scans from a fresh anonymous clone.
-7. Complete packaged and opt-in live-provider acceptance against synthetic repositories.
-8. After the human acceptance matrix passes, change candidate versions from `1.0.0-rc.1` to `1.0.0`, rerun the full gate, and create the signed source tag.
+7. Completed 2026-08-10: packaged and opt-in live-provider acceptance passed against synthetic repositories.
+8. Completed locally 2026-08-10: changed candidate versions from `1.0.0-rc.1` to `1.0.0` and reran the full gate. Create the public source tag only after final release approval.
 9. Pin the repository in profile position 3, after `evalseal` and `tripwire`.
 
 ## Rollback

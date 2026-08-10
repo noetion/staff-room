@@ -1,14 +1,43 @@
 use crate::*;
 
+#[cfg(windows)]
+fn prepare_owned_provider_command(command: &mut Command) {
+    use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
+
+    // Suspending at creation closes the gap between process creation and Job
+    // Object assignment. The provider cannot spawn an unowned descendant before
+    // the coordinator has attached it to the kill-on-close job.
+    command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+}
+
+#[cfg(not(windows))]
+fn prepare_owned_provider_command(_command: &mut Command) {}
+
 pub(crate) async fn preallocate_cursor_session(executable: &Path) -> Result<String, String> {
-    let output = timeout(Duration::from_secs(15), {
-        let mut command = Command::new(executable);
-        hide_tokio_command_window(&mut command);
-        command.arg("create-chat").output()
-    })
-    .await
-    .map_err(|_| "Cursor chat creation timed out after 15 seconds.".to_owned())?
-    .map_err(|error| format!("Could not create a Cursor chat: {error}"))?;
+    let mut command = Command::new(executable);
+    hide_tokio_command_window(&mut command);
+    prepare_owned_provider_command(&mut command);
+    command
+        .arg("create-chat")
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not create a Cursor chat: {error}"))?;
+    #[cfg(windows)]
+    let _provider_job = match ProviderJob::attach_and_resume(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            kill_tree(&mut child).await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    };
+    let output = timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .map_err(|_| "Cursor chat creation timed out after 15 seconds.".to_owned())?
+        .map_err(|error| format!("Could not create a Cursor chat: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "Cursor could not create a chat: {}",
@@ -64,6 +93,149 @@ pub(crate) fn ensure_cursor_repository_has_head(repository: &Path) -> Result<(),
             "Cursor Agent requires the attached Git repository to have an initial commit. Create an initial commit in the repository, then retry."
                 .to_owned(),
         ),
+    }
+}
+
+/// Owns the complete provider process tree on Windows. Provider CLIs can spawn a
+/// worker and let their direct wrapper exit, so following only the original PID
+/// is not enough to guarantee cleanup. The job's close limit terminates every
+/// process still assigned to it when the provider invocation ends.
+#[cfg(windows)]
+struct ProviderJob(usize);
+
+#[cfg(windows)]
+impl ProviderJob {
+    fn attach_and_resume(child: &tokio::process::Child) -> Result<Self, String> {
+        let job = Self::attach(child)?;
+        Self::resume_primary_thread(child)?;
+        Ok(job)
+    }
+
+    fn attach(child: &tokio::process::Child) -> Result<Self, String> {
+        use windows_sys::Win32::{
+            Foundation::HANDLE,
+            System::JobObjects::{
+                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            },
+        };
+
+        let process = child.raw_handle().ok_or_else(|| {
+            "Provider exited before process ownership could be established.".to_owned()
+        })? as HANDLE;
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(format!(
+                "Could not create the provider process job: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let job = Self(handle as usize);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                std::ptr::addr_of!(limits).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(format!(
+                "Could not configure provider process cleanup: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if unsafe { AssignProcessToJobObject(handle, process) } == 0 {
+            return Err(format!(
+                "Could not take ownership of the provider process: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(job)
+    }
+
+    fn resume_primary_thread(child: &tokio::process::Child) -> Result<(), String> {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+            System::{
+                Diagnostics::ToolHelp::{
+                    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                    THREADENTRY32,
+                },
+                Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+            },
+        };
+
+        let process_id = child.id().ok_or_else(|| {
+            "Provider exited before its suspended thread could be resumed.".to_owned()
+        })?;
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(format!(
+                "Could not inspect the suspended provider thread: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let result = (|| {
+            let mut entry = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            if unsafe { Thread32First(snapshot, std::ptr::addr_of_mut!(entry)) } == 0 {
+                return Err(format!(
+                    "Could not enumerate the suspended provider thread: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            loop {
+                if entry.th32OwnerProcessID == process_id {
+                    let thread =
+                        unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                    if thread.is_null() {
+                        return Err(format!(
+                            "Could not open the suspended provider thread: {}",
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                    let resumed = unsafe { ResumeThread(thread) };
+                    unsafe {
+                        CloseHandle(thread);
+                    }
+                    if resumed == u32::MAX {
+                        return Err(format!(
+                            "Could not resume the owned provider process: {}",
+                            std::io::Error::last_os_error()
+                        ));
+                    }
+                    return Ok(());
+                }
+                if unsafe { Thread32Next(snapshot, std::ptr::addr_of_mut!(entry)) } == 0 {
+                    return Err(
+                        "Could not find the primary thread for the suspended provider process."
+                            .to_owned(),
+                    );
+                }
+            }
+        })();
+        unsafe {
+            CloseHandle(snapshot);
+        }
+        result
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProviderJob {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+
+        unsafe {
+            CloseHandle(self.0 as HANDLE);
+        }
     }
 }
 
@@ -215,11 +387,21 @@ pub(crate) async fn invoke_provider(
         })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    prepare_owned_provider_command(&mut command);
 
     let provider_started = Instant::now();
     let mut child = command
         .spawn()
         .map_err(|error| format!("Failed to start {}: {error}", provider_names(kind).0))?;
+    #[cfg(windows)]
+    let provider_job = match ProviderJob::attach_and_resume(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            kill_tree(&mut child).await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    };
     let process_start_ms = provider_started.elapsed().as_millis() as u64;
 
     if let Some(content) = stdin_prompt {
@@ -442,6 +624,11 @@ pub(crate) async fn invoke_provider(
         }
     };
 
+    // The direct wrapper has ended. Closing the job now removes any detached
+    // workers before log readers are joined or the managed worktree is cleaned.
+    #[cfg(windows)]
+    drop(provider_job);
+
     let (parsed_session, parsed_result, raw_stdout, actual_model, usage, first_output_ms) =
         stdout_task.await.map_err(|error| error.to_string())?;
     let raw_stderr = stderr_task.await.map_err(|error| error.to_string())?;
@@ -620,5 +807,60 @@ mod tests {
         let reason = provider_failure_reason("Cursor Agent", "the connection test", &run);
         assert!(reason.contains("sandbox is unavailable"));
         assert!(!reason.contains("No provider output"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn suspended_provider_job_owns_a_descendant_after_the_wrapper_exits() {
+        let directory =
+            std::env::temp_dir().join(format!("staff-room-provider-job-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let child_script = directory.join("child.ps1");
+        let spawned_marker = directory.join("spawned.txt");
+        let escaped = |path: &Path| path.to_string_lossy().replace('\'', "''");
+        let completed_marker = directory.join("completed.txt");
+        std::fs::write(
+            &child_script,
+            format!(
+                "Start-Sleep -Milliseconds 1200\nSet-Content -LiteralPath '{}' -Value completed\n",
+                escaped(&completed_marker)
+            ),
+        )
+        .expect("write descendant script");
+        let parent_script = format!(
+            "$child = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-File', '{}') -PassThru\nSet-Content -LiteralPath '{}' -Value $child.Id",
+            escaped(&child_script),
+            escaped(&spawned_marker)
+        );
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-Command", &parent_script])
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        prepare_owned_provider_command(&mut command);
+        let mut child = command.spawn().expect("spawn provider parent");
+        let job = ProviderJob::attach_and_resume(&child).expect("own and resume provider parent");
+
+        timeout(Duration::from_secs(5), async {
+            while !spawned_marker.exists() {
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("descendant was spawned");
+
+        timeout(Duration::from_secs(3), child.wait())
+            .await
+            .expect("provider wrapper exited")
+            .expect("wait for provider wrapper");
+        drop(job);
+        sleep(Duration::from_millis(1500)).await;
+
+        assert!(
+            !completed_marker.exists(),
+            "detached descendant survived the provider job"
+        );
+        std::fs::remove_dir_all(&directory).expect("remove test directory");
     }
 }

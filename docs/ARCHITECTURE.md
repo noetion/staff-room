@@ -55,7 +55,7 @@ Ship owns a state machine across Build, Verify, Review, optional bounded Revisio
 
 - `RuntimeState` owns active operations, cancellations, provider cache entries, voice capture, Ship runs, Quick Edits, and promotion locks for the application process.
 - SQLite owns durable project, run, message, event, provider-profile, and receipt state.
-- Each provider invocation owns one child process, output budget, idle timeout, total timeout, cancellation subscription, and artifact directory.
+- Each provider turn, including Cursor session preallocation, starts suspended and is assigned to a Windows Job Object before execution. The turn then owns that descendant process tree, plus its output budget, idle timeout, total timeout, cancellation subscription, and artifact directory.
 - Each Quick Edit or Ship run owns one managed isolation directory and its cleanup path.
 - Rust microphone capture owns the stream and temporary WAV. Cleanup runs on success, failure, silence, and timeout.
 
@@ -67,4 +67,4 @@ No provider credential is stored by The Staff Room. Authentication remains owned
 
 ## Deliberate limits
 
-The public v1 does not claim a sandbox for arbitrary verification commands, complete descendant-process ownership on every provider, environment allowlisting, signed binaries, cross-platform support, or autonomous operation. Those gaps are not hidden behind a broad "experimental" label; the autonomous requirements are enumerated in [AUTONOMOUS_ACCEPTANCE_CONTRACT.md](AUTONOMOUS_ACCEPTANCE_CONTRACT.md).
+The public v1 does not claim a sandbox or complete descendant-process ownership for arbitrary verification commands, environment allowlisting, signed binaries, cross-platform support, or autonomous operation. Those gaps are not hidden behind a broad "experimental" label; the autonomous requirements are enumerated in [AUTONOMOUS_ACCEPTANCE_CONTRACT.md](AUTONOMOUS_ACCEPTANCE_CONTRACT.md).

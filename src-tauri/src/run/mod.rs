@@ -10,6 +10,25 @@ pub(crate) use verification::*;
 
 use crate::*;
 
+pub(crate) fn next_reviewer_index(builder_index: usize, participant_count: usize) -> usize {
+    if participant_count > 1 {
+        (builder_index + 1) % participant_count
+    } else {
+        builder_index
+    }
+}
+
+pub(crate) fn recovery_has_ambiguous_repository_state(
+    state: &str,
+    stop_reason: Option<&str>,
+) -> bool {
+    state == "waiting"
+        && stop_reason.is_some_and(|reason| {
+            reason.starts_with("Promotion state unknown")
+                || reason.starts_with("Abandonment state unknown")
+        })
+}
+
 pub(crate) fn claim_run_for_recovery(
     database: &Database,
     request: &StartRunRequest,
@@ -88,6 +107,7 @@ pub(crate) async fn execute_room_run(
         Option<String>,
         Option<String>,
         u32,
+        Option<String>,
     );
     let existing = {
         let connection = database.0.lock().map_err(|error| error.to_string())?;
@@ -95,7 +115,7 @@ pub(crate) async fn execute_room_run(
             .query_row(
                 "SELECT objective, state, worktree_path, branch, base_head, base_branch,
                         snapshot_head, isolation_kind, workspace_fingerprint, writer,
-                        native_session_id, recovery_count
+                        native_session_id, recovery_count, stop_reason
                  FROM runs WHERE id = ?1 AND project_id = ?2",
                 params![request.run_id, request.project_id],
                 |row| {
@@ -112,6 +132,7 @@ pub(crate) async fn execute_room_run(
                         row.get(9)?,
                         row.get(10)?,
                         row.get::<_, i64>(11)?.max(0) as u32,
+                        row.get(12)?,
                     ))
                 },
             )
@@ -134,11 +155,11 @@ pub(crate) async fn execute_room_run(
     } else {
         ready[0]
     };
-    let reviewer = ready
+    let builder_index = ready
         .iter()
-        .find(|participant| participant.kind != builder.kind)
-        .copied()
-        .unwrap_or(builder);
+        .position(|participant| participant.kind == builder.kind)
+        .unwrap_or(0);
+    let reviewer = ready[next_reviewer_index(builder_index, ready.len())];
     let degraded_review = reviewer.kind == builder.kind;
     let builder_profile = provider_profile(database, &request.project_id, &builder.kind, "build")?;
     let reviewer_profile =
@@ -156,6 +177,7 @@ pub(crate) async fn execute_room_run(
         _,
         session,
         prior_recovery_count,
+        stop_reason,
     )) = existing
     {
         if stored_objective != request.objective {
@@ -165,6 +187,13 @@ pub(crate) async fn execute_room_run(
         if !matches!(state.as_str(), "waiting" | "failed" | "stopped") {
             runtime.cancellations.lock().await.remove(&request.run_id);
             return Err(format!("Run state `{state}` cannot be resumed."));
+        }
+        if recovery_has_ambiguous_repository_state(&state, stop_reason.as_deref()) {
+            runtime.cancellations.lock().await.remove(&request.run_id);
+            return Err(
+                "This run cannot be resumed because repository state is unknown. Inspect the attached repository, then abandon the preserved run after resolving it."
+                    .to_owned(),
+            );
         }
         if prior_recovery_count >= MAX_RECOVERY_ATTEMPTS {
             runtime.cancellations.lock().await.remove(&request.run_id);

@@ -2,6 +2,24 @@
 
 All notable changes to The Staff Room are recorded here. The project follows Semantic Versioning after the public `1.0.0` release.
 
+## [1.0.0] - 2026-08-10
+
+### Added
+
+- Completed packaged Windows acceptance for Ask, Quick Edit, human-gated Ship, cancellation, recovery, promotion interruption, and all supported provider routes.
+- Added Windows Job Object ownership for provider process trees, including detached descendants.
+
+### Changed
+
+- Made explicit Ship participant selection authoritative and rotated independent reviewers across Codex, Claude Code, Cursor Agent, and Antigravity.
+- Updated current Antigravity model discovery and headless review handling, and made Cursor's managed-worktree trust behavior explicit.
+- Prevented interrupted promotion or abandonment states from being offered as resumable, with matching renderer and Rust enforcement.
+- Promoted npm, Cargo, Tauri, and installer metadata from `1.0.0-rc.1` to `1.0.0`.
+
+### Release status
+
+The human-gated Windows v1 contract is accepted. Autonomous Ship remains locked and fail-closed under [its separate acceptance contract](docs/AUTONOMOUS_ACCEPTANCE_CONTRACT.md).
+
 ## [1.0.0-rc.1] - 2026-08-08
 
 ### Added

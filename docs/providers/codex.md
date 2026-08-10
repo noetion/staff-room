@@ -17,7 +17,7 @@
 - Session resume: `codex exec resume <session-id> -`
 - Build/revision policy: `--ask-for-approval never --sandbox workspace-write`
 - Review policy: `--ask-for-approval never --sandbox read-only`
-- Cancellation: terminate only the child process owned by the run
+- Cancellation: close the run-owned Windows Job Object so the direct process and every descendant terminate together
 
 The `never` approval policy returns denied escalation failures to the model instead of asking the user. The filesystem sandbox remains active. The Staff Room does not use `--dangerously-bypass-approvals-and-sandbox`.
 

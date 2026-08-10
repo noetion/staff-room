@@ -28,9 +28,12 @@ impl ProviderAdapter for Adapter {
             }
             .into(),
         ];
-        // The fixed probe remains in plan mode, but agy can perform a read before
-        // answering READY. Headless mode cannot prompt for that read permission.
-        if (!is_read_only(request.mode) && !review) || request.mode == super::Mode::Probe {
+        // Probe and Review remain in plan mode, but agy must read the attached
+        // workspace and headless mode cannot present that permission prompt.
+        // The sandbox, managed worktree, and review mutation guard remain active.
+        if (!is_read_only(request.mode) && !review)
+            || matches!(request.mode, super::Mode::Probe | super::Mode::Review)
+        {
             args.push("--dangerously-skip-permissions".into());
         }
         if let Some(model) = request.model {

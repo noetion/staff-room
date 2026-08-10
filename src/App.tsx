@@ -37,8 +37,9 @@ import {
   canUseChat,
   chatAgentFor,
   isRunnableParticipant,
+  shipAgentFor,
 } from "./lib/participants";
-import { asRunState, hydrateRun, shouldShowRunProgress } from "./lib/runs";
+import { asRunState, hydrateRun, isRunRecoverable, shouldShowRunProgress } from "./lib/runs";
 import {
   approveRunPromotion,
   allocateOperationId,
@@ -780,9 +781,10 @@ export function App() {
   ) {
     setUiError("");
 
-    const writer = environment.participants.find(
-      (participant) => participant.kind === requestedWriter && isRunnableParticipant(participant),
-    )?.kind;
+    // Preserve an explicit participant choice all the way to Rust. The native
+    // capability check must reject an unavailable agent visibly instead of the
+    // renderer silently falling back to the first runnable participant.
+    const writer = requestedWriter;
     let operationId: string = crypto.randomUUID();
     if (native) {
       try {
@@ -834,7 +836,7 @@ export function App() {
           kind: "status",
           sender: "system",
           body: "Preview mode shows the v1 interface but never starts provider CLIs.",
-          reason: "Launch the Tauri desktop app to create a managed worktree and run the autonomous route.",
+          reason: "Launch the Tauri desktop app to create a managed worktree and run human-gated Ship.",
           createdAt: new Date().toISOString(),
           runId: nextRun.id,
         },
@@ -863,7 +865,7 @@ export function App() {
           id: crypto.randomUUID(),
           kind: "error",
           sender: "system",
-          body: "The autonomous route could not start.",
+          body: "The Ship run could not start.",
           reason: detail,
           createdAt: new Date().toISOString(),
           runId: nextRun.id,
@@ -888,7 +890,7 @@ export function App() {
       await submitChat(true);
       return;
     }
-    await runShipObjective(text);
+    await runShipObjective(text, shipAgentFor(text, environment.participants));
   }
 
   async function submitChat(activeShip = false) {
@@ -1183,10 +1185,7 @@ export function App() {
   async function handleResume() {
     if (
       !native ||
-      !run.worktreePath ||
-      activeStates.includes(run.state) ||
-      run.state === "awaiting-promotion" ||
-      (run.recoveryCount ?? 0) >= 2
+      !isRunRecoverable(run)
     ) {
       return;
     }

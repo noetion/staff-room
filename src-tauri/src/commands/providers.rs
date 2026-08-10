@@ -839,7 +839,7 @@ async fn discover_codex_models(
     let discovery = async {
         stdin
             .write_all(
-                br#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"staff-room-model-refresh","title":"The Staff Room","version":"1.0.0-rc.1"},"capabilities":{"experimentalApi":true}}}
+                br#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"staff-room-model-refresh","title":"The Staff Room","version":"1.0.0"},"capabilities":{"experimentalApi":true}}}
 "#,
             )
             .await

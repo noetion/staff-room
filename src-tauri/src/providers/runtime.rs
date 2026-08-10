@@ -392,12 +392,13 @@ pub(crate) fn model_options(
         ),
         "antigravity" => (
             [
-                "Gemini 3.1 Pro (high)",
-                "Gemini 3.1 Pro (low)",
-                "Gemini 3 Flash",
-                "Claude Sonnet 4.6 (thinking)",
-                "Claude Opus 4.6 (thinking)",
-                "GPT-OSS-120b",
+                "gemini-3.1-pro-high",
+                "gemini-3.1-pro-low",
+                "gemini-3.5-flash-low",
+                "gemini-3.6-flash-low",
+                "claude-sonnet-4-6",
+                "claude-opus-4-6-thinking",
+                "gpt-oss-120b-medium",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -424,13 +425,15 @@ pub(crate) fn parse_provider_model_list(output: &str) -> Vec<String> {
             })
             .trim();
         let value = raw_value
-            .split_once(" - ")
+            .split_once('\t')
+            .or_else(|| raw_value.split_once(" - "))
             .map(|(identifier, _)| identifier.trim())
             .unwrap_or(raw_value);
         if value.is_empty()
             || value.ends_with(':')
             || value.eq_ignore_ascii_case("models")
             || value.eq_ignore_ascii_case("available models")
+            || value.eq_ignore_ascii_case("fetching available models...")
             || value.starts_with("Use ")
             || value.starts_with("Run ")
         {

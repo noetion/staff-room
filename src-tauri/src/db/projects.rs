@@ -407,7 +407,7 @@ pub(crate) fn reconcile_interrupted_runs(connection: &Connection) -> rusqlite::R
         "UPDATE runs
          SET state = 'waiting',
              current_owner = NULL,
-             stop_reason = 'Abandonment state unknown â€” confirm Abandon again to finish cleanup.',
+             stop_reason = 'Abandonment state unknown — confirm Abandon again to finish cleanup.',
              finished_at = CURRENT_TIMESTAMP
          WHERE state = 'abandoning'",
         [],

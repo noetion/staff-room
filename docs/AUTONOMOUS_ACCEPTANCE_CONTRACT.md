@@ -12,9 +12,9 @@ Autonomous mode is a separate product tier. Passing the human-gated v1 contract 
 | --- | --- | --- |
 | Provider capability proof | Versioned, repeatable proof for the exact installed CLI version and every mutating/read-only flag | Missing live versioned matrix |
 | Read-only review | Forced-write fixtures prove every reviewer is denied mutation before provider execution, not merely detected afterward | Partial: read-only modes and post-run mutation guard exist |
-| Process ownership | Entire provider and verification process trees terminate on Stop, timeout, crash, and app exit | Missing Windows Job Object or equivalent ownership |
+| Process ownership | Entire provider and verification process trees terminate on Stop, timeout, crash, and app exit | Partial: Windows Job Objects now own provider trees; verification process-tree ownership remains missing |
 | Operation registry | Every active operation is typed, project-bound, collision-safe, and cleaned on all exit paths | Partial: Rust-issued one-time IDs and project-bound cancellation exist |
-| Repository trust | No unconditional provider trust; managed Git trust is scoped to the operation | Partial: Cursor unconditional `--trust` removed |
+| Repository trust | No unconditional provider trust; managed Git trust is scoped to the operation | Partial: Cursor requires `--trust` for canonicalized attached repositories and managed isolation; write access remains isolated, but provider trust is not yet independently scoped |
 | Hook suppression | Coordinator Git actions cannot run repository hooks or user-defined filters unexpectedly | Missing complete proof |
 | Environment minimization | Child processes receive an explicit allowlist rather than the full parent environment | Missing |
 | Output bounds | stdout, stderr, structured events, logs, and final responses are independently capped under hostile output | Partial |
@@ -24,8 +24,8 @@ Autonomous mode is a separate product tier. Passing the human-gated v1 contract 
 | Verification policy | Commands are approved or sandboxed, bounded, and cannot escape the managed worktree | Missing |
 | Destructive cleanup | Abandon, Quick Edit cleanup, and interrupted promotion are idempotent and path-contained | Partial |
 | Deterministic coordinator E2E | Fake CLIs exercise success, malformed output, huge output, timeout, cancellation, revision, review, and promotion races | Missing |
-| Packaged Windows E2E | Signed candidate passes attach, restart, cancellation, recovery, and promotion tests | Missing |
-| Live provider smoke | Current Codex, Claude, Cursor, and Antigravity versions pass their supported route matrix | Missing |
+| Packaged Windows E2E | Signed candidate passes attach, restart, cancellation, recovery, and promotion tests | Partial: unsigned human-gated v1 passed; signed autonomous coverage remains missing |
+| Live provider smoke | Current Codex, Claude, Cursor, and Antigravity versions pass their supported route matrix | Partial: human-gated supported routes passed; autonomous-mode proof remains missing |
 | Original acceptance matrix | Every applicable autonomous row has dated evidence; no silent scope exclusions | Missing |
 
 ## Unlock procedure

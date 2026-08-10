@@ -16,7 +16,10 @@ fn quick_edit_apply_requires_the_exact_reviewed_diff() {
 
 #[test]
 fn quick_edit_patch_serialization_terminates_the_last_hunk() {
-    assert_eq!(serialize_git_patch("diff --git a/a b/a"), "diff --git a/a b/a\n");
+    assert_eq!(
+        serialize_git_patch("diff --git a/a b/a"),
+        "diff --git a/a b/a\n"
+    );
     assert_eq!(
         serialize_git_patch("diff --git a/a b/a\n"),
         "diff --git a/a b/a\n"
@@ -367,6 +370,7 @@ fn cursor_command_passes_the_selected_compound_model_through_unchanged() {
         "--stream-partial-output".to_owned(),
         "--workspace".to_owned(),
         "C:/worktree".to_owned(),
+        "--trust".to_owned(),
     ];
     #[cfg(not(windows))]
     expected.extend(["--sandbox".to_owned(), "enabled".to_owned()]);
@@ -420,7 +424,7 @@ fn cursor_unavailable_model_extracts_the_actionable_identifier() {
 }
 
 #[test]
-fn antigravity_review_uses_plan_without_permission_bypass() {
+fn antigravity_review_uses_plan_with_headless_read_approval() {
     let request = TurnRequest {
         mode: ProviderMode::Review,
         phase: "review",
@@ -439,7 +443,7 @@ fn antigravity_review_uses_plan_without_permission_bypass() {
         .args
         .windows(2)
         .any(|pair| pair == ["--mode", "plan"]));
-    assert!(!command
+    assert!(command
         .args
         .iter()
         .any(|arg| arg == "--dangerously-skip-permissions"));
@@ -496,14 +500,12 @@ fn every_review_adapter_is_prepared_read_only() {
             }
             "cursor" => {
                 assert!(joined.contains("--mode ask"));
-                assert!(!command
-                    .args
-                    .iter()
-                    .any(|value| value == "--force" || value == "--trust"));
+                assert!(command.args.iter().any(|value| value == "--trust"));
+                assert!(!command.args.iter().any(|value| value == "--force"));
             }
             "antigravity" => {
                 assert!(joined.contains("--mode plan"));
-                assert!(!joined.contains("--dangerously-skip-permissions"));
+                assert!(joined.contains("--dangerously-skip-permissions"));
             }
             _ => unreachable!(),
         }
@@ -542,13 +544,22 @@ fn every_provider_exposes_exact_models_and_truthful_effort_options() {
     assert!(claude_models.contains(&"claude-opus-4-8".to_owned()));
     assert!(claude_models.contains(&"claude-opus-5".to_owned()));
     assert!(cursor_models.is_empty());
-    assert!(antigravity_models.contains(&"Gemini 3.1 Pro (high)".to_owned()));
+    assert!(antigravity_models.contains(&"gemini-3.1-pro-high".to_owned()));
     assert!(codex_effort.contains(&"xhigh".to_owned()));
     assert!(codex_effort.contains(&"max".to_owned()));
     assert!(codex_effort.contains(&"ultra".to_owned()));
     assert!(claude_effort.contains(&"max".to_owned()));
     assert!(cursor_effort.is_empty());
     assert_eq!(antigravity_effort, vec!["low", "medium", "high"]);
+}
+
+#[test]
+fn reviewer_selection_rotates_through_the_ready_provider_order() {
+    assert_eq!(next_reviewer_index(0, 4), 1);
+    assert_eq!(next_reviewer_index(1, 4), 2);
+    assert_eq!(next_reviewer_index(2, 4), 3);
+    assert_eq!(next_reviewer_index(3, 4), 0);
+    assert_eq!(next_reviewer_index(0, 1), 0);
 }
 
 #[test]

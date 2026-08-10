@@ -50,7 +50,7 @@ In Settings, for all four providers and all three routes:
 | Codex | `gpt-5.6-luna` | low |
 | Claude | `fable` | low |
 | Cursor | cheapest from `Models` | low |
-| Antigravity | `Gemini 3 Flash` | low |
+| Antigravity | `gemini-3.5-flash-low` | low |
 
 No acceptance criterion measures answer quality. Restore your real models afterwards.
 

@@ -2,6 +2,7 @@ import { Fragment, memo, type ReactNode } from "react";
 import { agentNames, type AgentKind, type ExecutionReceipt, type RoomMessage, type Run } from "../../model";
 import { initials, parseTimestamp, relativeTime } from "../../lib/format";
 import type { MessageGroup as Group } from "../../lib/grouping";
+import { isRunRecoverable } from "../../lib/runs";
 import { Monogram } from "../primitives";
 import { DeliveryLine } from "./DeliveryLine";
 import { MessageBubble, type MessagePosition, type MessageSide } from "./MessageBubble";
@@ -78,8 +79,7 @@ function MessageGroupComponent({
           : "sent";
   const recoverable =
     run.id === last.runId &&
-    Boolean(run.worktreePath) &&
-    (run.recoveryCount ?? 0) < 2;
+    isRunRecoverable(run);
 
   return (
     <article className="message-group" data-side={side} aria-labelledby={labelId}>

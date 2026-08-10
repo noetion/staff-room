@@ -1,6 +1,7 @@
 import { Check, CircleStop, History, X } from "lucide-react";
 import type { Run, RunState } from "../../model";
 import { initials } from "../../lib/format";
+import { isRunRecoverable } from "../../lib/runs";
 import { Chip } from "../primitives";
 import { LiveActivityStrip, type LiveActivityItem } from "./LiveActivityStrip";
 
@@ -32,10 +33,7 @@ export function RunProgressCard({
 }) {
   const running = activeStates.includes(run.state);
   const awaitingPromotion = run.state === "awaiting-promotion";
-  const recoverable =
-    Boolean(run.worktreePath) &&
-    ["waiting", "failed", "stopped"].includes(run.state) &&
-    (run.recoveryCount ?? 0) < 2;
+  const recoverable = isRunRecoverable(run);
   const abandonable =
     Boolean(run.worktreePath) &&
     ["awaiting-promotion", "waiting", "failed", "stopped"].includes(run.state);

@@ -328,13 +328,16 @@ fn antigravity_probe_includes_the_cli_installer_location() {
 #[test]
 fn model_discovery_keeps_selectable_lines_and_skips_headings() {
     let models = parse_provider_model_list(
-        "Available models:\n1. Gemini 3.1 Pro (High)\n2. Gemini 3.1 Flash\nUse /model to choose\n",
+        "Fetching available models...\n\
+         gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n\
+         gemini-3.5-flash-low\tGemini 3.5 Flash (Low)\n\
+         Use /model to choose\n",
     );
     assert_eq!(
         models,
         vec![
-            "Gemini 3.1 Flash".to_owned(),
-            "Gemini 3.1 Pro (High)".to_owned(),
+            "gemini-3.1-pro-high".to_owned(),
+            "gemini-3.5-flash-low".to_owned(),
         ]
     );
 }

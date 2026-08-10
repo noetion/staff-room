@@ -4,13 +4,13 @@ The roadmap focuses on strengthening the human-gated workflow and documenting th
 
 ## Public v1.0
 
-- Complete packaged Windows acceptance for the human-gated Ask, Quick Edit, Ship, migration, and local voice flows.
-- Validate the supported route matrix against current installed Claude Code, Codex, Cursor, and Antigravity versions.
-- Publish source, reproducible verification evidence, and the unsigned-installer caveat.
+- Packaged Windows acceptance is complete for the applicable human-gated Ask, Quick Edit, Ship, migration, cancellation, recovery, and promotion flows.
+- The supported route matrix passed against the recorded Codex, Claude Code, Cursor Agent, and Antigravity versions.
+- Source, reproducible verification evidence, and the unsigned-installer caveat are published.
 
 ## Human-gated hardening
 
-- Own complete provider process trees during cancellation, timeout, crash, and application exit.
+- Extend Windows process-tree ownership from providers to verification commands.
 - Minimize child-process environments and make verification-command authority explicit.
 - Extend deterministic hostile-provider fixtures for malformed, oversized, silent, and racing behavior.
 - Persist promotion leases so restart behavior is as explicit as in-process behavior.

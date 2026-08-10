@@ -220,8 +220,11 @@ fn abandonment_removes_untracked_verification_artifacts() {
     let managed_root = root.join("managed");
     let isolation = create_isolation_at_root(&repository, "abandon-dirty-test", &managed_root)
         .expect("create isolation");
-    std::fs::write(isolation.worktree.join("generated.lock"), "verification output\n")
-        .expect("write untracked verification artifact");
+    std::fs::write(
+        isolation.worktree.join("generated.lock"),
+        "verification output\n",
+    )
+    .expect("write untracked verification artifact");
 
     assert!(discard_isolation(&repository, &isolation, &managed_root).is_none());
     assert!(!isolation.worktree.exists());
@@ -317,8 +320,11 @@ fn clean_checkout_ship_still_fast_forwards_the_verified_branch() {
     std::fs::write(isolation.worktree.join("plan.md"), "agent change\n")
         .expect("write agent change");
     commit_managed_changes(&isolation.worktree, "Update plan").expect("commit agent change");
-    std::fs::write(isolation.worktree.join("generated.lock"), "verification output\n")
-        .expect("write untracked verification artifact");
+    std::fs::write(
+        isolation.worktree.join("generated.lock"),
+        "verification output\n",
+    )
+    .expect("write untracked verification artifact");
     let promotion = promote_worktree(&repository, &isolation, &managed_root)
         .expect("fast-forward verified branch");
 
@@ -461,7 +467,10 @@ fn interrupted_runs_become_recoverable_on_restart() {
         )
         .expect("read promoting run");
     assert_eq!(promoting.0, "waiting");
-    assert!(promoting.1.contains("Promotion state unknown"));
+    assert_eq!(
+        promoting.1,
+        "Promotion state unknown — inspect the repository before continuing."
+    );
     let abandoning: (String, String) = connection
         .query_row(
             "SELECT state, stop_reason FROM runs WHERE id = 'run-3'",
@@ -470,7 +479,26 @@ fn interrupted_runs_become_recoverable_on_restart() {
         )
         .expect("read abandoning run");
     assert_eq!(abandoning.0, "waiting");
-    assert!(abandoning.1.contains("confirm Abandon again"));
+    assert_eq!(
+        abandoning.1,
+        "Abandonment state unknown — confirm Abandon again to finish cleanup."
+    );
+}
+
+#[test]
+fn ambiguous_repository_transitions_cannot_be_resumed() {
+    assert!(recovery_has_ambiguous_repository_state(
+        "waiting",
+        Some("Promotion state unknown — inspect the repository before continuing.")
+    ));
+    assert!(recovery_has_ambiguous_repository_state(
+        "waiting",
+        Some("Abandonment state unknown — confirm Abandon again to finish cleanup.")
+    ));
+    assert!(!recovery_has_ambiguous_repository_state(
+        "stopped",
+        Some("The managed worktree was preserved for recovery.")
+    ));
 }
 
 #[test]

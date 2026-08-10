@@ -1,6 +1,6 @@
 [package]
 name = "staff-room"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 description = "A local-first staff room for coding agents where the user decides what ships"
 authors = ["Jonathan Asare"]
 license = "MIT"
@@ -26,3 +26,12 @@ rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 tokio = { version = "1", features = ["process", "io-util", "sync", "macros", "rt-multi-thread", "time"] }
 uuid = { version = "1", features = ["v4"] }
 which = "8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
