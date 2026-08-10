@@ -1,6 +1,6 @@
 # phase-a.ps1 - The Staff Room acceptance: setup S1-S3 + Phase A
 #
-#   .\phase-a.ps1
+#   .\scripts\phase-a.ps1
 #
 # Automates what a machine can check, prompts for what needs eyes,
 # and writes docs/V1_ACCEPTANCE_PHASE_A.md.
@@ -14,7 +14,7 @@ param(
 
 $ErrorActionPreference = "Continue"
 
-$repo   = Split-Path -Parent $PSCommandPath
+$repo   = Split-Path -Parent $PSScriptRoot
 $fix    = [System.IO.Path]::GetFullPath($FixturePath)
 $out    = Join-Path $repo "docs\V1_ACCEPTANCE_PHASE_A.md"
 $rows   = @()

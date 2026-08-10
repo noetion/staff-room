@@ -2,6 +2,14 @@
 
 All notable changes to The Staff Room are recorded here. The project follows Semantic Versioning after the public `1.0.0` release.
 
+## [Unreleased]
+
+### Documentation
+
+- Finalized the public `1.0.0` release record with the published tag, installer checksum, hosted CI, and anonymous-clone verification.
+- Clarified that the bundled `autonomous-ship` skill can only propose the human-gated Ship route and cannot enable autonomous promotion.
+- Moved the Phase A acceptance helper into `scripts/` and updated its documented command.
+
 ## [1.0.0] - 2026-08-10
 
 ### Added

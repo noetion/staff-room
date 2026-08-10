@@ -84,7 +84,7 @@ Do all of these before spending anything.
 Seed 500 messages without a provider only after the fixture is attached. Close The Staff Room first, then use the helper's explicit opt-in. It resolves the exact fixture repository path and refuses to insert into any other project:
 
 ```powershell
-.\phase-a.ps1 -SkipFixture -FixturePath $fix -SeedMessages
+.\scripts\phase-a.ps1 -SkipFixture -FixturePath $fix -SeedMessages
 ```
 
 **Stop here if Phase A fails.** Nothing downstream is worth paying for until the
@@ -134,7 +134,7 @@ This single run should settle:
 
 | # | Check | Pass when |
 |---|---|---|
-| 11 | Unattended Ship end to end | Completes with no input |
+| 11 | Human-gated Ship pipeline end to end | Build, verification, and review complete without mid-run input; promotion still requires human confirmation |
 | 12 | Empty verification cannot promote | Already PASS by test; confirm the fixture's real `npm test` ran |
 | 13 | Independent review | Reviewer differs from builder, not labelled degraded |
 | 9 | Packet-byte savings | Revision and final-review `context_bytes` well below build |

@@ -2,7 +2,7 @@
 
 **Target outcome:** publish `jonathanjasare/staff-room` as a source-first human-gated Windows v1.0 whose safety claims are reproducible and traceable to Rust enforcement.
 
-**Current candidate:** `1.0.0`
+**Current release:** `1.0.0`
 
 **Non-goals:** new product features, autonomous unlock, macOS or Linux support, code signing, or automatic promotion.
 
@@ -10,19 +10,19 @@
 
 | Gate | Required evidence | Status |
 | --- | --- | --- |
-| Full-history secrets and privacy scan | `gitleaks git --redact` has no unresolved findings; generated history containing local paths is removed or explicitly approved | PASS on the new private `staff-room` repository and a fresh direct clone |
-| Repository identity | Publication repository is `jonathanjasare/staff-room`; the original `rooms` repository remains private | PASS: new private repository created and verified |
+| Full-history secrets and privacy scan | `gitleaks git --redact` has no unresolved findings; generated history containing local paths is removed or explicitly approved | PASS on the clean public `staff-room` history and a fresh anonymous `v1.0.0` clone |
+| Repository identity | Publication repository is `jonathanjasare/staff-room`; the original `rooms` repository remains private | PASS: publication repository created from the clean graph and now public; `rooms` remains private |
 | GitHub server-side history | Publish the clean graph to a new repository so old PR, fork, Actions, and cached-object state from `rooms` cannot become public | PASS: only the clean graph was pushed to `staff-room` |
-| Product rename | Case-insensitive search leaves only documented legacy migration identifiers and changelog history | PASS on RC branch |
+| Product rename | Case-insensitive search leaves only documented legacy migration identifiers and changelog history | PASS on the stable release |
 | Data migration | Tests prove the old SQLite database and voice assets are copied, integrity-checked, and not deleted | PASS: 2 focused migration tests plus aggregate Rust gate |
 | License | Root MIT license plus npm and Cargo metadata | PASS |
 | Demo | Synthetic-path GIF is at most 60 seconds and 5 MB, ends at `awaiting-promotion`, and passes frame review | PASS: 15 seconds, 4.96 MB, 1200×675, frame-reviewed; linked MP4 is 1920×1080 |
-| README and architecture | First screen carries name, fixed tagline, demo, and invariant; enforcement symbols map to code | PASS on RC branch |
+| README and architecture | First screen carries name, fixed tagline, demo, and invariant; enforcement symbols map to code | PASS on the stable release |
 | Automated verification | Clean install and `npm run check` pass on Windows | PASS on the 2026-08-10 stable candidate |
 | Dependency audit | `npm audit` and `cargo audit` have no unresolved advisory | PASS for Windows v1.0; warning disposition recorded below |
 | Repository-size audit | Largest 20 historical objects classified; generated outputs removed from publishable history | PASS on rewritten private GitHub refs; removed paths are unreachable from every retained ref |
 | Packaged build | `npm run bundle:windows` produces an installer named for The Staff Room and rejects builder-local paths in the compiled executable | PASS: clean candidate produced the unsigned installer and its compiled executable passed the path scan |
-| Autonomous honesty | `AUTONOMOUS_ACCEPTANCE_COMPLETE` is `false`; README links the NOT ACCEPTED contract | PASS on RC branch |
+| Autonomous honesty | `AUTONOMOUS_ACCEPTANCE_COMPLETE` is `false`; README links the NOT ACCEPTED contract | PASS on the stable release |
 | Security reporting | GitHub private vulnerability reporting enabled | PASS: enabled and verified after the visibility transition on 2026-08-09 |
 | GitHub metadata | Fixed tagline description and topics `tauri`, `rust`, `ai-agents`, `developer-tools`, `local-first` | PASS on the public repository |
 
@@ -33,9 +33,9 @@ At the RC publication point, the public repository advertised only `main` at com
 | Gate | Required evidence | Status |
 | --- | --- | --- |
 | Human-gated acceptance | Every applicable observation in `V1_ACCEPTANCE.md` is recorded PASS and every unsupported provider-route cell is recorded N/A against the candidate | PASS on 2026-08-10 |
-| Stable version | npm, Cargo, Tauri, changelog, installer, and source tag all identify the accepted `1.0.0` candidate | READY: source and installer identify `1.0.0`; the public source tag awaits final release approval |
+| Stable version | npm, Cargo, Tauri, changelog, installer, and source tag all identify the accepted `1.0.0` candidate | PASS: annotated tag `v1.0.0`, release assets, and commit `0f7306b338e1` identify the accepted `1.0.0` release |
 
-The complete human-gated matrix permits the stable release. Autonomous Ship remains a separate fail-closed tier. The public source tag and release are intentionally withheld until the maintainer gives final release approval.
+The complete human-gated matrix passed and the stable release was published on 2026-08-10. Autonomous Ship remains a separate fail-closed tier and does not inherit the human-gated verdict.
 
 ## History and repository-size audit
 
@@ -77,6 +77,17 @@ The exact candidate was assembled from base commit `ae03781981c4` plus the inten
 - Publication installer: PASS; the exact fresh-clone candidate ran `npm run bundle:windows` from empty build outputs and produced `The Staff Room_1.0.0_x64-setup.exe`, 4,143,791 bytes, SHA-256 `74B01B0C2102A3AC8CEDB9E22A53B97F9DD9793A0DEE417362D8E89D84FCD333`, ProductVersion `1.0.0`, and Authenticode status `NotSigned`. The release builder remapped local Rust source roots, stripped native symbols, and found no repository, user-profile, Cargo-home, or Rustup-home path in the compiled executable. Silent installation returned success; the installed payload reported `1.0.0`, contained none of the audited private markers, and left the three personal SQLite custody files byte-identical. Tauri's NSIS bundle-type resource patch changes the installed executable hash from the pre-bundle binary, so the installer checksum is the distribution identity. Runtime source is unchanged from the packaged acceptance installer; the later source-only change records this evidence.
 - Local custody: PASS; the three pre-acceptance SQLite files were restored byte-for-byte to their recorded SHA-256 values after the synthetic run matrix and final packaged probes.
 
+## Stable publication record - 2026-08-10
+
+- Source identity: PASS; `main`, `release/v1.0.0`, and annotated tag `v1.0.0` resolved to commit [`0f7306b338e1`](https://github.com/jonathanjasare/staff-room/commit/0f7306b338e12051f2fd96ec039e3dce62ac212e) at publication.
+- Hosted verification: PASS; the [release-branch](https://github.com/jonathanjasare/staff-room/actions/runs/31398342021), [main](https://github.com/jonathanjasare/staff-room/actions/runs/31398944525), and [tag](https://github.com/jonathanjasare/staff-room/actions/runs/31400093178) CI runs completed successfully on the same commit.
+- GitHub Release: PASS; [The Staff Room 1.0.0](https://github.com/jonathanjasare/staff-room/releases/tag/v1.0.0) was published as the latest non-prerelease release with exactly two assets.
+- Public installer: PASS; `The.Staff.Room_1.0.0_x64-setup.exe` is 4,143,791 bytes with GitHub digest and independently downloaded SHA-256 `74B01B0C2102A3AC8CEDB9E22A53B97F9DD9793A0DEE417362D8E89D84FCD333`, ProductVersion `1.0.0`, and Authenticode status `NotSigned`.
+- Checksum companion: PASS; `SHA256SUMS.txt` names the normalized public installer filename and contains the same SHA-256.
+- Anonymous outsider verification: PASS; a credential-free clone of `v1.0.0` resolved to the exact release commit. Clean `npm ci` reported 0 vulnerabilities, and `npm run check` passed 28 frontend tests, the production build, design lint across 82 files, 75 Rust tests, and 89 visual and accessibility checks.
+- Public surfaces: PASS; unauthenticated API checks identified `v1.0.0` as the latest release and found zero Actions artifacts and zero deployments. The repository was already pinned third on the maintainer profile, with Tripwire and EvalSeal ahead of it.
+- Durable summary: [the concise `1.0.0` release record](releases/1.0.0.md) binds the public claims, boundaries, assets, and verification evidence.
+
 ## Public verification record - 2026-08-09
 
 - Visibility and security: PASS; the repository is public, vulnerability alerts and automatic security fixes remain enabled, and private vulnerability reporting is enabled.
@@ -106,9 +117,11 @@ The exact candidate was assembled from base commit `ae03781981c4` plus the inten
 5. Completed 2026-08-09: enable and verify private vulnerability reporting while retaining the fixed description, required topics, vulnerability alerts, and automatic security fixes.
 6. Completed 2026-08-09: review the public landing page and run the documented setup, full verification gate, integrity check, and privacy scans from a fresh anonymous clone.
 7. Completed 2026-08-10: packaged and opt-in live-provider acceptance passed against synthetic repositories.
-8. Completed locally 2026-08-10: changed candidate versions from `1.0.0-rc.1` to `1.0.0` and reran the full gate. Create the public source tag only after final release approval.
-9. Completed locally 2026-08-10: added the fail-closed release builder, rebuilt the publication installer with remapped local paths, and verified the exact version, signing status, checksum, and compiled-binary path scan.
-10. Pin the repository in profile position 3, after `evalseal` and `tripwire`.
+8. Completed 2026-08-10: changed candidate versions from `1.0.0-rc.1` to `1.0.0`, reran the full gate, and obtained final release approval.
+9. Completed 2026-08-10: added the fail-closed release builder, rebuilt the publication installer with remapped local paths, and verified the exact version, signing status, checksum, and compiled-binary path scan.
+10. Completed 2026-08-10: pushed the accepted commit through successful release-branch, `main`, and annotated-tag CI gates, then published the GitHub Release with the installer and checksum companion.
+11. Completed 2026-08-10: downloaded both public assets without authentication, verified their bytes and metadata, and passed the full gate from a fresh credential-free clone of `v1.0.0`.
+12. Completed 2026-08-10: verified that the repository was pinned in profile position 3, with Tripwire and EvalSeal ahead of it.
 
 ## Rollback
 
@@ -116,4 +129,4 @@ If the public clone, history scan, metadata, or README differs from the reviewed
 
 ## Release record
 
-Record exact command versions, exit status, advisory decisions, installer filename and hash, manual observation date, provider versions, rewritten commit ID, public commit ID, and final tag here or in an attached release artifact. Do not record credentials, private paths, or provider transcripts.
+The exact command results, advisory decisions, installer identity, manual observation date, provider versions, public commit, final tag, and outsider verification are recorded above and in [the concise `1.0.0` release record](releases/1.0.0.md). Credentials, private paths, and provider transcripts are intentionally excluded.

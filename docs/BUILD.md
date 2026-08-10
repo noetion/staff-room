@@ -67,4 +67,4 @@ The installer is unsigned. Windows SmartScreen may display an unknown-publisher 
 
 Automated checks cannot prove microphone permission behavior, installed CLI compatibility, or the final human promotion flow. Use a synthetic fixture repository and record every observation in [V1_ACCEPTANCE_SESSION.md](V1_ACCEPTANCE_SESSION.md). Use only synthetic code and data for release capture.
 
-Before changing repository visibility, complete every publication gate in [PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md). The separate human acceptance matrix must also pass before creating the `1.0.0` tag.
+Before publishing a stable release, complete every applicable publication gate in [PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md). The separate human acceptance matrix must also pass before creating its stable tag.
