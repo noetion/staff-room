@@ -1,6 +1,6 @@
 # The Staff Room
 
-*A local-first staff room for your coding agents: they do the work, you decide what ships.*
+*A local-first Windows desktop staff room for your coding agents: they do the work, you decide what ships.*
 
 **Safety invariant:** no agent write reaches the attached checkout until the user presses Apply or confirms Promote.
 
