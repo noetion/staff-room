@@ -548,19 +548,25 @@ pub(crate) fn participants_with_connections(
         .collect()
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod probe_tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn fake_cli_detection_separates_presence_contract_and_connection() {
         let root = std::env::temp_dir().join(format!("staff-room-probe-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let executable = root.join("codex");
+        let executable = root.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
         // Synthetic CLI fixture, never an authenticated provider call.
-        let script = "#!/bin/sh\ncase \"$*\" in\n'--version') echo 'codex-cli 0.144.4';;\n'--help') echo 'exec --ask-for-approval never --sandbox read-only workspace-write --cd --config --model';;\n'exec --help') echo 'resume --json --output-last-message';;\n'exec resume --help') echo '--json --output-last-message';;\n*) exit 91;;\nesac\n";
+        let script = if cfg!(windows) {
+            "@echo off\r\nif \"%*\"==\"--version\" (echo codex-cli 0.144.4& exit /b 0)\r\nif \"%*\"==\"--help\" (echo exec --ask-for-approval never --sandbox read-only workspace-write --cd --config --model& exit /b 0)\r\nif \"%*\"==\"exec --help\" (echo resume --json --output-last-message& exit /b 0)\r\nif \"%*\"==\"exec resume --help\" (echo --json --output-last-message& exit /b 0)\r\nexit /b 91\r\n"
+        } else {
+            "#!/bin/sh\ncase \"$*\" in\n'--version') echo 'codex-cli 0.144.4';;\n'--help') echo 'exec --ask-for-approval never --sandbox read-only workspace-write --cd --config --model';;\n'exec --help') echo 'resume --json --output-last-message';;\n'exec resume --help') echo '--json --output-last-message';;\n*) exit 91;;\nesac\n"
+        };
         std::fs::write(&executable, script).unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let participant = probe_provider_at("codex", Some(executable.clone()));
         assert!(participant.installed);
@@ -570,7 +576,10 @@ mod probe_tests {
         assert_eq!(detected_connection(&participant).status, "sign-in-required");
         // A changed resume contract must invalidate all execution even when
         // root help, version, and a previous participant remain valid.
-        std::fs::write(&executable, script.replace("echo '--json --output-last-message'", "echo '--json-renamed --output-last-message'")).unwrap();
+        let changed_script = script
+            .replace("echo '--json --output-last-message'", "echo '--json-renamed --output-last-message'")
+            .replace("echo --json --output-last-message&", "echo --json-renamed --output-last-message&");
+        std::fs::write(&executable, changed_script).unwrap();
         let changed = probe_provider_at("codex", Some(executable));
         for mode in [ProviderMode::Ask, ProviderMode::Probe, ProviderMode::Review, ProviderMode::QuickEdit, ProviderMode::Ship] {
             assert!(require_provider_mode("codex", &changed.capabilities, mode).is_err());
