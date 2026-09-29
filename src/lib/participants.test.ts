@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentKind, Participant } from "../model";
-import { chatAgentFor, shipAgentFor } from "./participants";
+import { canUseChat, canUseQuickEdit, capabilityChips, chatAgentFor, shipAgentFor } from "./participants";
 
 function participant(kind: AgentKind): Participant {
   return {
@@ -22,6 +22,18 @@ const participants = [
 ];
 
 describe("participant routing", () => {
+  it("keeps read-only providers selectable for Ask but rejects Quick Edit", () => {
+    const cursor = participant("cursor");
+    cursor.capabilities.writeMode = false;
+    expect(canUseChat(cursor)).toBe(true);
+    expect(canUseQuickEdit(cursor)).toBe(false);
+    expect(capabilityChips(cursor)).toContain("Quick Edit and Ship writes unavailable");
+    const codex = participant("codex");
+    codex.capabilities.writeMode = true;
+    expect(canUseQuickEdit(codex)).toBe(true);
+    codex.capabilities.nonInteractiveTurn = false;
+    expect(canUseQuickEdit(codex)).toBe(false);
+  });
   it("honours the visible Ship provider selection", () => {
     expect(shipAgentFor("@claude implement it", participants)).toBe("claude");
     expect(shipAgentFor("@cursor implement it", participants)).toBe("cursor");

@@ -20,6 +20,8 @@ flowchart TB
 
 The renderer never supplies an authoritative repository path to a mutating command. It supplies a project ID and a Rust-issued operation ID. The coordinator reloads the stored project, canonicalizes its Git root, verifies the derived project identity, consumes the operation lease, and then chooses the relevant isolation and provider mode.
 
+This is application authority, not containment of an arbitrary same-user executable. A worktree does not stop absolute-path writes to another checkout. Provider command compatibility, the provider's filesystem sandbox, native authentication, and live readiness are separate facts. The coordinator re-probes the executable before dispatch and rejects unsupported modes before session preallocation or a model turn. Version/help/status probes use five-second deadlines and a shared 256 KiB stdout/stderr budget; failed, malformed or truncated output is not capability evidence. See [the current provider matrix and acceptance limits](PROVIDER_BOUNDARY_ACCEPTANCE.md).
+
 ## Operation flows
 
 ### Ask
@@ -40,7 +42,7 @@ Ship owns a state machine across Build, Verify, Review, optional bounded Revisio
 | --- | --- | --- | --- |
 | Repository identity is not renderer-controlled | `project_repository` | `src-tauri/src/db/projects.rs` | Rejects missing, non-Git, non-canonical, or identity-mismatched projects |
 | Operations are one-use and project-bound | `allocate_operation_id`, `consume_operation_id` | `src-tauri/src/commands/projects.rs` | Removes the lease on use and rejects a reused or mismatched ID |
-| Probe and review are non-writing modes | `ProviderMode::Probe`, `ProviderMode::Review`, `is_read_only` | `src-tauri/src/providers/mod.rs` and provider adapters | Adapter command construction fails closed when required capabilities are absent |
+| Unsupported provider routes never dispatch a model turn | `require_provider_mode`, `capabilities_for`, `build_command` | `src-tauri/src/providers/runtime.rs`, `src-tauri/src/providers/mod.rs`, `src-tauri/src/run/process.rs` | Re-probes the executable; rejects missing syntax, unknown versions, unsupported writes, and Antigravity execution |
 | Only exact connection proof is accepted | `connection_test_ready` | `src-tauri/src/providers/parse.rs` | Any response other than exact `READY` fails the probe |
 | Provider work is time and output bounded | `PROCESS_TIMEOUT_SECONDS`, `PROCESS_IDLE_TIMEOUT_SECONDS`, `PROCESS_OUTPUT_LIMIT` | `src-tauri/src/types.rs`, `src-tauri/src/run/process.rs` | Terminates or fails the phase and records evidence |
 | Reviewed content cannot silently change | `review_mutation_guard` | `src-tauri/src/git/isolation.rs`, `src-tauri/src/commands/run.rs` | Promotion is rejected when the reviewed fingerprint differs |

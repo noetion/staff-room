@@ -305,17 +305,68 @@ fn unavailable_providers_do_not_claim_execution_capabilities() {
 }
 
 #[test]
-fn declared_antigravity_capabilities_do_not_depend_on_help_text() {
-    let ready = capabilities_for(
-        "antigravity",
-        true,
-        Some("test"),
-        "--print --sandbox --dangerously-skip-permissions --add-dir",
-        "",
-    );
-    assert_eq!(ready.autonomy_mode, "unattended-bypass");
-    let renamed_help = capabilities_for("antigravity", true, Some("test"), "renamed help", "");
-    assert_eq!(renamed_help.autonomy_mode, "unattended-bypass");
+fn installed_providers_without_command_proof_fail_closed() {
+    for (kind, version) in [
+        ("codex", "codex-cli 0.144.4"),
+        ("claude", "2.1.221 (Claude Code)"),
+        ("cursor", "2026.08.04-aaa8809"),
+        ("antigravity", "1.1.11"),
+    ] {
+        for help in ["", "renamed help", "--print-renamed --sandbox-renamed"] {
+            let capabilities = capabilities_for(kind, true, Some(version), help, "");
+            assert!(!capabilities.non_interactive_turn, "{kind}: {help}");
+            assert!(!capabilities.write_mode, "{kind}: {help}");
+            assert_eq!(capabilities.autonomy_mode, "manual");
+        }
+    }
+}
+
+#[test]
+fn supported_command_contract_requires_exact_version_and_each_flag() {
+    let help = "exec --ask-for-approval never --sandbox read-only workspace-write --cd --config --model";
+    let exec_help = "resume --json --output-last-message";
+    let supported = capabilities_for("codex", true, Some("codex-cli 0.144.4"), help, exec_help);
+    assert!(supported.non_interactive_turn);
+    assert!(supported.write_mode);
+    for token in help.split_whitespace() {
+        let incomplete = help.split_whitespace().filter(|value| *value != token).collect::<Vec<_>>().join(" ");
+        assert!(!capabilities_for("codex", true, Some("codex-cli 0.144.4"), &incomplete, exec_help).write_mode, "{token}");
+    }
+    for version in [None, Some("codex-cli 999.0.0"), Some("garbage")] {
+        assert!(!capabilities_for("codex", true, version, help, exec_help).non_interactive_turn);
+    }
+    assert!(!capabilities_for("codex", false, Some("codex-cli 0.144.4"), help, exec_help).write_mode);
+    assert!(!capabilities_for("codex", true, Some("codex-cli 0.144.4"), help, "--json-renamed --output-last-message resume").write_mode);
+}
+
+#[test]
+fn unsupported_capabilities_reject_every_dispatch_mode() {
+    let capabilities = capabilities_for("codex", true, Some("codex-cli 999.0.0"), "", "");
+    for mode in [ProviderMode::Ask, ProviderMode::Probe, ProviderMode::Review, ProviderMode::QuickEdit, ProviderMode::Ship] {
+        assert!(require_provider_mode("codex", &capabilities, mode).is_err());
+    }
+}
+
+#[test]
+fn known_read_only_contracts_do_not_authorize_writes() {
+    // Synthetic help fixtures exercise every required token. These are not
+    // transcripts of a live installed CLI or evidence of OS containment.
+    for (kind, version, help) in [
+        ("claude", "2.1.221 (Claude Code)", "--print --exclude-dynamic-system-prompt-sections --permission-mode (plan, auto) --tools --verbose --output-format (text, json, stream-json) --include-partial-messages --model --effort --append-system-prompt --resume --session-id"),
+        ("cursor", "2026.08.04-aaa8809", "--print --output-format (text, json, stream-json) --stream-partial-output --workspace --trust --mode (ask, plan) --model --resume create-chat --sandbox (enabled, disabled)"),
+    ] {
+        let capabilities = capabilities_for(kind, true, Some(version), help, "");
+        assert!(capabilities.non_interactive_turn, "{kind}");
+        assert!(!capabilities.write_mode, "{kind}");
+        for mode in [ProviderMode::Ask, ProviderMode::Probe, ProviderMode::Review] {
+            assert!(require_provider_mode(kind, &capabilities, mode).is_ok());
+        }
+        for mode in [ProviderMode::QuickEdit, ProviderMode::Ship] {
+            assert!(require_provider_mode(kind, &capabilities, mode).is_err());
+        }
+        let missing = help.replace("--print", "--print-renamed");
+        assert!(!capabilities_for(kind, true, Some(version), &missing, "").non_interactive_turn);
+    }
 }
 
 #[test]

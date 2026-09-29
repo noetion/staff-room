@@ -13,6 +13,71 @@ fn prepare_owned_provider_command(command: &mut Command) {
 #[cfg(not(windows))]
 fn prepare_owned_provider_command(_command: &mut Command) {}
 
+/// Syntax/status probes never invoke a model. Bound both pipes together and
+/// retain no truncated output as capability evidence.
+pub(crate) async fn bounded_provider_probe(
+    executable: &Path,
+    args: &[std::ffi::OsString],
+    working_directory: Option<&Path>,
+) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let mut command = Command::new(executable);
+    command.args(args).kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(directory) = working_directory { command.current_dir(directory); }
+    prepare_owned_provider_command(&mut command);
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    let job = match ProviderJob::attach_and_resume(&child) {
+        Ok(job) => job,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
+        }
+    };
+    let mut stdout = child.stdout.take().ok_or("Missing probe stdout")?;
+    let mut stderr = child.stderr.take().ok_or("Missing probe stderr")?;
+    let result = timeout(Duration::from_secs(5), async {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let (mut out_done, mut err_done) = (false, false);
+        let (mut out_buf, mut err_buf) = ([0_u8; 4096], [0_u8; 4096]);
+        while !out_done || !err_done {
+            let (bytes, is_stdout) = tokio::select! {
+                read = stdout.read(&mut out_buf), if !out_done => {
+                    let count = read.map_err(|error| error.to_string())?;
+                    out_done = count == 0;
+                    (&out_buf[..count], true)
+                }
+                read = stderr.read(&mut err_buf), if !err_done => {
+                    let count = read.map_err(|error| error.to_string())?;
+                    err_done = count == 0;
+                    (&err_buf[..count], false)
+                }
+            };
+            if out.len() + err.len() + bytes.len() > 256 * 1024 {
+                return Err("Probe exceeded 256 KiB combined output.".to_owned());
+            }
+            if is_stdout { out.extend_from_slice(bytes); } else { err.extend_from_slice(bytes); }
+        }
+        let status = child.wait().await.map_err(|error| error.to_string())?;
+        if !status.success() { return Err("Probe exited unsuccessfully.".to_owned()); }
+        let out = String::from_utf8(out).map_err(|_| "Probe stdout was not UTF-8.".to_owned())?;
+        let err = String::from_utf8(err).map_err(|_| "Probe stderr was not UTF-8.".to_owned())?;
+        Ok(if out.trim().is_empty() { err } else { out }.trim().to_owned())
+    }).await.unwrap_or_else(|_| Err("Probe timed out after five seconds.".to_owned()));
+    // On Windows closing the existing Job Object also kills pipe-holding descendants.
+    #[cfg(windows)]
+    drop(job);
+    if result.is_err() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
+    result
+}
+
 pub(crate) async fn preallocate_cursor_session(executable: &Path) -> Result<String, String> {
     let mut command = Command::new(executable);
     hide_tokio_command_window(&mut command);
@@ -302,20 +367,15 @@ pub(crate) async fn invoke_provider(
     mut cancellation: watch::Receiver<bool>,
 ) -> Result<ProviderRun, String> {
     let kind = participant.kind.as_str();
-    let executable = find_provider_executable(kind)
-        .ok_or_else(|| format!("{} CLI is not installed.", provider_names(kind).0))?;
-    let structured_chat = phase != Phase::Chat || participant.capabilities.structured_output;
-    if phase != Phase::Chat
-        && matches!(
-            participant.capabilities.autonomy_mode.as_str(),
-            "manual" | "unavailable"
-        )
-    {
-        return Err(format!(
-            "{} cannot prove a safe unattended mode: {}",
-            participant.name, participant.capabilities.autonomy_note
-        ));
-    }
+    // Re-probe the executable used for this dispatch, including Chat/Quick Edit.
+    // Cached UI capability flags must not authorize a changed CLI.
+    let kind_owned = kind.to_owned();
+    let detected = tokio::task::spawn_blocking(move || probe_provider(&kind_owned))
+        .await.map_err(|error| error.to_string())?;
+    require_provider_mode(kind, &detected.capabilities, mode)?;
+    let executable = PathBuf::from(detected.executable_path.as_deref()
+        .ok_or_else(|| format!("{} CLI is not installed.", participant.name))?);
+    let structured_chat = phase != Phase::Chat || detected.capabilities.structured_output;
     if kind == "cursor" {
         ensure_cursor_repository_has_head(repository)?;
     }
@@ -735,6 +795,40 @@ pub(crate) fn provider_failure_reason(provider: &str, activity: &str, run: &Prov
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn fake_probe(unix_script: &str, windows_script: &str) -> Result<String, String> {
+        let (executable, args) = if cfg!(windows) {
+            ("powershell.exe", vec!["-NoProfile", "-Command", windows_script])
+        } else {
+            ("/bin/sh", vec!["-c", unix_script])
+        };
+        bounded_provider_probe(Path::new(executable), &args.into_iter().map(Into::into).collect::<Vec<_>>(), None).await
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_missing_executable_and_nonzero_exit() {
+        assert!(bounded_provider_probe(Path::new("staff-room-no-such-cli"), &[], None).await.is_err());
+        assert!(fake_probe("printf 'logged in'; exit 1", "Write-Output 'logged in'; exit 1").await.is_err());
+        assert_eq!(fake_probe("printf 'codex-cli 0.144.4'", "Write-Output 'codex-cli 0.144.4'").await.unwrap(), "codex-cli 0.144.4");
+        assert_eq!(fake_probe("printf 'version'; printf 'warning' >&2", "[Console]::Out.Write('version'); [Console]::Error.Write('warning')").await.unwrap(), "version");
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_combined_output_over_budget() {
+        let result = fake_probe(
+            "head -c 140000 /dev/zero; head -c 140000 /dev/zero >&2",
+            "[Console]::Out.Write('x' * 140000); [Console]::Error.Write('y' * 140000)",
+        ).await;
+        assert!(result.unwrap_err().contains("256 KiB"));
+    }
+
+    #[tokio::test]
+    async fn stalled_probe_is_bounded() {
+        let start = Instant::now();
+        let result = fake_probe("exec sleep 30", "Start-Sleep -Seconds 30").await;
+        assert!(result.unwrap_err().contains("five seconds"));
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
 
     #[tokio::test]
     async fn dropped_cancellation_sender_does_not_mark_run_stopped() {

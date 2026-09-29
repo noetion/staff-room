@@ -1,5 +1,7 @@
 # Antigravity provider
 
+**Current policy:** execution, including connection probes and reviews, is disabled before dispatch. The historical contract below combines a terminal restriction with permission bypass and does not prove a filesystem write boundary or a trustworthy read-only route. A managed worktree is not containment. See [boundary acceptance](../PROVIDER_BOUNDARY_ACCEPTANCE.md).
+
 ## Local proof
 
 - Antigravity Desktop: installed under `%LOCALAPPDATA%\Programs\antigravity\Antigravity.exe`
@@ -9,7 +11,7 @@
 
 The desktop application is not substituted for the automation CLI. The Staff Room probes `agy` on `PATH` and the installer location above, so a terminal restart is not required for discovery.
 
-## Implemented command contract
+## Historical v1 command contract (disabled)
 
 - Non-interactive turn: `agy --print`
 - Terminal restriction: `--sandbox`
@@ -23,7 +25,7 @@ The installed CLI print surface is text-first. The Staff Room does not claim str
 
 ## Capability result
 
-`unattended-bypass`: live help proves print mode, sandboxing, permission bypass, and exact conversation resume. Permission bypass remains a visible downgrade and is paired with Antigravity sandbox mode plus The Staff Room's managed worktree boundary.
+`manual`: all routes are disabled. Historical help established syntax only; it did not establish filesystem containment.
 ## Stable live verification - 2026-08-10, agy 1.1.11
 
 The signed-in `agy models` command returned exact account model identifiers, including `gemini-3.5-flash-low`. Build, Review, cancellation, and connection routes passed on a synthetic repository. Ask and Quick Edit remain visibly N/A.

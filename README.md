@@ -2,18 +2,20 @@
 
 *A local-first Windows desktop staff room for your coding agents: they do the work, you decide what ships.*
 
-**Safety invariant:** no agent write reaches the attached checkout until the user presses Apply or confirms Promote.
+**Application promotion gate:** Staff Room's Apply and Promote paths require review, native confirmation, and revalidated repository state. Git worktrees organize changes; they are not an operating-system containment boundary for installed provider executables.
 
-![Claude diagnoses a payment race, Cursor adds a regression test, Antigravity builds the fix, Codex reviews it, and the human controls promotion](docs/assets/staff-room-demo.gif)
+Provider CLIs remain trusted programs. Command compatibility is checked against recorded versions and bounded help probes, separately from sign-in and live connection tests. Codex retains its provider-managed filesystem sandbox route. Claude and Cursor are read-only in Staff Room; their Quick Edit and Ship writes are disabled. Antigravity execution is disabled pending an enforceable boundary contract. Filesystem restrictions do not establish network or exfiltration isolation. See [provider boundary acceptance](docs/PROVIDER_BOUNDARY_ACCEPTANCE.md) for the supported matrix and outstanding native checks.
 
-Representative workflow: Claude diagnoses the race, Cursor turns it into a regression test, Antigravity implements the fix in isolation, and Codex reviews the evidence before the human promotion gate. [Watch the 1080p version](docs/assets/staff-room-demo.mp4).
+![Historical v1 demo: Claude diagnoses a payment race, Cursor adds a regression test, Antigravity builds the fix, Codex reviews it, and the human controls promotion](docs/assets/staff-room-demo.gif)
+
+Historical v1 workflow demo, recorded before the provider boundary restrictions above: [watch the 1080p version](docs/assets/staff-room-demo.mp4).
 
 The Staff Room is a Windows desktop application for working with installed Claude Code, Codex, Cursor, and Antigravity CLIs against an attached Git repository. Rust owns repository access, isolation, verification, and promotion. React renders the room; it does not hold the authority to bypass those controls.
 
 ## The safety model
 
 - **Ask** is read-only and creates no worktree.
-- **Quick Edit** works in managed isolation. The attached checkout changes only after the user reviews the diff, presses **Apply**, and confirms in a native dialog. Rust rejects the operation if the isolated diff has changed since preview.
+- **Quick Edit** works in a managed worktree. Staff Room applies its isolated diff to the attached checkout only after the user reviews the diff, presses **Apply**, and confirms in a native dialog. Rust rejects the operation if the isolated diff has changed since preview.
 - **Ship** runs Build, Verify, and read-only Review in a managed worktree. If review or verification finds a problem, it performs at most one bounded Revision followed by Final Review. It stops at `awaiting-promotion` until the user presses **Promote** and confirms in a native dialog.
 - **Autonomous Ship** remains locked. Its separate [acceptance contract](docs/AUTONOMOUS_ACCEPTANCE_CONTRACT.md) is public and still marked **NOT ACCEPTED**.
 - **Voice** is local push-to-talk. A transcript is editable text only; it cannot send a message or authorize Apply, Promote, Discard, or Abandon.
