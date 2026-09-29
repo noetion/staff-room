@@ -35,6 +35,7 @@ import { initials } from "./lib/format";
 import {
   autonomyLabel,
   canUseChat,
+  canUseQuickEdit,
   chatAgentFor,
   isRunnableParticipant,
   shipAgentFor,
@@ -995,9 +996,9 @@ export function App() {
     const priorAgent = [...messages].reverse().find(
       (message) => message.kind === "agent" && message.sender !== "system" && message.sender !== "human",
     )?.sender as AgentKind | undefined;
-    const participant = chatAgentFor(text, environment.participants, priorAgent);
+    const participant = chatAgentFor(text, environment.participants.filter(canUseQuickEdit), priorAgent);
     if (!participant || !native) {
-      setUiError(participant ? "Quick Edit is available in the Tauri desktop app." : "No Full-tier participant can perform a Quick Edit.");
+      setUiError(participant ? "Quick Edit is available in the Tauri desktop app." : "No participant has a supported Quick Edit write boundary.");
       return;
     }
     let editId: string;
@@ -1399,7 +1400,9 @@ export function App() {
           canSelectParticipant={(participant) =>
             sideChatAvailable
               ? participant.kind === activeShipAgent
-              : composerMode === "ask" || composerMode === "quick-edit"
+              : composerMode === "quick-edit"
+                ? canUseQuickEdit(participant)
+                : composerMode === "ask"
                 ? canUseChat(participant)
                 : run.state !== "promoting" && isRunnableParticipant(participant)
           }
@@ -1469,7 +1472,7 @@ export function App() {
           shipDisabled={sideChatAvailable || ["awaiting-promotion", "promoting"].includes(run.state)}
           sideChatAvailable={sideChatAvailable}
           titleForParticipant={(participant) =>
-            (composerMode === "ask" || composerMode === "quick-edit" ? canUseChat(participant) : isRunnableParticipant(participant))
+            (composerMode === "quick-edit" ? canUseQuickEdit(participant) : composerMode === "ask" ? canUseChat(participant) : isRunnableParticipant(participant))
               ? `${autonomyLabel(participant.capabilities.autonomyMode)}: ${participant.capabilities.autonomyNote}`
               : participant.capabilities.autonomyNote
           }

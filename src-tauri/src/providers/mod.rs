@@ -45,6 +45,11 @@ pub trait ProviderAdapter: Send + Sync {
 }
 
 pub fn build_command(kind: &str, request: &TurnRequest<'_>) -> Result<PreparedCommand, String> {
+    // Keep this at command construction too: stale UI/cache state must never
+    // enable a provider route whose permission contract is unsupported.
+    if kind == "antigravity" || (!is_read_only(request.mode) && kind != "codex") {
+        return Err(format!("{kind} has no accepted filesystem write boundary for this route."));
+    }
     let adapter: &dyn ProviderAdapter = match kind {
         "codex" => &codex::Adapter,
         "claude" => &claude::Adapter,

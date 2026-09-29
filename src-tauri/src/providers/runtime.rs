@@ -9,22 +9,16 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut command = StdCommand::new(executable);
-    hide_std_command_window(&mut command);
-    command.args(args);
-    if let Some(path) = working_directory {
-        command.current_dir(path);
-    }
-    let output = command.output().ok()?;
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    if !stdout.is_empty() {
-        Some(stdout)
-    } else if !stderr.is_empty() {
-        Some(stderr)
-    } else {
-        None
-    }
+    let executable = executable.to_owned();
+    let args = args.into_iter().map(|arg| arg.as_ref().to_owned()).collect::<Vec<_>>();
+    let working_directory = working_directory.map(Path::to_owned);
+    // Also called from synchronous database/status paths inside a Tokio task.
+    // Own a short-lived runtime on a separate thread, never nest block_on.
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?
+            .block_on(bounded_provider_probe(&executable, &args, working_directory.as_deref()))
+            .ok()
+    }).join().ok().flatten()
 }
 
 #[cfg(windows)]
@@ -104,18 +98,6 @@ pub(crate) fn find_provider_executable(kind: &str) -> Option<PathBuf> {
     })
 }
 
-pub(crate) fn antigravity_desktop_present() -> bool {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .map(|root| {
-            root.join("Programs")
-                .join("antigravity")
-                .join("Antigravity.exe")
-                .is_file()
-        })
-        .unwrap_or(false)
-}
-
 pub(crate) fn provider_names(kind: &str) -> (&'static str, &'static [&'static str]) {
     match kind {
         "codex" => ("Codex", &["codex"]),
@@ -126,216 +108,82 @@ pub(crate) fn provider_names(kind: &str) -> (&'static str, &'static [&'static st
     }
 }
 
+// These exact versions are recorded in docs/providers and the v1 acceptance record.
+// Help proves command syntax only; it cannot prove containment or authentication.
+fn contains_all(text: &str, required: &[&str]) -> bool {
+    let tokens = text.split(|c: char| c.is_whitespace() || matches!(c, ',' | '[' | ']' | '(' | ')' | '=' | '<' | '>' | ':' | '|' | '\'' | '"'))
+        .filter(|token| !token.is_empty()).collect::<HashSet<_>>();
+    required.iter().all(|token| tokens.contains(token))
+}
+
 pub(crate) fn capabilities_for(
     kind: &str,
     installed: bool,
     version: Option<&str>,
-    _help: &str,
-    _subcommand_help: &str,
+    help: &str,
+    subcommand_help: &str,
 ) -> ProviderCapabilities {
-    let version_text = version.unwrap_or("version unavailable");
-    match kind {
-        "codex" => {
-            let non_interactive = installed;
-            let approval = installed;
-            let sandbox = installed;
-            let streaming = installed;
-            let exact_resume = installed;
-            let output = installed;
-            let ready =
-                non_interactive && approval && sandbox && streaming && exact_resume && output;
-            ProviderCapabilities {
-                non_interactive_turn: non_interactive,
-                streaming,
-                structured_output: streaming,
-                exact_resume,
-                cancellation: installed,
-                write_mode: sandbox,
-                approval_bridge: approval,
-                usage_reporting: streaming,
-                repository_scoping: installed,
-                warm_session: false,
-                autonomy_mode: if ready {
-                    "isolated-auto"
-                } else if installed {
-                    "manual"
-                } else {
-                    "unavailable"
-                }
-                .to_owned(),
-                autonomy_note: if ready {
-                    "The verified capability table declares non-interactive exec, never-ask approval, workspace sandboxing, JSONL, output capture, and resume."
-                } else if installed {
-                    "Codex is installed, but this version does not prove every flag required for safe unattended work."
-                } else {
-                    "Install Codex CLI to enable this participant."
-                }
-                .to_owned(),
-                capability_proof: vec![
-                    format!("Version: {version_text}"),
-                    format!("exec: {non_interactive}"),
-                    format!("sandbox: {sandbox}"),
-                    format!("never-ask approval: {approval}"),
-                    format!("JSONL + resume + final output: {}", streaming && exact_resume && output),
-                ],
-            }
-        }
-        "claude" => {
-            let non_interactive = installed;
-            let streaming = installed;
-            let approval = installed;
-            let exact_resume = installed;
-            let ready = non_interactive && streaming && approval && exact_resume;
-            ProviderCapabilities {
-                non_interactive_turn: non_interactive,
-                streaming,
-                structured_output: streaming,
-                exact_resume,
-                cancellation: installed,
-                write_mode: approval,
-                approval_bridge: approval,
-                usage_reporting: streaming,
-                repository_scoping: installed,
-                warm_session: false,
-                autonomy_mode: if ready {
-                    "reviewed-auto"
-                } else if installed {
-                    "manual"
-                } else {
-                    "unavailable"
-                }
-                .to_owned(),
-                autonomy_note: if ready {
-                    "The verified capability table declares print mode, stream JSON, native auto permission mediation, and session resume. The Staff Room supplies the outer time and revision bounds."
-                } else if installed {
-                    "Claude Code is installed, but its current help does not prove every unattended-mode flag."
-                } else {
-                    "Install Claude Code to prove auto permission mode on this machine."
-                }
-                .to_owned(),
-                capability_proof: vec![
-                    format!("Version: {version_text}"),
-                    format!("print + stream JSON: {}", non_interactive && streaming),
-                    format!("permissionMode auto: {approval}"),
-                    format!("resume: {exact_resume}"),
-                ],
-            }
-        }
-        "cursor" => {
-            let non_interactive = installed;
-            let streaming = installed;
-            let write_mode = installed;
-            let exact_resume = installed;
-            let sandbox = installed && !cfg!(windows);
-            let ask_mode = installed;
-            let partial_stream = installed;
-            let ready = non_interactive && streaming && write_mode && exact_resume;
-            ProviderCapabilities {
-                non_interactive_turn: non_interactive,
-                streaming,
-                structured_output: streaming,
-                exact_resume,
-                cancellation: installed,
-                write_mode,
-                approval_bridge: false,
-                usage_reporting: false,
-                repository_scoping: installed,
-                warm_session: false,
-                autonomy_mode: if ready {
-                    "isolated-auto"
-                } else if installed {
-                    "manual"
-                } else {
-                    "unavailable"
-                }
-                .to_owned(),
-                autonomy_note: if ready {
-                    if cfg!(windows) {
-                        "Cursor sandbox is unavailable on Windows; read-only Chat is enforced by Cursor ask mode. Force writes remain confined to the managed worktree."
-                    } else {
-                        "The verified capability table declares print mode, stream JSON, resume, force writes, and an explicit sandbox. Force is confined to the managed worktree."
-                    }
-                } else if installed {
-                    "Cursor Agent is installed, but this version does not prove every required automation flag."
-                } else {
-                    "The Cursor editor alone is not the Cursor Agent automation CLI."
-                }
-                .to_owned(),
-                capability_proof: vec![
-                    format!("Version: {version_text}"),
-                    format!("print + stream JSON: {}", non_interactive && streaming),
-                    format!(
-                        "read-only Chat (ask mode) + partial stream: {}",
-                        ask_mode && partial_stream
-                    ),
-                    format!("force write: {write_mode}"),
-                    if cfg!(windows) {
-                        "sandbox: unavailable on Windows".to_owned()
-                    } else {
-                        format!("resume + sandbox: {}", exact_resume && sandbox)
-                    },
-                ],
-            }
-        }
-        "antigravity" => {
-            let non_interactive = installed;
-            let sandbox = installed;
-            let write_mode = installed;
-            let workspace = installed;
-            let exact_resume = installed;
-            let ready = non_interactive && sandbox && write_mode && workspace;
-            ProviderCapabilities {
-                non_interactive_turn: non_interactive,
-                streaming: false,
-                structured_output: false,
-                exact_resume,
-                cancellation: installed,
-                write_mode,
-                approval_bridge: false,
-                usage_reporting: false,
-                repository_scoping: sandbox,
-                warm_session: false,
-                autonomy_mode: if ready {
-                    "unattended-bypass"
-                } else if installed {
-                    "manual"
-                } else {
-                    "unavailable"
-                }
-                .to_owned(),
-                autonomy_note: if ready {
-                    "The verified capability table declares print mode, explicit managed-worktree attachment, and sandboxed unattended execution. Permission bypass remains a visible downgrade."
-                } else if antigravity_desktop_present() {
-                    "Antigravity Desktop is installed, but the agy automation CLI is not present. The desktop executable is never substituted for the CLI."
-                } else {
-                    "Install the agy automation CLI; text-only output remains a declared downgrade."
-                }
-                .to_owned(),
-                capability_proof: vec![
-                    format!("Version: {version_text}"),
-                    format!("agy automation executable: {installed}"),
-                    format!("print + sandbox: {}", non_interactive && sandbox),
-                    format!("explicit workspace attachment: {workspace}"),
-                    format!("conversation resume: {exact_resume}"),
-                ],
-            }
-        }
-        _ => ProviderCapabilities {
-            non_interactive_turn: false,
-            streaming: false,
-            structured_output: false,
-            exact_resume: false,
-            cancellation: false,
-            write_mode: false,
-            approval_bridge: false,
-            usage_reporting: false,
-            repository_scoping: false,
-            warm_session: false,
-            autonomy_mode: "unavailable".to_owned(),
-            autonomy_note: "Unknown provider.".to_owned(),
-            capability_proof: vec![],
-        },
+    let known_version = matches!(
+        (kind, version),
+        ("codex", Some("codex-cli 0.144.4"))
+            | ("claude", Some("2.1.221 (Claude Code)"))
+            | ("cursor", Some("2026.08.04-aaa8809"))
+    );
+    let syntax = match kind {
+        "codex" => contains_all(help, &["exec", "--ask-for-approval", "never", "--sandbox", "read-only", "workspace-write", "--cd", "--config", "--model"])
+            && contains_all(subcommand_help, &["resume", "--json", "--output-last-message"]),
+        "claude" => contains_all(help, &["--print", "--exclude-dynamic-system-prompt-sections", "--permission-mode", "plan", "--tools", "--verbose", "--output-format", "stream-json", "--include-partial-messages", "--model", "--effort", "--append-system-prompt", "--resume", "--session-id"]),
+        "cursor" => contains_all(help, &["--print", "--output-format", "stream-json", "--stream-partial-output", "--workspace", "--trust", "--mode", "ask", "--model", "--resume", "create-chat"])
+            && (cfg!(windows) || contains_all(help, &["--sandbox", "enabled"])),
+        _ => false,
+    };
+    let supported = installed && known_version && syntax;
+    let write_mode = supported && kind == "codex";
+    let note = if !installed {
+        "CLI executable was not found."
+    } else if kind == "antigravity" {
+        "Antigravity routes are disabled: terminal sandbox and permission bypass do not establish a filesystem write boundary or a read-only contract."
+    } else if !known_version {
+        "CLI version is not in the tested command contract table; execution is disabled."
+    } else if !syntax {
+        "Required CLI help contract is incomplete or unavailable; execution is disabled."
+    } else if kind == "codex" {
+        "Known Codex command contract: read-only or workspace-write filesystem sandbox with never-ask approvals. The installed executable remains trusted; live connection and native boundary acceptance are separate checks."
+    } else if kind == "claude" {
+        "Read-only tools in plan mode are supported. Quick Edit and Ship writes are disabled: auto permission mediation is not filesystem containment."
+    } else {
+        "Ask mode is supported. Quick Edit and Ship writes are disabled: no accepted platform filesystem write boundary (Cursor sandbox is unavailable on Windows)."
+    };
+    ProviderCapabilities {
+        non_interactive_turn: supported,
+        streaming: supported,
+        structured_output: supported,
+        exact_resume: supported,
+        cancellation: supported,
+        write_mode,
+        approval_bridge: supported && kind == "codex",
+        usage_reporting: supported && kind != "cursor",
+        repository_scoping: supported && kind == "codex",
+        warm_session: false,
+        autonomy_mode: if write_mode { "isolated-auto" } else if installed { "manual" } else { "unavailable" }.to_owned(),
+        autonomy_note: note.to_owned(),
+        capability_proof: vec![
+            format!("Version: {}", version.unwrap_or("unavailable")),
+            format!("Known command version: {known_version}"),
+            format!("Required help syntax: {syntax}"),
+            format!("Write route supported: {write_mode}"),
+            "Help checks do not verify sign-in, live readiness, filesystem containment, or network isolation.".to_owned(),
+        ],
     }
+}
+
+pub(crate) fn require_provider_mode(kind: &str, capabilities: &ProviderCapabilities, mode: ProviderMode) -> Result<(), String> {
+    if !capabilities.non_interactive_turn
+        || (!super::is_read_only(mode) && !capabilities.write_mode)
+    {
+        return Err(format!("{} cannot run this route: {}", provider_names(kind).0, capabilities.autonomy_note));
+    }
+    Ok(())
 }
 
 pub(crate) fn provider_effort_options(kind: &str) -> Vec<String> {
@@ -451,20 +299,33 @@ pub(crate) fn parse_provider_model_list(output: &str) -> Vec<String> {
 }
 
 pub(crate) fn probe_provider(kind: &str) -> Participant {
+    probe_provider_at(kind, find_provider_executable(kind))
+}
+
+fn probe_provider_at(kind: &str, path: Option<PathBuf>) -> Participant {
     let (name, _) = provider_names(kind);
-    let path = find_provider_executable(kind);
     let version = path
         .as_deref()
         .and_then(|executable| command_output(executable, ["--version"], None))
         .and_then(|value| value.lines().next().map(str::to_owned));
     let installed = path.is_some();
-    let capabilities = capabilities_for(kind, installed, version.as_deref(), "", "");
+    let help = path.as_deref()
+        .and_then(|executable| command_output(executable, ["--help"], None))
+        .unwrap_or_default();
+    let subcommand_help = if kind == "codex" {
+        path.as_deref().and_then(|executable| {
+            let exec = command_output(executable, ["exec", "--help"], None)?;
+            let resume = command_output(executable, ["exec", "resume", "--help"], None)?;
+            // Both fresh and resumed turns use these options.
+            if !contains_all(&resume, &["--json", "--output-last-message"]) {
+                return None;
+            }
+            Some(exec)
+        }).unwrap_or_default()
+    } else { String::new() };
+    let capabilities = capabilities_for(kind, installed, version.as_deref(), &help, &subcommand_help);
     let (models, model_discovery_note, effort_options) = model_options(kind, path.as_deref());
     let supports_effort = !effort_options.is_empty();
-    let ready = !matches!(
-        capabilities.autonomy_mode.as_str(),
-        "manual" | "unavailable"
-    );
     Participant {
         kind: kind.to_owned(),
         name: name.to_owned(),
@@ -477,9 +338,7 @@ pub(crate) fn probe_provider(kind: &str) -> Participant {
         model_discovery_note,
         supports_effort,
         effort_options,
-        state: if ready {
-            "ready"
-        } else if installed {
+        state: if installed {
             "manual"
         } else {
             "unavailable"
@@ -687,4 +546,44 @@ pub(crate) fn participants_with_connections(
         .into_iter()
         .map(|participant| participant_for_project(database, project_id, participant))
         .collect()
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn fake_cli_detection_separates_presence_contract_and_connection() {
+        let root = std::env::temp_dir().join(format!("staff-room-probe-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let executable = root.join(if cfg!(windows) { "codex.cmd" } else { "codex" });
+        // Synthetic CLI fixture, never an authenticated provider call.
+        let script = if cfg!(windows) {
+            "@echo off\r\nif \"%*\"==\"--version\" (echo codex-cli 0.144.4& exit /b 0)\r\nif \"%*\"==\"--help\" (echo exec --ask-for-approval never --sandbox read-only workspace-write --cd --config --model& exit /b 0)\r\nif \"%*\"==\"exec --help\" (echo resume --json --output-last-message& exit /b 0)\r\nif \"%*\"==\"exec resume --help\" (echo --json --output-last-message& exit /b 0)\r\nexit /b 91\r\n"
+        } else {
+            "#!/bin/sh\ncase \"$*\" in\n'--version') echo 'codex-cli 0.144.4';;\n'--help') echo 'exec --ask-for-approval never --sandbox read-only workspace-write --cd --config --model';;\n'exec --help') echo 'resume --json --output-last-message';;\n'exec resume --help') echo '--json --output-last-message';;\n*) exit 91;;\nesac\n"
+        };
+        std::fs::write(&executable, script).unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let participant = probe_provider_at("codex", Some(executable.clone()));
+        assert!(participant.installed);
+        assert!(participant.capabilities.write_mode);
+        assert_eq!(participant.state, "manual");
+        assert_eq!(participant.connection_status, "unverified");
+        assert_eq!(detected_connection(&participant).status, "sign-in-required");
+        // A changed resume contract must invalidate all execution even when
+        // root help, version, and a previous participant remain valid.
+        let changed_script = script
+            .replace("echo '--json --output-last-message'", "echo '--json-renamed --output-last-message'")
+            .replace("echo --json --output-last-message&", "echo --json-renamed --output-last-message&");
+        std::fs::write(&executable, changed_script).unwrap();
+        let changed = probe_provider_at("codex", Some(executable));
+        for mode in [ProviderMode::Ask, ProviderMode::Probe, ProviderMode::Review, ProviderMode::QuickEdit, ProviderMode::Ship] {
+            assert!(require_provider_mode("codex", &changed.capabilities, mode).is_err());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

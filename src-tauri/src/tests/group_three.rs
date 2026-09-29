@@ -424,7 +424,7 @@ fn cursor_unavailable_model_extracts_the_actionable_identifier() {
 }
 
 #[test]
-fn antigravity_review_uses_plan_with_headless_read_approval() {
+fn antigravity_review_rejects_unproven_read_only_contract() {
     let request = TurnRequest {
         mode: ProviderMode::Review,
         phase: "review",
@@ -437,21 +437,12 @@ fn antigravity_review_uses_plan_with_headless_read_approval() {
         structured_output: false,
         handoff_contract: None,
     };
-    let command = providers::build_command("antigravity", &request)
-        .expect("build Antigravity review command");
-    assert!(command
-        .args
-        .windows(2)
-        .any(|pair| pair == ["--mode", "plan"]));
-    assert!(command
-        .args
-        .iter()
-        .any(|arg| arg == "--dangerously-skip-permissions"));
+    assert!(providers::build_command("antigravity", &request).is_err());
 }
 
 #[test]
-fn antigravity_probe_allows_required_headless_reads_without_leaving_plan_mode() {
-    let request = TurnRequest {
+fn unsupported_write_routes_are_rejected_during_command_construction() {
+    let mut request = TurnRequest {
         mode: ProviderMode::Probe,
         phase: "chat",
         prompt: "Reply with exactly READY.",
@@ -463,21 +454,19 @@ fn antigravity_probe_allows_required_headless_reads_without_leaving_plan_mode() 
         structured_output: false,
         handoff_contract: None,
     };
-    let command =
-        providers::build_command("antigravity", &request).expect("build Antigravity probe command");
-    assert!(command
-        .args
-        .windows(2)
-        .any(|pair| pair == ["--mode", "plan"]));
-    assert!(command
-        .args
-        .iter()
-        .any(|arg| arg == "--dangerously-skip-permissions"));
+    assert!(providers::build_command("antigravity", &request).is_err());
+    for mode in [ProviderMode::QuickEdit, ProviderMode::Ship] {
+        request.mode = mode;
+        for kind in ["claude", "cursor", "antigravity"] {
+            assert!(providers::build_command(kind, &request).is_err(), "{kind}: {mode:?}");
+        }
+        assert!(providers::build_command("codex", &request).is_ok());
+    }
 }
 
 #[test]
 fn every_review_adapter_is_prepared_read_only() {
-    for kind in ["codex", "claude", "cursor", "antigravity"] {
+    for kind in ["codex", "claude", "cursor"] {
         let request = TurnRequest {
             mode: ProviderMode::Review,
             phase: "review",

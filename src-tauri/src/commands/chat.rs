@@ -119,15 +119,10 @@ pub(crate) async fn start_room_chat(
             cached_participants(runtime.inner(), false).await?,
         )?
         .into_iter()
-        .find(|participant| participant.installed)
+        .find(|participant| participant.installed && participant.capabilities.non_interactive_turn)
         .ok_or_else(|| "No installed coding-agent CLI is available for chat.".to_owned())?
     };
-    if participant.kind == "antigravity" {
-        return Err(
-            "Antigravity is available for Ship only because it has no true read-only mode."
-                .to_owned(),
-        );
-    }
+    require_provider_mode(&participant.kind, &participant.capabilities, ProviderMode::Ask)?;
     let profile = provider_profile(database, &request.project_id, &participant.kind, "chat")?;
     let settings = project_settings(database, &request.project_id)?;
     let session_id = load_chat_session(database, &request.project_id, &participant.kind)?;

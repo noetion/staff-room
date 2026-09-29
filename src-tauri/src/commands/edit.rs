@@ -33,16 +33,12 @@ pub(crate) async fn quick_edit_start(
     } else {
         participants
             .into_iter()
-            .find(|participant| participant.installed && participant.kind != "antigravity")
+            .find(|participant| participant.installed && participant.capabilities.write_mode)
             .ok_or_else(|| {
-                "No Full-tier coding-agent CLI is available for Quick Edit.".to_owned()
+                "No installed CLI has a supported Quick Edit write boundary.".to_owned()
             })?
     };
-    if !participant.installed || participant.kind == "antigravity" {
-        return Err(
-            "Quick Edit is available only to Codex, Claude Code, and Cursor Agent.".to_owned(),
-        );
-    }
+    require_provider_mode(&participant.kind, &participant.capabilities, ProviderMode::QuickEdit)?;
     let worktree = create_quick_edit_worktree(&app, &repository, &request.edit_id)?;
     let state = QuickEditState {
         project_id: request.project_id.clone(),

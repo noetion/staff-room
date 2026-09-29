@@ -16,9 +16,8 @@ impl ProviderAdapter for Adapter {
             "--stream-partial-output".into(),
             "--workspace".into(),
             request.repository.display().to_string(),
-            // Staff Room already scopes this CLI to a user-attached repository or
-            // its managed worktree. Trust suppresses Cursor's workspace prompt;
-            // mode selection below still enforces read-only versus write access.
+            // Trust suppresses the workspace prompt. It is not containment;
+            // only the supported ask route is dispatched by Staff Room.
             "--trust".into(),
         ];
         #[cfg(not(windows))]

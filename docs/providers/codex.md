@@ -23,7 +23,7 @@ The `never` approval policy returns denied escalation failures to the model inst
 
 ## Capability result
 
-`isolated-auto`: complete unattended repository work inside the managed worktree without routine approval prompts.
+`isolated-auto` describes the retained provider-managed `workspace-write` command contract, not a Staff Room OS sandbox. Exact version and required root/exec/resume help are checked before dispatch; authentication and live connection are separate. Git worktrees organize changes but do not constrain an arbitrary provider executable. Fresh native absolute-path denial acceptance is still required before release; see [boundary acceptance](../PROVIDER_BOUNDARY_ACCEPTANCE.md).
 
 ## Warm-session evaluation
 
