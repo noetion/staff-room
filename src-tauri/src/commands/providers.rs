@@ -837,11 +837,20 @@ async fn discover_codex_models(
         .ok_or_else(|| "Codex model discovery did not expose stdout.".to_owned())?;
     let mut stdout = BufReader::new(stdout);
     let discovery = async {
+        let initialize = serde_json::json!({
+            "method": "initialize",
+            "id": 1,
+            "params": {
+                "clientInfo": {
+                    "name": "staff-room-model-refresh",
+                    "title": "The Staff Room",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "capabilities": { "experimentalApi": true },
+            },
+        });
         stdin
-            .write_all(
-                br#"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"staff-room-model-refresh","title":"The Staff Room","version":"1.0.0"},"capabilities":{"experimentalApi":true}}}
-"#,
-            )
+            .write_all(format!("{initialize}\n").as_bytes())
             .await
             .map_err(|error| format!("Could not initialize Codex model discovery: {error}"))?;
         stdin

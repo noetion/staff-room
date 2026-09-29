@@ -1,8 +1,10 @@
 # Public release checklist
 
-**Target outcome:** publish `jonathanjasare/staff-room` as a source-first human-gated Windows v1.0 whose safety claims are reproducible and traceable to Rust enforcement.
+**Historical record, not current acceptance.** Current development is experimental and pre-1.0 (`0.1.0`), with no supported stable binary. The earlier `v1.0.0` designation overstated maturity. The original observations, artifact identities, and publication history below are retained for traceability; their PASS verdicts do not carry forward. See [current provider boundary gates](PROVIDER_BOUNDARY_ACCEPTANCE.md).
 
-**Current release:** `1.0.0`
+**Historical target outcome:** publish `jonathanjasare/staff-room` as a source-first human-gated Windows v1.0 whose safety claims are reproducible and traceable to Rust enforcement.
+
+**Historical release:** `1.0.0`
 
 **Non-goals:** new product features, autonomous unlock, macOS or Linux support, code signing, or automatic promotion.
 

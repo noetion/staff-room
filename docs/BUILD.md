@@ -2,6 +2,8 @@
 
 These instructions reproduce the source verification gate and unsigned Windows installer. Run them from a fresh clone on Windows.
 
+Current development is experimental, pre-1.0 (`0.1.0`). There is no supported stable binary. A successful build produces a local evaluation artifact, not release acceptance. Use throwaway repositories; the preserved `v1.0.0` records do not qualify this version.
+
 ## Prerequisites
 
 - Windows 10 or 11 with WebView2
@@ -59,7 +61,7 @@ Release audit results and any justified exception belong in [PUBLIC_RELEASE_CHEC
 npm run bundle:windows
 ```
 
-The release script remaps builder-local Rust source paths, strips native symbols, and fails if the compiled executable still contains the repository, user-profile, Cargo-home, or Rustup-home path. The installer is produced below `src-tauri/target/release/bundle/nsis/`. The supported v1 bundle target is NSIS only.
+The release script remaps builder-local Rust source paths, strips native symbols, and fails if the compiled executable still contains the repository, user-profile, Cargo-home, or Rustup-home path. The installer is produced below `src-tauri/target/release/bundle/nsis/`, using the current Tauri package version in its filename. The current bundle target is NSIS only; the script name and release build profile do not imply a stable public release.
 
 The installer is unsigned. Windows SmartScreen may display an unknown-publisher warning, and users must inspect the source and decide whether to continue. The project does not instruct users to disable SmartScreen or weaken system policy.
 
@@ -67,4 +69,4 @@ The installer is unsigned. Windows SmartScreen may display an unknown-publisher 
 
 Automated checks cannot prove microphone permission behavior, installed CLI compatibility, or the final human promotion flow. Use a synthetic fixture repository and record every observation in [V1_ACCEPTANCE_SESSION.md](V1_ACCEPTANCE_SESSION.md). Use only synthetic code and data for release capture.
 
-Before publishing a stable release, complete every applicable publication gate in [PUBLIC_RELEASE_CHECKLIST.md](PUBLIC_RELEASE_CHECKLIST.md). The separate human acceptance matrix must also pass before creating its stable tag.
+Before publishing a release, complete [current provider boundary acceptance](PROVIDER_BOUNDARY_ACCEPTANCE.md) and rerun every applicable publication gate from [the historical release checklist](PUBLIC_RELEASE_CHECKLIST.md). Record fresh evidence against the new candidate; do not reuse historical PASS verdicts. The separate human acceptance matrix must also pass before creating a stable tag.

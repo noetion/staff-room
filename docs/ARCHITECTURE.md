@@ -69,4 +69,4 @@ No provider credential is stored by The Staff Room. Authentication remains owned
 
 ## Deliberate limits
 
-The public v1 does not claim a sandbox or complete descendant-process ownership for arbitrary verification commands, environment allowlisting, signed binaries, cross-platform support, or autonomous operation. Those gaps are not hidden behind a broad "experimental" label; the autonomous requirements are enumerated in [AUTONOMOUS_ACCEPTANCE_CONTRACT.md](AUTONOMOUS_ACCEPTANCE_CONTRACT.md).
+Current pre-1.0 development is experimental, with no supported stable binary. It does not claim a sandbox or complete descendant-process ownership for arbitrary verification commands, environment allowlisting, signed binaries, cross-platform support, or autonomous operation. The specific outstanding provider gates are recorded in [PROVIDER_BOUNDARY_ACCEPTANCE.md](PROVIDER_BOUNDARY_ACCEPTANCE.md), and the autonomous requirements are enumerated in [AUTONOMOUS_ACCEPTANCE_CONTRACT.md](AUTONOMOUS_ACCEPTANCE_CONTRACT.md).

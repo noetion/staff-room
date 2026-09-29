@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes target the latest published release. Older releases are not currently supported.
+The project is experimental and pre-1.0. Security fixes target the current development branch (`0.1.0`); there is no supported stable binary. Historical `v1.0.0` artifacts are not recommended for use and do not receive maintenance updates.
 
 ## Reporting a vulnerability
 
