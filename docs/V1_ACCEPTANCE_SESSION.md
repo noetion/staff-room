@@ -1,5 +1,7 @@
 # The Staff Room v1 — Manual Acceptance Session
 
+**Historical v1 procedure.** Current development is experimental and pre-1.0 (`0.1.0`), with no supported stable binary. Retain the fixture versions and original observations below; adapt any future acceptance run to the [current provider restrictions and native gates](PROVIDER_BOUNDARY_ACCEPTANCE.md), recording new results separately from historical evidence.
+
 Cost-ordered. Phase A spends no provider tokens at all. Phases B–D are ordered so
 that if something fails you stop before the expensive part.
 

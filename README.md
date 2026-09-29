@@ -2,6 +2,8 @@
 
 *A local-first Windows desktop staff room for your coding agents: they do the work, you decide what ships.*
 
+**Development status: experimental, pre-1.0 (`0.1.0`).** There is no supported stable binary yet. Build from source for evaluation using throwaway repositories. The earlier `v1.0.0` tag and acceptance records are historical; they do not establish the maturity or safety of the current application.
+
 **Application promotion gate:** Staff Room's Apply and Promote paths require review, native confirmation, and revalidated repository state. Git worktrees organize changes; they are not an operating-system containment boundary for installed provider executables.
 
 Provider CLIs remain trusted programs. Command compatibility is checked against recorded versions and bounded help probes, separately from sign-in and live connection tests. Codex retains its provider-managed filesystem sandbox route. Claude and Cursor are read-only in Staff Room; their Quick Edit and Ship writes are disabled. Antigravity execution is disabled pending an enforceable boundary contract. Filesystem restrictions do not establish network or exfiltration isolation. See [provider boundary acceptance](docs/PROVIDER_BOUNDARY_ACCEPTANCE.md) for the supported matrix and outstanding native checks.
@@ -80,12 +82,12 @@ The aggregate gate runs frontend tests and production build, design-token checks
 
 ## Release boundaries
 
-- The current release supports Windows; macOS and Linux are not currently supported.
+- Current development targets Windows; macOS and Linux are not currently supported.
 - Installed CLIs own model access and authentication.
 - No cloud speech service or speech API key.
 - No automatic Apply or Promote path.
 - No accepted autonomous mode until its evidence contract passes.
-- The installer is unsigned and Windows SmartScreen may warn.
-- The current release is `1.0.0`. Its human-gated Windows workflow passed the packaged-app and live-provider observations in the [public release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md). Autonomous Ship remains unavailable behind its separate evidence contract.
+- Local development installers are unsigned and Windows SmartScreen may warn.
+- `0.1.0` is the current development version, not an accepted release. The [earlier release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md) preserves historical observations; current native acceptance remains incomplete in [provider boundary acceptance](docs/PROVIDER_BOUNDARY_ACCEPTANCE.md). Autonomous Ship remains unavailable behind its separate evidence contract.
 
 The source is available under the [MIT License](LICENSE). Security reports should follow [SECURITY.md](SECURITY.md).

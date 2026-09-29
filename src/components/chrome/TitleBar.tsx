@@ -37,7 +37,7 @@ export function TitleBar({
   onToggleMaximize: () => void;
 }) {
   const status = native
-    ? autonomousShipEnabled ? "Autonomy armed" : "Local runtime"
+    ? autonomousShipEnabled ? "Autonomy armed" : "Experimental"
     : "Read-only preview";
 
   return (

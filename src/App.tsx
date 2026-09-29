@@ -836,7 +836,7 @@ export function App() {
           id: crypto.randomUUID(),
           kind: "status",
           sender: "system",
-          body: "Preview mode shows the v1 interface but never starts provider CLIs.",
+          body: "Preview mode shows the experimental interface but never starts provider CLIs.",
           reason: "Launch the Tauri desktop app to create a managed worktree and run human-gated Ship.",
           createdAt: new Date().toISOString(),
           runId: nextRun.id,

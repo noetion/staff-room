@@ -2,11 +2,11 @@
 
 The roadmap focuses on strengthening the human-gated workflow and documenting the evidence required for larger capabilities. It does not assign release dates.
 
-## Public v1.0
+## Experimental pre-1.0 development
 
-- Packaged Windows acceptance is complete for the applicable human-gated Ask, Quick Edit, Ship, migration, cancellation, recovery, and promotion flows.
-- The supported route matrix passed against the recorded Codex, Claude Code, Cursor Agent, and Antigravity versions.
-- Source, reproducible verification evidence, and the unsigned-installer caveat are published.
+- Current source and package version: `0.1.0`. No supported stable binary is available.
+- Complete current Windows installed-app and provider-boundary acceptance before recommending a release; see [the remaining gates](PROVIDER_BOUNDARY_ACCEPTANCE.md).
+- Preserve earlier `v1.0.0` observations as historical evidence. They do not qualify the current implementation or its restricted provider matrix as stable.
 
 ## Human-gated hardening
 
@@ -22,7 +22,7 @@ Autonomous Ship is planned as a separate tier and remains unavailable while any 
 
 The tier becomes available only when the full contract passes and returns to unavailable if a required control regresses.
 
-## Outside the current v1 scope
+## Outside the current development scope
 
 - macOS and Linux support, which require a separately verified custody model;
 - cloud speech or hosted transcript storage;

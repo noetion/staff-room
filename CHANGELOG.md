@@ -1,8 +1,14 @@
 # Changelog
 
-All notable changes to The Staff Room are recorded here. The project follows Semantic Versioning after the public `1.0.0` release.
+All notable changes to The Staff Room are recorded here. Current development is experimental and pre-1.0. The previous `1.0.0` designation overstated maturity; its tag and evidence are preserved below as historical records, not current release acceptance.
 
 ## [Unreleased]
+
+### Development status
+
+- Reset current package, native app, and installer metadata to `0.1.0`; there is no supported stable binary yet.
+- Mark current UI and documentation experimental, preserve historical release evidence, and retain the outstanding native provider-boundary acceptance gates.
+- Report the Cargo package version in Codex model-discovery initialization.
 
 ### Documentation
 
@@ -10,7 +16,7 @@ All notable changes to The Staff Room are recorded here. The project follows Sem
 - Clarified that the bundled `autonomous-ship` skill can only propose the human-gated Ship route and cannot enable autonomous promotion.
 - Moved the Phase A acceptance helper into `scripts/` and updated its documented command.
 
-## [1.0.0] - 2026-08-10
+## [1.0.0] - 2026-08-10 (historical)
 
 ### Added
 
@@ -27,7 +33,7 @@ All notable changes to The Staff Room are recorded here. The project follows Sem
 
 ### Release status
 
-The human-gated Windows v1 contract is accepted. Autonomous Ship remains locked and fail-closed under [its separate acceptance contract](docs/AUTONOMOUS_ACCEPTANCE_CONTRACT.md).
+The human-gated Windows v1 contract was recorded as accepted at the time. This historical verdict does not apply to current pre-1.0 development or establish provider containment. Autonomous Ship remains locked and fail-closed under [its separate acceptance contract](docs/AUTONOMOUS_ACCEPTANCE_CONTRACT.md).
 
 ## [1.0.0-rc.1] - 2026-08-08
 

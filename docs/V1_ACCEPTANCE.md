@@ -1,10 +1,10 @@
 # Human-gated v1 acceptance
 
-This is the historical v1 record. Current provider restrictions and outstanding native release gates are recorded in [provider boundary acceptance](PROVIDER_BOUNDARY_ACCEPTANCE.md); successful v1 turns did not establish absolute-path filesystem confinement.
+This is the historical v1 record, not current acceptance. Development is experimental and pre-1.0 (`0.1.0`), with no supported stable binary. Current provider restrictions and outstanding native release gates are recorded in [provider boundary acceptance](PROVIDER_BOUNDARY_ACCEPTANCE.md); successful v1 turns did not establish absolute-path filesystem confinement.
 
 **Scope:** Windows, personal-use, assisted operation
 
-**Status:** Accepted for the human-gated Windows v1.0 release
+**Historical status:** Recorded as accepted for the human-gated Windows v1.0 release; not a verdict on current development
 
 **Autonomy:** Not accepted and fail-closed
 **Voice:** Implemented; packaged microphone round trip requires a configured local whisper.cpp CLI and model
