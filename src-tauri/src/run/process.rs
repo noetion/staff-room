@@ -798,7 +798,7 @@ mod tests {
 
     async fn fake_probe(unix_script: &str, windows_script: &str) -> Result<String, String> {
         let (executable, args) = if cfg!(windows) {
-            ("powershell.exe", vec!["-NoProfile", "-Command", windows_script])
+            ("cmd.exe", vec!["/D", "/C", windows_script])
         } else {
             ("/bin/sh", vec!["-c", unix_script])
         };
@@ -808,24 +808,31 @@ mod tests {
     #[tokio::test]
     async fn probe_rejects_missing_executable_and_nonzero_exit() {
         assert!(bounded_provider_probe(Path::new("staff-room-no-such-cli"), &[], None).await.is_err());
-        assert!(fake_probe("printf 'logged in'; exit 1", "Write-Output 'logged in'; exit 1").await.is_err());
-        assert_eq!(fake_probe("printf 'codex-cli 0.144.4'", "Write-Output 'codex-cli 0.144.4'").await.unwrap(), "codex-cli 0.144.4");
-        assert_eq!(fake_probe("printf 'version'; printf 'warning' >&2", "[Console]::Out.Write('version'); [Console]::Error.Write('warning')").await.unwrap(), "version");
+        assert_eq!(fake_probe("printf 'logged in'; exit 1", "echo logged in& exit /b 1").await.unwrap_err(), "Probe exited unsuccessfully.");
+        assert_eq!(fake_probe("printf 'codex-cli 0.144.4'", "echo codex-cli 0.144.4").await.unwrap(), "codex-cli 0.144.4");
+        assert_eq!(fake_probe("printf 'version'; printf 'warning' >&2", "echo version& echo warning 1>&2").await.unwrap(), "version");
     }
 
     #[tokio::test]
     async fn probe_rejects_combined_output_over_budget() {
+        // Each pipe emits about 140 KiB, below the limit on its own. Use
+        // cmd builtins so cold PowerShell startup cannot consume the deadline.
+        let line = "x".repeat(100);
+        let windows_script = format!(
+            "for /L %i in (1,1,1400) do @(echo {line}& echo {line} 1>&2)"
+        );
         let result = fake_probe(
             "head -c 140000 /dev/zero; head -c 140000 /dev/zero >&2",
-            "[Console]::Out.Write('x' * 140000); [Console]::Error.Write('y' * 140000)",
+            &windows_script,
         ).await;
-        assert!(result.unwrap_err().contains("256 KiB"));
+        let error = result.unwrap_err();
+        assert!(error.contains("256 KiB"), "Expected combined output cap, got: {error}");
     }
 
     #[tokio::test]
     async fn stalled_probe_is_bounded() {
         let start = Instant::now();
-        let result = fake_probe("exec sleep 30", "Start-Sleep -Seconds 30").await;
+        let result = fake_probe("exec sleep 30", "ping -n 31 127.0.0.1 >nul").await;
         assert!(result.unwrap_err().contains("five seconds"));
         assert!(start.elapsed() < Duration::from_secs(10));
     }
